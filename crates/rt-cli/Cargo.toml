@@ -1,0 +1,24 @@
+[package]
+name = "rt-cli"
+version.workspace = true
+edition.workspace = true
+description = "Process lifecycle CLI: start, stop, doctor."
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "rt-cli"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+directories.workspace = true
+libc = "0.2"
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+ureq.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

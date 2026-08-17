@@ -1,0 +1,27 @@
+[package]
+name = "rt-gui"
+version.workspace = true
+edition.workspace = true
+description = "Thin desktop client for RustTraycer (eframe + egui)"
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "rt-gui"
+path = "src/main.rs"
+
+[dependencies]
+eframe.workspace = true
+egui.workspace = true
+rfd.workspace = true
+rt-protocol = { path = "../rt-protocol" }
+serde.workspace = true
+serde_json.workspace = true
+tungstenite = { version = "0.30.0", default-features = false, features = ["handshake"] }
+ureq = { version = "2", default-features = false, features = ["json"] }
+uuid.workspace = true

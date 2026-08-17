@@ -1,0 +1,10 @@
+[package]
+name = "rt-protocol"
+version.workspace = true
+edition.workspace = true
+description = "Wire types and RPC envelope (camelCase). No rusqlite, no axum."
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

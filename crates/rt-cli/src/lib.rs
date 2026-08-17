@@ -1,0 +1,625 @@
+//! Process lifecycle CLI. Outside view of the host: paths, pid.json, exec/stop.
+//!
+//! Does not open host.db, does not depend on rt-storage / rusqlite / rt-host.
+
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::{Duration, Instant};
+
+use serde::Serialize;
+use serde_json::{json, Value};
+
+pub const PROTOCOL_CRATE: &str = "0.1.0";
+const SESSION_HEADER: &str = "X-Rt-Session";
+const STOP_WAIT: Duration = Duration::from_secs(2);
+
+#[derive(Debug, thiserror::Error)]
+pub enum CliError {
+    #[error("already running (pid {pid})")]
+    AlreadyRunning { pid: u32, rpc_url: String },
+    #[error("rt-host binary not found")]
+    HostBinNotFound,
+    #[error("failed to exec {}: {source}", bin.display())]
+    ExecFailed {
+        bin: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("host pid {pid} did not exit after SIGTERM")]
+    StopTimeout { pid: u32 },
+    #[error("invalid pid.json: {0}")]
+    InvalidPidFile(String),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
+}
+
+impl CliError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::AlreadyRunning { .. } => "already_running",
+            Self::HostBinNotFound => "host_bin_not_found",
+            Self::ExecFailed { .. } => "exec_failed",
+            Self::StopTimeout { .. } => "stop_timeout",
+            Self::InvalidPidFile(_) => "invalid_pid_file",
+            Self::Io(_) | Self::Json(_) => "internal",
+        }
+    }
+
+    pub fn exit_code(&self) -> i32 {
+        match self {
+            Self::AlreadyRunning { .. } => 2,
+            _ => 1,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PidFile {
+    pub host_id: String,
+    pub pid: u32,
+    pub rpc_url: String,
+    pub ws_url: String,
+    pub started_at: String,
+    pub protocol_crate: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopOutcome {
+    NotRunning,
+    Stopped { pid: u32 },
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DoctorReport {
+    pub running: bool,
+    pub pid: Option<u32>,
+    pub host_id: Option<String>,
+    pub rpc_url: Option<String>,
+    pub data_dir: String,
+    pub db_path: String,
+    pub log_path: String,
+    pub pid_path: String,
+    pub host: Option<Value>,
+}
+
+/// Product home: `$RUSTTRAYCER_HOME` if set and nonempty, else `~/.rusttraycer`.
+pub fn resolve_product_home() -> PathBuf {
+    if let Ok(home) = std::env::var("RUSTTRAYCER_HOME") {
+        let home = home.trim();
+        if !home.is_empty() {
+            return PathBuf::from(home);
+        }
+    }
+    let base = directories::BaseDirs::new()
+        .map(|b| b.home_dir().to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+    base.join(".rusttraycer")
+}
+
+/// Host data (pid.json, host.db, host.log) lives in `<product_home>/host/`.
+pub fn resolve_data_dir() -> PathBuf {
+    resolve_product_home().join("host")
+}
+
+pub fn pid_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("pid.json")
+}
+
+pub fn db_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("host.db")
+}
+
+pub fn log_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("host.log")
+}
+
+pub fn is_pid_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    // Zombies still have a /proc/<pid> directory; they are not running.
+    let stat = match fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    // comm is in parentheses and may contain spaces; state follows the last ')'.
+    let state = stat
+        .rfind(')')
+        .and_then(|i| stat[i + 1..].split_whitespace().next());
+    match state {
+        Some("Z") | Some("X") | Some("x") => false,
+        Some(_) => true,
+        None => false,
+    }
+}
+
+pub fn read_pid_file(data_dir: &Path) -> Result<Option<PidFile>, CliError> {
+    let path = pid_path(data_dir);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let text = fs::read_to_string(&path)?;
+    let v: Value = serde_json::from_str(&text)?;
+    Ok(Some(pid_from_value(&v)?))
+}
+
+fn pid_from_value(v: &Value) -> Result<PidFile, CliError> {
+    let host_id = v
+        .get("hostId")
+        .and_then(|x| x.as_str())
+        .ok_or_else(|| CliError::InvalidPidFile("missing hostId".into()))?
+        .to_string();
+    let pid = v
+        .get("pid")
+        .and_then(|x| x.as_u64())
+        .ok_or_else(|| CliError::InvalidPidFile("missing pid".into()))? as u32;
+    let rpc_url = v
+        .get("rpcUrl")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    let ws_url = v
+        .get("wsUrl")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    let started_at = v
+        .get("startedAt")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    let protocol_crate = v
+        .get("protocol")
+        .and_then(|p| p.get("crate"))
+        .and_then(|x| x.as_str())
+        .unwrap_or(PROTOCOL_CRATE)
+        .to_string();
+    Ok(PidFile {
+        host_id,
+        pid,
+        rpc_url,
+        ws_url,
+        started_at,
+        protocol_crate,
+    })
+}
+
+/// Live foreign pid named by pid.json, if any.
+pub fn live_pid_file(data_dir: &Path) -> Result<Option<PidFile>, CliError> {
+    match read_pid_file(data_dir)? {
+        Some(info) if is_pid_alive(info.pid) => Ok(Some(info)),
+        _ => Ok(None),
+    }
+}
+
+/// Locate the rt-host binary (does not exec).
+pub fn resolve_host_bin() -> Result<PathBuf, CliError> {
+    if let Ok(p) = std::env::var("RUSTTRAYCER_HOST_BIN") {
+        let p = p.trim();
+        if !p.is_empty() {
+            return Ok(PathBuf::from(p));
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let sibling = dir.join("rt-host");
+            if sibling.is_file() {
+                return Ok(sibling);
+            }
+        }
+    }
+    if let Some(found) = search_path("rt-host") {
+        return Ok(found);
+    }
+    Err(CliError::HostBinNotFound)
+}
+
+fn search_path(name: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+        let cand = dir.join(name);
+        if cand.is_file() {
+            return Some(cand);
+        }
+    }
+    None
+}
+
+/// Already-running check + resolve host binary. Does not exec (safe for tests).
+pub fn prepare_start() -> Result<PathBuf, CliError> {
+    let data_dir = resolve_data_dir();
+    if let Some(info) = live_pid_file(&data_dir)? {
+        return Err(CliError::AlreadyRunning {
+            pid: info.pid,
+            rpc_url: info.rpc_url,
+        });
+    }
+    resolve_host_bin()
+}
+
+/// Replace the current process with `bin`. Never returns on success (Unix exec).
+#[cfg(unix)]
+pub fn exec_host(bin: &Path) -> Result<(), CliError> {
+    use std::os::unix::process::CommandExt;
+    let err = Command::new(bin).exec();
+    Err(CliError::ExecFailed {
+        bin: bin.to_path_buf(),
+        source: err,
+    })
+}
+
+#[cfg(not(unix))]
+pub fn exec_host(bin: &Path) -> Result<(), CliError> {
+    Err(CliError::ExecFailed {
+        bin: bin.to_path_buf(),
+        source: std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "exec_host is Unix-only",
+        ),
+    })
+}
+
+/// SIGTERM the pid in pid.json. Idempotent if not running. Does not remove pid.json.
+pub fn stop() -> Result<StopOutcome, CliError> {
+    let data_dir = resolve_data_dir();
+    let Some(info) = read_pid_file(&data_dir)? else {
+        return Ok(StopOutcome::NotRunning);
+    };
+    if !is_pid_alive(info.pid) {
+        return Ok(StopOutcome::NotRunning);
+    }
+    send_sigterm(info.pid)?;
+    if wait_until_dead(info.pid, STOP_WAIT) {
+        Ok(StopOutcome::Stopped { pid: info.pid })
+    } else {
+        Err(CliError::StopTimeout { pid: info.pid })
+    }
+}
+
+fn send_sigterm(pid: u32) -> Result<(), CliError> {
+    if pid == 0 || pid == 1 {
+        return Ok(());
+    }
+    let rc = unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+    if rc == 0 {
+        return Ok(());
+    }
+    let err = std::io::Error::last_os_error();
+    if err.raw_os_error() == Some(libc::ESRCH) {
+        Ok(())
+    } else {
+        Err(err.into())
+    }
+}
+
+fn wait_until_dead(pid: u32, timeout: Duration) -> bool {
+    let start = Instant::now();
+    loop {
+        if !is_pid_alive(pid) {
+            return true;
+        }
+        if start.elapsed() >= timeout {
+            return !is_pid_alive(pid);
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Outside view: paths + is pid alive. Never opens sqlite.
+/// If the host process is alive, optionally handshake + host.doctor over loopback RPC.
+pub fn doctor() -> Result<DoctorReport, CliError> {
+    let data_dir = resolve_data_dir();
+    let live = live_pid_file(&data_dir)?;
+    let running = live.is_some();
+    let host = if let Some(info) = live.as_ref() {
+        fetch_host_doctor(&info.rpc_url)
+    } else {
+        None
+    };
+    Ok(DoctorReport {
+        running,
+        pid: live.as_ref().map(|i| i.pid),
+        host_id: live.as_ref().map(|i| i.host_id.clone()),
+        rpc_url: live.as_ref().map(|i| i.rpc_url.clone()),
+        data_dir: data_dir.to_string_lossy().into_owned(),
+        db_path: db_path(&data_dir).to_string_lossy().into_owned(),
+        log_path: log_path(&data_dir).to_string_lossy().into_owned(),
+        pid_path: pid_path(&data_dir).to_string_lossy().into_owned(),
+        host,
+    })
+}
+
+fn is_loopback_rpc(url: &str) -> bool {
+    let u = url.trim();
+    let rest = if let Some(r) = u.strip_prefix("http://") {
+        r
+    } else {
+        return false;
+    };
+    let host = rest.split('/').next().unwrap_or(rest);
+    let host = host.rsplit_once('@').map(|(_, h)| h).unwrap_or(host);
+    let hostname = if host.starts_with('[') {
+        return false;
+    } else {
+        host.rsplit_once(':').map(|(h, _)| h).unwrap_or(host)
+    };
+    hostname == "127.0.0.1" || hostname.eq_ignore_ascii_case("localhost")
+}
+
+fn fetch_host_doctor(rpc_url: &str) -> Option<Value> {
+    if !is_loopback_rpc(rpc_url) {
+        return None;
+    }
+    let rpc = format!("{}/rpc", rpc_url.trim_end_matches('/'));
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_millis(400))
+        .timeout(Duration::from_secs(2))
+        .build();
+
+    let hs_body = json!({
+        "id": "cli-hs",
+        "method": "handshake",
+        "params": {
+            "client": "cli",
+            "clientVersion": PROTOCOL_CRATE,
+            "methods": {
+                "host.doctor": { "major": 1, "minor": 0 }
+            }
+        }
+    });
+    let hs = rpc_post(&agent, &rpc, None, &hs_body)?;
+    let ok = hs.get("ok")?;
+    if ok.get("accepted")
+        .and_then(|a| a.get("host.doctor"))
+        .is_none()
+    {
+        return None;
+    }
+    let token = ok.get("sessionToken")?.as_str()?;
+
+    let doc_body = json!({
+        "id": "cli-doc",
+        "method": "host.doctor",
+        "params": {}
+    });
+    let doc = rpc_post(&agent, &rpc, Some(token), &doc_body)?;
+    doc.get("ok").cloned()
+}
+
+fn rpc_post(agent: &ureq::Agent, url: &str, token: Option<&str>, body: &Value) -> Option<Value> {
+    let payload = serde_json::to_string(body).ok()?;
+    let mut req = agent
+        .post(url)
+        .set("Content-Type", "application/json")
+        .set("Accept", "application/json");
+    if let Some(t) = token {
+        req = req.set(SESSION_HEADER, t);
+    }
+    let resp = req.send_string(&payload).ok()?;
+    let text = resp.into_string().ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::{Mutex, MutexGuard};
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvGuard {
+        key: &'static str,
+        old: Option<std::ffi::OsString>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, val: impl AsRef<std::ffi::OsStr>) -> Self {
+            let old = std::env::var_os(key);
+            std::env::set_var(key, val);
+            Self { key, old }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.old {
+                Some(v) => std::env::set_var(self.key, v),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    fn lock_env() -> MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn write_pid(dir: &Path, pid: u32) {
+        fs::create_dir_all(dir).unwrap();
+        let json = json!({
+            "hostId": "test-host",
+            "pid": pid,
+            "rpcUrl": "http://127.0.0.1:9",
+            "wsUrl": "ws://127.0.0.1:9/ws",
+            "startedAt": "2026-01-01T00:00:00Z",
+            "protocol": { "crate": "0.1.0" },
+        });
+        fs::write(pid_path(dir), serde_json::to_vec_pretty(&json).unwrap()).unwrap();
+    }
+
+    fn dummy_bin(dir: &Path) -> PathBuf {
+        let p = dir.join("dummy-rt-host");
+        fs::write(&p, "#!/bin/sh\nexit 0\n").unwrap();
+        let mut perms = fs::metadata(&p).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&p, perms).unwrap();
+        p
+    }
+
+    #[test]
+    fn data_dir_uses_rusttraycer_home() {
+        let _lock = lock_env();
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = EnvGuard::set("RUSTTRAYCER_HOME", tmp.path());
+        assert_eq!(resolve_data_dir(), tmp.path().join("host"));
+        assert_eq!(resolve_product_home(), tmp.path());
+    }
+
+    #[test]
+    fn prepare_start_errors_already_running_for_live_pid() {
+        let _lock = lock_env();
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = EnvGuard::set("RUSTTRAYCER_HOME", tmp.path());
+        let _bin = EnvGuard::set("RUSTTRAYCER_HOST_BIN", dummy_bin(tmp.path()));
+        write_pid(&tmp.path().join("host"), std::process::id());
+
+        let err = prepare_start().unwrap_err();
+        assert_eq!(err.code(), "already_running");
+        assert_eq!(err.exit_code(), 2);
+        match err {
+            CliError::AlreadyRunning { pid, .. } => assert_eq!(pid, std::process::id()),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn prepare_start_ok_when_pid_missing_or_dead() {
+        let _lock = lock_env();
+        let tmp = tempfile::tempdir().unwrap();
+        let dummy = dummy_bin(tmp.path());
+        let _home = EnvGuard::set("RUSTTRAYCER_HOME", tmp.path());
+        let _bin = EnvGuard::set("RUSTTRAYCER_HOST_BIN", &dummy);
+
+        let got = prepare_start().unwrap();
+        assert_eq!(got, dummy);
+
+        write_pid(&tmp.path().join("host"), 999_999_999);
+        assert!(!is_pid_alive(999_999_999));
+        let got = prepare_start().unwrap();
+        assert_eq!(got, dummy);
+    }
+
+    #[test]
+    fn stop_is_idempotent_when_not_running() {
+        let _lock = lock_env();
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = EnvGuard::set("RUSTTRAYCER_HOME", tmp.path());
+
+        assert_eq!(stop().unwrap(), StopOutcome::NotRunning);
+
+        write_pid(&tmp.path().join("host"), 999_999_999);
+        assert_eq!(stop().unwrap(), StopOutcome::NotRunning);
+        // CLI must not remove pid.json itself.
+        assert!(pid_path(&tmp.path().join("host")).exists());
+    }
+
+    #[test]
+    fn start_stop_roundtrip_with_mock_host() {
+        let _lock = lock_env();
+        let tmp = tempfile::tempdir().unwrap();
+        let mock = tmp.path().join("mock-rt-host");
+        {
+            let mut f = fs::File::create(&mock).unwrap();
+            writeln!(
+                f,
+                r#"#!/bin/sh
+set -eu
+dir="$RUSTTRAYCER_HOME/host"
+mkdir -p "$dir"
+cat > "$dir/pid.json" <<EOF
+{{
+  "hostId": "mock-host",
+  "pid": $$,
+  "rpcUrl": "http://127.0.0.1:9",
+  "wsUrl": "ws://127.0.0.1:9/ws",
+  "startedAt": "2026-01-01T00:00:00Z",
+  "protocol": {{ "crate": "0.1.0" }}
+}}
+EOF
+trap 'exit 0' TERM INT
+while true; do
+  sleep 0.2
+done
+"#
+            )
+            .unwrap();
+        }
+        let mut perms = fs::metadata(&mock).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&mock, perms).unwrap();
+
+        let _home = EnvGuard::set("RUSTTRAYCER_HOME", tmp.path());
+        let _bin = EnvGuard::set("RUSTTRAYCER_HOST_BIN", &mock);
+
+        let bin = prepare_start().unwrap();
+        assert_eq!(bin, mock);
+
+        let mut child = Command::new(&bin)
+            .env("RUSTTRAYCER_HOME", tmp.path())
+            .spawn()
+            .unwrap();
+
+        let data = tmp.path().join("host");
+        let ppath = pid_path(&data);
+        let start = Instant::now();
+        while !ppath.exists() && start.elapsed() < Duration::from_secs(2) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(ppath.exists(), "mock host did not write pid.json");
+
+        let info = read_pid_file(&data).unwrap().expect("pid.json");
+        assert!(is_pid_alive(info.pid), "mock pid {} not alive", info.pid);
+        assert_eq!(info.host_id, "mock-host");
+
+        let outcome = stop().unwrap();
+        assert_eq!(outcome, StopOutcome::Stopped { pid: info.pid });
+        let _ = child.wait();
+        assert!(!is_pid_alive(info.pid), "mock still alive after stop");
+    }
+
+    #[test]
+    fn doctor_does_not_open_sqlite() {
+        let _lock = lock_env();
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = EnvGuard::set("RUSTTRAYCER_HOME", tmp.path());
+        // host.db is missing; doctor must still return paths + running=false.
+        assert!(!db_path(&tmp.path().join("host")).exists());
+
+        let report = doctor().unwrap();
+        assert!(!report.running);
+        assert!(report.pid.is_none());
+        assert!(report.host_id.is_none());
+        assert!(report.rpc_url.is_none());
+        assert!(report.host.is_none());
+        assert_eq!(
+            report.data_dir,
+            tmp.path().join("host").to_string_lossy()
+        );
+        assert_eq!(
+            report.db_path,
+            tmp.path().join("host").join("host.db").to_string_lossy()
+        );
+        assert_eq!(
+            report.log_path,
+            tmp.path().join("host").join("host.log").to_string_lossy()
+        );
+        assert_eq!(
+            report.pid_path,
+            tmp.path().join("host").join("pid.json").to_string_lossy()
+        );
+    }
+
+    #[test]
+    fn loopback_rpc_guard() {
+        assert!(is_loopback_rpc("http://127.0.0.1:1234"));
+        assert!(is_loopback_rpc("http://localhost:9"));
+        assert!(!is_loopback_rpc("http://10.0.0.1:1234"));
+        assert!(!is_loopback_rpc("https://127.0.0.1:1234"));
+        assert!(!is_loopback_rpc(""));
+    }
+}
