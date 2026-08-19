@@ -14,10 +14,12 @@ use crate::artifacts::{
     EXPORT_FORMAT, EXPORT_FORMAT_PDF, FILTER_ALL,
 };
 use crate::discovery::{self, DiscoverError};
+use crate::hooks::{self, HOOKS_SAVED};
 use crate::ladder::{
     self, AgentPolicy, PaneKind, PendingApproval, PolicyMode, SplitLayout, PICKER_EMPTY,
     PICKER_HINT,
 };
+use crate::metrics::{MetricsChip, METRICS_EMPTY};
 use crate::model_ux::{self, ModelParams, ModelPrefs, MODEL_UNAVAILABLE, PROFILE_NAME_BAD};
 use crate::pr_ux::{self, PrView, PR_NEED_WORKSPACE, PR_UNAVAILABLE};
 use crate::rpc::{
@@ -25,6 +27,7 @@ use crate::rpc::{
     GitStatusOk, PrefsItem, PresetItem, ProfileOk, SettingsGuide, WorkspaceGuides, Worktree,
 };
 use crate::search_ux::{self, SearchItem, GC_UNAVAILABLE, SEARCH_DEBOUNCE_MS, SEARCH_UNAVAILABLE};
+use crate::stash::{self, StashItem, STASH_UNAVAILABLE};
 use crate::sync_ux::{
     self, EXPORT_BUTTON, EXPORT_SAVED, IMPORT_BUTTON, NEED_TASK as SYNC_NEED_TASK,
     NEED_WORKSPACE as SYNC_NEED_WORKSPACE, SYNC_UNAVAILABLE,
@@ -389,6 +392,14 @@ pub struct AppState {
     pub pr_number: String,
     pub pr_url: String,
     pub pr_view: Option<PrView>,
+    pub metrics_chip: Option<MetricsChip>,
+    pub hooks_path: String,
+    pub hooks_draft: String,
+    pub hooks_loaded: bool,
+    pub stash_items: Vec<StashItem>,
+    pub stash_draft: String,
+    pub show_stash: bool,
+    pub agent_tab_order: Vec<String>,
     search_edited_at: Option<Instant>,
     last_search_q: Option<String>,
     pending_cancel: Option<String>,
@@ -531,6 +542,14 @@ impl AppState {
             pr_number: String::new(),
             pr_url: String::new(),
             pr_view: None,
+            metrics_chip: None,
+            hooks_path: String::new(),
+            hooks_draft: String::new(),
+            hooks_loaded: false,
+            stash_items: Vec::new(),
+            stash_draft: String::new(),
+            show_stash: false,
+            agent_tab_order: Vec::new(),
             search_edited_at: None,
             last_search_q: None,
             pending_cancel: None,
@@ -596,7 +615,10 @@ impl AppState {
             if due {
                 if let Some(session) = self.session.clone() {
                     match crate::rpc::keepalive(&session) {
-                        Ok(()) => self.last_rpc = Some(Instant::now()),
+                        Ok(()) => {
+                            self.last_rpc = Some(Instant::now());
+                            self.refresh_metrics();
+                        }
                         Err(err) => {
                             self.go_offline(Some(err.as_label()));
                         }
@@ -704,6 +726,7 @@ impl AppState {
                         self.refresh_sync_capability();
                         self.refresh_search_gc_capability();
                         self.refresh_accounts();
+                        self.refresh_metrics();
                         self.refresh_tasks_catalog();
                         if self.screen == Screen::Canvas {
                             self.refresh_canvas_after_reconnect();
@@ -745,6 +768,7 @@ impl AppState {
         }
         self.host_status = HostStatus::Offline;
         self.ws_banner = None;
+        self.metrics_chip = None;
         self.clear_host_catalog();
     }
 
@@ -4379,6 +4403,220 @@ impl AppState {
             Ok(guide) => self.apply_settings_guide(guide),
             Err(err) => self.surface_workspace_error(err),
         }
+    }
+
+    pub fn metrics_chip_value(&self) -> String {
+        match &self.metrics_chip {
+            Some(chip) => chip.short_value(),
+            None => METRICS_EMPTY.to_string(),
+        }
+    }
+
+    pub fn refresh_metrics(&mut self) {
+        if !self.is_online() {
+            self.metrics_chip = None;
+            return;
+        }
+        let Some(session) = self.session.clone() else {
+            self.metrics_chip = None;
+            return;
+        };
+        match session.fetch_metrics() {
+            Ok(chip) => self.metrics_chip = Some(chip),
+            Err(_) => self.metrics_chip = None,
+        }
+    }
+
+    pub fn ensure_hooks(&mut self) {
+        if self.hooks_loaded {
+            return;
+        }
+        self.load_hooks();
+    }
+
+    pub fn load_hooks(&mut self) {
+        self.hooks_path = hooks::default_hooks_path_display();
+        match hooks::load_hooks() {
+            Ok(text) => {
+                self.hooks_draft = text;
+                self.hooks_loaded = true;
+                if !self.hooks_draft.trim().is_empty() {
+                    if let Err(err) = hooks::validate_hooks_json(&self.hooks_draft) {
+                        self.toast = Some(err);
+                    }
+                }
+            }
+            Err(err) => {
+                self.hooks_draft = String::new();
+                self.hooks_loaded = true;
+                self.toast = Some(err);
+            }
+        }
+    }
+
+    pub fn save_hooks(&mut self) {
+        match hooks::save_hooks(&self.hooks_draft) {
+            Ok(()) => {
+                self.hooks_path = hooks::default_hooks_path_display();
+                self.hooks_loaded = true;
+                self.toast = Some(HOOKS_SAVED.into());
+            }
+            Err(err) => {
+                self.toast = Some(err);
+            }
+        }
+    }
+
+    pub fn stash_host_ok(&self) -> bool {
+        self.session
+            .as_ref()
+            .map(|s| s.stash_accepted() && !s.stash_rejected())
+            .unwrap_or(false)
+    }
+
+    fn surface_stash_unavailable(&mut self) {
+        self.toast = Some(STASH_UNAVAILABLE.into());
+    }
+
+    fn surface_stash_error(&mut self, err: crate::rpc::ConnectError) {
+        if err.is_stash_unsupported() {
+            self.surface_stash_unavailable();
+        } else {
+            self.toast = Some(err.as_label());
+        }
+    }
+
+    pub fn open_stash_palette(&mut self) {
+        self.show_stash = true;
+        self.refresh_stash();
+    }
+
+    pub fn close_stash_palette(&mut self) {
+        self.show_stash = false;
+    }
+
+    pub fn refresh_stash(&mut self) {
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        if !self.stash_host_ok() && session.stash_rejected() {
+            self.surface_stash_unavailable();
+            return;
+        }
+        match session.stash_list() {
+            Ok(items) => {
+                self.stash_items = items;
+                if self.toast.as_deref() == Some(STASH_UNAVAILABLE) {
+                    self.toast = None;
+                }
+            }
+            Err(err) => self.surface_stash_error(err),
+        }
+    }
+
+    pub fn add_composer_to_stash(&mut self) {
+        let body = if self.stash_draft.trim().is_empty() {
+            self.composer_text.clone()
+        } else {
+            self.stash_draft.clone()
+        };
+        self.add_stash_body(&body);
+    }
+
+    pub fn add_stash_body(&mut self, body: &str) {
+        if stash::stash_add_params(body, None).is_none() {
+            return;
+        }
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        if !self.stash_host_ok() && session.stash_rejected() {
+            self.surface_stash_unavailable();
+            return;
+        }
+        match session.stash_add(body, None) {
+            Ok(_) => {
+                self.stash_draft.clear();
+                self.refresh_stash();
+            }
+            Err(err) => self.surface_stash_error(err),
+        }
+    }
+
+    pub fn delete_stash(&mut self, id: &str) {
+        if stash::stash_delete_params(id).is_none() {
+            return;
+        }
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        if !self.stash_host_ok() && session.stash_rejected() {
+            self.surface_stash_unavailable();
+            return;
+        }
+        match session.stash_delete(id) {
+            Ok(()) => {
+                self.stash_items.retain(|item| item.id != id);
+            }
+            Err(err) => self.surface_stash_error(err),
+        }
+    }
+
+    pub fn apply_stash_to_composer(&mut self, id: &str) {
+        let Some(item) = self.stash_items.iter().find(|s| s.id == id).cloned() else {
+            return;
+        };
+        if self.composer_text.trim().is_empty() {
+            self.composer_text = item.body;
+        } else if self.composer_text.ends_with('\n') {
+            self.composer_text.push_str(&item.body);
+        } else {
+            self.composer_text.push('\n');
+            self.composer_text.push_str(&item.body);
+        }
+    }
+
+    pub fn ordered_agents_for_selected_task(&self) -> Vec<&AgentStub> {
+        let listed = self.agents_for_selected_task();
+        let mut out = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for id in &self.agent_tab_order {
+            if let Some(agent) = listed.iter().copied().find(|a| a.id == *id) {
+                out.push(agent);
+                seen.insert(id.as_str());
+            }
+        }
+        for agent in listed {
+            if !seen.contains(agent.id.as_str()) {
+                out.push(agent);
+            }
+        }
+        out
+    }
+
+    pub fn drop_agent_on_tile(&mut self, agent_id: &str, tile_id: &str) {
+        let agent_id = agent_id.trim();
+        let tile_id = tile_id.trim();
+        if agent_id.is_empty() || tile_id.is_empty() || agent_id == tile_id {
+            return;
+        }
+        let mut ids: Vec<String> = self
+            .ordered_agents_for_selected_task()
+            .into_iter()
+            .map(|a| a.id.clone())
+            .collect();
+        if !ids.iter().any(|id| id == agent_id) {
+            ids.push(agent_id.to_string());
+        }
+        let Some(from) = ids.iter().position(|id| id == agent_id) else {
+            return;
+        };
+        let Some(to) = ids.iter().position(|id| id == tile_id) else {
+            return;
+        };
+        let moved = ids.remove(from);
+        ids.insert(to, moved);
+        self.agent_tab_order = ids;
     }
 }
 
@@ -9364,5 +9602,199 @@ mod tests {
         assert!(hit.params.get("token").is_none());
         assert!(hit.params.get("pat").is_none());
         assert!(hit.params.get("secret").is_none());
+    }
+
+    fn session_without_stash() -> crate::rpc::Session {
+        use std::collections::BTreeMap;
+        let mut rejected = BTreeMap::new();
+        for name in crate::rpc::STASH_METHODS {
+            rejected.insert((*name).to_string(), "unsupported".into());
+        }
+        crate::rpc::Session {
+            host_id: "host-a".into(),
+            host_version: "0.1.0".into(),
+            session_token: "tok-1".into(),
+            rpc_url: "http://127.0.0.1:1".into(),
+            ws_url: None,
+            accepted: BTreeMap::new(),
+            rejected,
+        }
+    }
+
+    fn start_stash_state_mock() -> SliceMock {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(Mutex::new(Vec::new()));
+        let hits_t = hits.clone();
+        thread::spawn(move || {
+            for stream in listener.incoming().take(64) {
+                let Ok(mut stream) = stream else { break };
+                let (headers, body) = read_http_request(&mut stream);
+                let parsed: Value = serde_json::from_slice(&body).unwrap_or(json!({}));
+                let method = if headers.starts_with("GET /health") {
+                    "GET /health".to_string()
+                } else {
+                    parsed
+                        .get("method")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("other")
+                        .to_string()
+                };
+                let params = parsed.get("params").cloned().unwrap_or(json!({}));
+                hits_t.lock().unwrap().push(RpcHit {
+                    method: method.clone(),
+                    params: params.clone(),
+                });
+                let mut accepted = serde_json::Map::new();
+                for name in crate::rpc::STASH_METHODS {
+                    accepted.insert(name.to_string(), json!({"major": 1, "minor": 9}));
+                }
+                let body = match method.as_str() {
+                    "GET /health" => json!({"ok": true, "hostId": "host-a"}).to_string(),
+                    "handshake" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "hostId": "host-a",
+                            "hostVersion": "0.1.0",
+                            "sessionToken": "tok-1",
+                            "accepted": accepted,
+                            "rejected": {}
+                        }
+                    })
+                    .to_string(),
+                    "host.ping" => json!({
+                        "id": "echo",
+                        "ok": { "hostId": "host-a", "now": "2026-08-19T12:00:00Z" }
+                    })
+                    .to_string(),
+                    "stash.list" => json!({
+                        "id": "echo",
+                        "ok": { "items": [{ "id": "s1", "body": "draft" }] }
+                    })
+                    .to_string(),
+                    "stash.add" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "id": "s-new",
+                            "body": params.get("body").cloned().unwrap_or(json!(""))
+                        }
+                    })
+                    .to_string(),
+                    "stash.delete" => json!({
+                        "id": "echo",
+                        "ok": { "id": params.get("id").cloned().unwrap_or(json!("")) }
+                    })
+                    .to_string(),
+                    _ => json!({
+                        "id": "echo",
+                        "error": { "code": "unsupported_method", "message": "no" }
+                    })
+                    .to_string(),
+                };
+                write_http_json(&mut stream, &body);
+            }
+        });
+        SliceMock {
+            origin: format!("http://{addr}"),
+            hits,
+        }
+    }
+
+    #[test]
+    fn stash_add_list_delete_and_insert_composer() {
+        let mock = start_stash_state_mock();
+        let session = connect(&pid(&mock.origin)).expect("online");
+        let mut state = online_state(session);
+        state.messages.push(ChatMessage {
+            id: "keep-1".into(),
+            role: "user".into(),
+            content: "stay".into(),
+        });
+        assert!(state.stash_host_ok());
+        state.refresh_stash();
+        assert_eq!(state.stash_items.len(), 1);
+        assert_eq!(state.stash_items[0].body, "draft");
+        state.composer_text = "hello".into();
+        state.add_composer_to_stash();
+        state.apply_stash_to_composer("s1");
+        assert!(state.composer_text.contains("draft"));
+        state.delete_stash("s1");
+        let hits = mock.hits.lock().unwrap().clone();
+        let add = hits.iter().find(|h| h.method == "stash.add").expect("add");
+        assert_eq!(add.params["body"], "hello");
+        assert!(add.params.get("imagePath").is_none());
+        let del = hits
+            .iter()
+            .find(|h| h.method == "stash.delete")
+            .expect("delete");
+        assert_eq!(del.params["id"], "s1");
+        assert_eq!(state.messages.len(), 1);
+        assert_eq!(state.messages[0].id, "keep-1");
+    }
+
+    #[test]
+    fn old_host_stash_toasts_without_panic() {
+        let mut state = AppState::new();
+        state.pending_discover = false;
+        state.demo = false;
+        state.host_status = HostStatus::Online;
+        state.session = Some(session_without_stash());
+        state.selected_task_id = Some("task-1".into());
+        state.selected_agent_id = Some("ag-1".into());
+        state.agents.push(AgentStub {
+            id: "ag-1".into(),
+            task_id: "task-1".into(),
+            parent_id: None,
+            provider: "cli.generic".into(),
+            status: AgentStatus::Idle,
+            interface: "chat".into(),
+        });
+        state.messages.push(ChatMessage {
+            id: "keep-1".into(),
+            role: "user".into(),
+            content: "stay".into(),
+        });
+        state.composer_text = "hello".into();
+        assert!(!state.stash_host_ok());
+        state.add_composer_to_stash();
+        assert_eq!(state.toast.as_deref(), Some(STASH_UNAVAILABLE));
+        assert_eq!(STASH_UNAVAILABLE, "stash недоступен: host без 1.9");
+        let _ = state.composer_enabled();
+        let _ = state.write_ready();
+        let _ = state.search_host_ok();
+        let _ = state.steer_host_ok();
+        let _ = state.pr_host_ok();
+        assert_eq!(state.messages.len(), 1);
+        assert_eq!(state.composer_text, "hello");
+    }
+
+    #[test]
+    fn drop_agent_on_tile_reorders_tabs() {
+        let mut state = AppState::new();
+        state.pending_discover = false;
+        state.selected_task_id = Some("task-1".into());
+        for id in ["a", "b", "c"] {
+            state.agents.push(AgentStub {
+                id: id.into(),
+                task_id: "task-1".into(),
+                parent_id: None,
+                provider: "cli.generic".into(),
+                status: AgentStatus::Idle,
+                interface: "chat".into(),
+            });
+        }
+        let ids = |s: &AppState| {
+            s.ordered_agents_for_selected_task()
+                .into_iter()
+                .map(|a| a.id.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(&state), ["a", "b", "c"]);
+        state.drop_agent_on_tile("c", "a");
+        assert_eq!(ids(&state), ["c", "a", "b"]);
+        state.drop_agent_on_tile("a", "b");
+        assert_eq!(ids(&state), ["c", "b", "a"]);
+        state.drop_agent_on_tile("c", "c");
+        assert_eq!(ids(&state), ["c", "b", "a"]);
     }
 }

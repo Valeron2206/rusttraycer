@@ -30,6 +30,7 @@ use crate::pr_ux::{
 };
 use crate::rpc::HarnessCapsView;
 use crate::search_ux::{GC_BUTTON, GC_CONFIRM_BODY, GC_CONFIRM_OK, GC_CONFIRM_TITLE};
+use crate::stash::{STASH_ADD, STASH_OPEN};
 use crate::state::{AppState, FileKind, FilePreview};
 use crate::terminal::{
     self, AgentInterface, AgentView, AGENT_IS_CHAT, CHAT_TAB, CLOSE_TERMINAL, INTERFACE_LABEL,
@@ -40,6 +41,9 @@ use crate::workspace_ux::{
     self, agents_md_chip, guide_preview, role_label_ru, workspace_guide_chip, GUIDE_PANE,
     ROLE_CHOICES, ROLE_LABEL, WORKSPACE_UNAVAILABLE,
 };
+
+#[derive(Clone)]
+struct AgentDragPayload(String);
 
 pub fn show(ctx: &egui::Context, state: &mut AppState) {
     if state.selected_task_id.is_none() && state.open_task_ids.is_empty() && !state.has_workspace()
@@ -390,7 +394,7 @@ fn show_agents(ui: &mut egui::Ui, state: &mut AppState) {
     ui.add_space(6.0);
 
     let listed = state
-        .agents_for_selected_task()
+        .ordered_agents_for_selected_task()
         .into_iter()
         .cloned()
         .collect::<Vec<_>>();
@@ -448,9 +452,11 @@ fn show_agents(ui: &mut egui::Ui, state: &mut AppState) {
                         ui.weak(&agent.id);
                         ui.weak("нажмите, чтобы выбрать");
                     });
-                if resp.response.interact(egui::Sense::click()).clicked() {
+                let click = resp.response.interact(egui::Sense::click_and_drag());
+                if click.clicked() {
                     *pick = Some(agent.id.clone());
                 }
+                click.dnd_set_drag_payload(AgentDragPayload(agent.id.clone()));
             });
             for child in &node.children {
                 paint(ui, agents, child, selected, live_ids, pick, depth + 1);
@@ -1313,6 +1319,8 @@ fn show_interface_picker(ui: &mut egui::Ui, state: &mut AppState) {
 }
 
 fn show_agent_panel(ui: &mut egui::Ui, state: &mut AppState) {
+    show_agent_tiles(ui, state);
+    ui.add_space(4.0);
     ui.horizontal(|ui| {
         let view = state.agent_view;
         if ui
@@ -1533,6 +1541,12 @@ fn show_chat(ui: &mut egui::Ui, state: &mut AppState) {
                 state.request_clear_transcript();
             }
         });
+        if ui.button(STASH_OPEN).clicked() {
+            state.open_stash_palette();
+        }
+        if ui.button(STASH_ADD).clicked() {
+            state.add_composer_to_stash();
+        }
         ui.weak("один активный turn · очередь не строится");
         if running && can_type {
             ui.weak(STEER_HINT);
@@ -1954,5 +1968,106 @@ fn show_comments(ui: &mut egui::Ui, state: &mut AppState) {
                 }
             });
         ui.add_space(4.0);
+    }
+}
+
+fn show_agent_tiles(ui: &mut egui::Ui, state: &mut AppState) {
+    let tiles: Vec<(String, String)> = state
+        .ordered_agents_for_selected_task()
+        .into_iter()
+        .map(|a| (a.id.clone(), a.provider.clone()))
+        .collect();
+    if tiles.is_empty() {
+        return;
+    }
+    let selected = state.selected_agent().map(|a| a.id.clone());
+    let mut pick = None;
+    let mut drop = None;
+    ui.horizontal(|ui| {
+        ui.weak("плитки");
+        for (id, provider) in &tiles {
+            let is_sel = selected.as_deref() == Some(id.as_str());
+            let resp = ui.selectable_label(is_sel, provider);
+            resp.dnd_set_drag_payload(AgentDragPayload(id.clone()));
+            if resp.clicked() {
+                pick = Some(id.clone());
+            }
+            if let Some(payload) = resp.dnd_hover_payload::<AgentDragPayload>() {
+                if payload.0 != *id {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                }
+            }
+            if let Some(payload) = resp.dnd_release_payload::<AgentDragPayload>() {
+                drop = Some((payload.0.clone(), id.clone()));
+            }
+        }
+    });
+    if let Some(id) = pick {
+        state.select_agent(id);
+    }
+    if let Some((agent_id, tile_id)) = drop {
+        state.drop_agent_on_tile(&agent_id, &tile_id);
+    }
+}
+
+pub fn show_stash_palette(ctx: &egui::Context, state: &mut AppState) {
+    if !state.show_stash {
+        return;
+    }
+    let mut open = true;
+    let mut apply = None;
+    let mut delete = None;
+    egui::Window::new(crate::stash::STASH_TITLE)
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(true)
+        .default_width(360.0)
+        .anchor(egui::Align2::RIGHT_TOP, [-24.0, 72.0])
+        .show(ctx, |ui| {
+            ui.heading(crate::stash::STASH_HEADING);
+            if state.can_rpc() && !state.stash_host_ok() {
+                ui.weak(crate::stash::STASH_UNAVAILABLE);
+            }
+            ui.add(
+                egui::TextEdit::multiline(&mut state.stash_draft)
+                    .desired_width(ui.available_width())
+                    .desired_rows(3)
+                    .hint_text(crate::stash::STASH_HINT),
+            );
+            ui.horizontal(|ui| {
+                if ui.button(STASH_ADD).clicked() {
+                    state.add_composer_to_stash();
+                }
+            });
+            ui.separator();
+            if state.stash_items.is_empty() {
+                ui.weak(crate::stash::STASH_EMPTY);
+            } else {
+                for item in &state.stash_items {
+                    let preview = if item.body.chars().count() > 48 {
+                        let cut: String = item.body.chars().take(48).collect();
+                        format!("{cut}…")
+                    } else {
+                        item.body.clone()
+                    };
+                    ui.horizontal(|ui| {
+                        if ui.selectable_label(false, preview).clicked() {
+                            apply = Some(item.id.clone());
+                        }
+                        if ui.small_button(crate::stash::STASH_DELETE).clicked() {
+                            delete = Some(item.id.clone());
+                        }
+                    });
+                }
+            }
+        });
+    if let Some(id) = apply {
+        state.apply_stash_to_composer(&id);
+    }
+    if let Some(id) = delete {
+        state.delete_stash(&id);
+    }
+    if !open {
+        state.close_stash_palette();
     }
 }

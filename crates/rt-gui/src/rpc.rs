@@ -143,6 +143,12 @@ pub const METHOD_PR_GET: &str = "pr.get";
 
 pub const PR_METHODS: &[&str] = &[METHOD_PR_GET];
 
+pub const METHOD_STASH_LIST: &str = "stash.list";
+pub const METHOD_STASH_ADD: &str = "stash.add";
+pub const METHOD_STASH_DELETE: &str = "stash.delete";
+
+pub const STASH_METHODS: &[&str] = &[METHOD_STASH_LIST, METHOD_STASH_ADD, METHOD_STASH_DELETE];
+
 #[derive(Debug, Clone)]
 pub struct Session {
     pub host_id: String,
@@ -239,6 +245,10 @@ impl ConnectError {
     }
 
     pub fn is_pr_unsupported(&self) -> bool {
+        self.is_unsupported_method() || self.is_version_mismatch()
+    }
+
+    pub fn is_stash_unsupported(&self) -> bool {
         self.is_unsupported_method() || self.is_version_mismatch()
     }
 
@@ -368,6 +378,9 @@ fn hello_methods() -> Value {
         map.insert(name.to_string(), json!({ "major": 1, "minor": 9 }));
     }
     for name in PR_METHODS {
+        map.insert(name.to_string(), json!({ "major": 1, "minor": 9 }));
+    }
+    for name in STASH_METHODS {
         map.insert(name.to_string(), json!({ "major": 1, "minor": 9 }));
     }
     Value::Object(map)
@@ -1601,6 +1614,72 @@ impl Session {
         let ok = self.call(METHOD_PR_GET, params)?;
         Ok(crate::pr_ux::parse_pr_get(&ok))
     }
+
+    pub fn stash_accepted(&self) -> bool {
+        STASH_METHODS.iter().all(|name| {
+            self.accepted
+                .get(*name)
+                .map(|v| v.major == 1 && v.minor >= 9)
+                .unwrap_or(false)
+        })
+    }
+
+    pub fn stash_rejected(&self) -> bool {
+        STASH_METHODS
+            .iter()
+            .any(|name| self.rejected.contains_key(*name))
+    }
+
+    pub fn stash_list(&self) -> Result<Vec<crate::stash::StashItem>, ConnectError> {
+        let ok = self.call(METHOD_STASH_LIST, crate::stash::stash_list_params())?;
+        Ok(crate::stash::parse_stash_list(&ok))
+    }
+
+    pub fn stash_add(
+        &self,
+        body: &str,
+        image_path: Option<&str>,
+    ) -> Result<crate::stash::StashItem, ConnectError> {
+        let Some(params) = crate::stash::stash_add_params(body, image_path) else {
+            return Ok(crate::stash::StashItem::default());
+        };
+        let ok = self.call(METHOD_STASH_ADD, params)?;
+        let mut item = crate::stash::parse_stash_item(&ok);
+        if item.body.is_empty() {
+            item.body = body.trim().to_string();
+        }
+        Ok(item)
+    }
+
+    pub fn stash_delete(&self, id: &str) -> Result<(), ConnectError> {
+        let Some(params) = crate::stash::stash_delete_params(id) else {
+            return Ok(());
+        };
+        let _ = self.call(METHOD_STASH_DELETE, params)?;
+        Ok(())
+    }
+
+    pub fn fetch_metrics(&self) -> Result<crate::metrics::MetricsChip, ConnectError> {
+        fetch_metrics(&self.rpc_url)
+    }
+}
+
+/// `GET /metrics` on the same origin as health/RPC. Offline callers must not invoke this.
+pub fn fetch_metrics(origin: &str) -> Result<crate::metrics::MetricsChip, ConnectError> {
+    let origin = rpc_origin(origin);
+    if origin.is_empty() {
+        return Err(ConnectError::Transport("пустой rpcUrl".into()));
+    }
+    let url = format!("{}{}", origin, crate::metrics::METRICS_PATH);
+    let http = agent();
+    let resp = http
+        .get(&url)
+        .call()
+        .map_err(|err| ConnectError::Transport(err.to_string()))?;
+    let body = resp
+        .into_string()
+        .map_err(|err| ConnectError::Transport(err.to_string()))?;
+    Ok(crate::metrics::parse_metrics(&body))
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -5564,5 +5643,195 @@ mod tests {
             .iter()
             .filter(|h| h.method == "pr.get")
             .all(|h| h.has_session));
+    }
+
+    fn start_metrics_http_mock(body: &str, status: u16) -> (String, Arc<Mutex<Vec<String>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(Mutex::new(Vec::new()));
+        let hits_t = hits.clone();
+        let body = body.to_string();
+        thread::spawn(move || {
+            for stream in listener.incoming().take(8) {
+                let Ok(mut stream) = stream else { break };
+                let (headers, _) = read_http_request(&mut stream);
+                let first = headers.lines().next().unwrap_or("").to_string();
+                hits_t.lock().unwrap().push(first);
+                let reason = if status == 200 { "OK" } else { "ERR" };
+                let resp = format!(
+                    "HTTP/1.1 {status} {reason}\r\nContent-Type: text/plain; version=0.0.4\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = std::io::Write::write_all(&mut stream, resp.as_bytes());
+            }
+        });
+        (format!("http://{addr}"), hits)
+    }
+
+    fn start_stash_rpc_mock() -> CatalogMock {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(Mutex::new(Vec::new()));
+        let hits_t = hits.clone();
+        thread::spawn(move || {
+            for stream in listener.incoming().take(32) {
+                let Ok(mut stream) = stream else { break };
+                let (headers, body) = read_http_request(&mut stream);
+                let has_session = headers.to_ascii_lowercase().contains("x-rt-session:");
+                let (method, params) = if headers.starts_with("GET /health") {
+                    ("GET /health".to_string(), json!({}))
+                } else {
+                    let parsed: Value = serde_json::from_slice(&body).unwrap_or(json!({}));
+                    (
+                        parsed
+                            .get("method")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("other")
+                            .to_string(),
+                        parsed.get("params").cloned().unwrap_or(json!({})),
+                    )
+                };
+                hits_t.lock().unwrap().push(RpcHit {
+                    method: method.clone(),
+                    params: params.clone(),
+                    has_session,
+                });
+                let body = match method.as_str() {
+                    "GET /health" => json!({"ok": true, "hostId": "host-a"}).to_string(),
+                    "handshake" => {
+                        let mut accepted = serde_json::Map::new();
+                        for name in STASH_METHODS {
+                            accepted.insert(name.to_string(), json!({"major": 1, "minor": 9}));
+                        }
+                        json!({
+                            "id": "echo",
+                            "ok": {
+                                "hostId": "host-a",
+                                "hostVersion": "0.1.0",
+                                "sessionToken": "tok-1",
+                                "accepted": accepted,
+                                "rejected": {}
+                            }
+                        })
+                        .to_string()
+                    }
+                    "host.ping" => json!({
+                        "id": "echo",
+                        "ok": { "hostId": "host-a", "now": "2026-08-19T12:00:00Z" }
+                    })
+                    .to_string(),
+                    "stash.list" => json!({
+                        "id": "echo",
+                        "ok": { "items": [{ "id": "s1", "body": "draft" }] }
+                    })
+                    .to_string(),
+                    "stash.add" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "id": "s-new",
+                            "body": params.get("body").cloned().unwrap_or(json!(""))
+                        }
+                    })
+                    .to_string(),
+                    "stash.delete" => json!({
+                        "id": "echo",
+                        "ok": { "id": params.get("id").cloned().unwrap_or(json!("")) }
+                    })
+                    .to_string(),
+                    _ => json!({
+                        "id": "echo",
+                        "error": { "code": "unsupported_method", "message": "no" }
+                    })
+                    .to_string(),
+                };
+                write_http_json(&mut stream, &body);
+            }
+        });
+        CatalogMock {
+            origin: format!("http://{addr}"),
+            hits,
+        }
+    }
+
+    #[test]
+    fn handshake_advertises_stash_1_9_and_keeps_1_8() {
+        let mock = start_catalog_mock("host-a", "tok-1");
+        let _session = connect(&pid("host-a", &mock.origin)).expect("online");
+        let hs = mock
+            .hits
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|h| h.method == "handshake")
+            .cloned()
+            .expect("handshake");
+        for name in STASH_METHODS {
+            assert_eq!(hs.params["methods"][name]["major"], 1, "{name}");
+            assert_eq!(hs.params["methods"][name]["minor"], 9, "{name}");
+        }
+        assert_eq!(hs.params["methods"]["stash.list"]["minor"], 9);
+        assert_eq!(hs.params["methods"]["stash.add"]["minor"], 9);
+        assert_eq!(hs.params["methods"]["stash.delete"]["minor"], 9);
+        assert_eq!(hs.params["methods"]["sync.export"]["minor"], 8);
+        assert_eq!(hs.params["methods"]["sync.import"]["minor"], 8);
+        assert_eq!(hs.params["methods"]["search.query"]["minor"], 9);
+        assert_eq!(hs.params["methods"]["pr.get"]["minor"], 9);
+        assert!(hs.params["methods"].get("metrics").is_none());
+        assert_eq!(hs.params["client"], "gui");
+    }
+
+    #[test]
+    fn stash_add_list_delete_shapes() {
+        let mock = start_stash_rpc_mock();
+        let session = connect(&pid("host-a", &mock.origin)).expect("online");
+        assert!(session.stash_accepted());
+        let items = session.stash_list().expect("list");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, "s1");
+        assert_eq!(items[0].body, "draft");
+        let added = session.stash_add("hello", None).expect("add");
+        assert_eq!(added.id, "s-new");
+        assert_eq!(added.body, "hello");
+        session.stash_delete("s1").expect("delete");
+        let empty = session.stash_add("   ", None).expect("empty");
+        assert!(empty.id.is_empty());
+        let hits = mock.hits.lock().unwrap().clone();
+        let adds: Vec<Value> = hits
+            .iter()
+            .filter(|h| h.method == "stash.add")
+            .map(|h| h.params.clone())
+            .collect();
+        assert_eq!(adds.len(), 1);
+        assert_eq!(adds[0]["body"], "hello");
+        assert!(adds[0].get("imagePath").is_none());
+        let deletes: Vec<Value> = hits
+            .iter()
+            .filter(|h| h.method == "stash.delete")
+            .map(|h| h.params.clone())
+            .collect();
+        assert_eq!(deletes, vec![json!({ "id": "s1" })]);
+        assert!(hits
+            .iter()
+            .filter(|h| h.method.starts_with("stash."))
+            .all(|h| h.has_session));
+    }
+
+    #[test]
+    fn metrics_get_uses_metrics_path_and_failure_does_not_panic() {
+        let prom = "# TYPE rusttraycer_agents gauge\nrusttraycer_agents{status=\"idle\"} 2\n";
+        let (origin, hits) = start_metrics_http_mock(prom, 200);
+        let chip = fetch_metrics(&origin).expect("metrics");
+        assert_eq!(chip.agents, Some(2));
+        let first = hits.lock().unwrap()[0].clone();
+        assert!(
+            first.starts_with("GET /metrics"),
+            "expected GET /metrics, got {first}"
+        );
+        let err = fetch_metrics("http://127.0.0.1:1");
+        assert!(err.is_err());
+        match err {
+            Err(ConnectError::Transport(_)) | Err(ConnectError::Health(_)) => {}
+            other => panic!("expected transport, got {other:?}"),
+        }
     }
 }

@@ -1,4 +1,5 @@
 use crate::discovery;
+use crate::hooks::{HOOKS_HINT, HOOKS_LABEL, HOOKS_SAVE};
 use crate::state::AppState;
 use crate::sync_ux::{
     EXPORT_BUTTON, IMPORT_BUTTON, IMPORT_CONFIRM_BODY, IMPORT_CONFIRM_OK, IMPORT_CONFIRM_TITLE,
@@ -200,6 +201,23 @@ pub fn show_body(ui: &mut egui::Ui, state: &mut AppState) {
             state.save_settings_guide();
         }
     });
+    ui.add_space(16.0);
+    ui.separator();
+    ui.add_space(8.0);
+    ui.heading(HOOKS_LABEL);
+    state.ensure_hooks();
+    if !state.hooks_path.is_empty() {
+        ui.weak(&state.hooks_path);
+    }
+    ui.add(
+        egui::TextEdit::multiline(&mut state.hooks_draft)
+            .desired_width(ui.available_width())
+            .desired_rows(8)
+            .hint_text(HOOKS_HINT),
+    );
+    if ui.button(HOOKS_SAVE).clicked() {
+        state.save_hooks();
+    }
     ui.add_space(16.0);
     ui.separator();
     ui.add_space(8.0);

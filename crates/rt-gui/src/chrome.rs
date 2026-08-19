@@ -1,4 +1,5 @@
 use crate::ladder::YOLO_BANNER;
+use crate::metrics::METRICS_LABEL;
 use crate::search_ux::{SEARCH_HINT, SEARCH_LABEL};
 use crate::state::{AppState, HostStatus, Screen};
 
@@ -44,6 +45,7 @@ pub fn show(ctx: &egui::Context, state: &mut AppState) {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.add_space(10.0);
                     status_pill(ui, state.host_status);
+                    metrics_chip(ui, state);
                 });
             });
         });
@@ -136,6 +138,21 @@ fn status_pill(ui: &mut egui::Ui, status: HostStatus) {
                 let (rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
                 ui.painter().circle_filled(rect.center(), 4.0, dot);
                 ui.colored_label(fg, status.label_ru());
+            });
+        });
+}
+
+fn metrics_chip(ui: &mut egui::Ui, state: &crate::state::AppState) {
+    let value = state.metrics_chip_value();
+    let bg = egui::Color32::from_rgb(28, 32, 42);
+    let fg = egui::Color32::from_rgb(180, 196, 220);
+    egui::Frame::new()
+        .fill(bg)
+        .corner_radius(12.0)
+        .inner_margin(egui::Margin::symmetric(10, 4))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.colored_label(fg, format!("{METRICS_LABEL} {value}"));
             });
         });
 }
