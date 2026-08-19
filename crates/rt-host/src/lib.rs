@@ -2,6 +2,7 @@
 
 pub mod bind;
 pub mod files;
+pub mod guides;
 pub mod handshake;
 pub mod mux;
 pub mod pty;

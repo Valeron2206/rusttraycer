@@ -14,6 +14,7 @@ const MIGRATION_0004: &str = include_str!("../migrations/0004_terminal.sql");
 const MIGRATION_0005: &str = include_str!("../migrations/0005_artifacts.sql");
 const MIGRATION_0006: &str = include_str!("../migrations/0006_loops.sql");
 const MIGRATION_0007: &str = include_str!("../migrations/0007_model_ux.sql");
+const MIGRATION_0008: &str = include_str!("../migrations/0008_workspace.sql");
 
 /// RFC3339 UTC timestamp (millis, Z suffix).
 pub fn now_rfc3339() -> String {
@@ -113,6 +114,8 @@ pub struct Task {
     pub created_at: String,
     pub updated_at: String,
     pub workspace_ids: Vec<String>,
+    #[serde(default)]
+    pub preset: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -219,13 +222,26 @@ pub struct Agent {
     pub model: Option<String>,
     pub effort: Option<String>,
     pub fast: bool,
+    pub role: String,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct AgentModelSpec {
     pub model: Option<String>,
     pub effort: Option<String>,
     pub fast: bool,
+    pub role: String,
+}
+
+impl Default for AgentModelSpec {
+    fn default() -> Self {
+        Self {
+            model: None,
+            effort: None,
+            fast: false,
+            role: "coder".into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -471,6 +487,7 @@ impl Store {
                 conn.execute_batch(MIGRATION_0005)?;
                 conn.execute_batch(MIGRATION_0006)?;
                 conn.execute_batch(MIGRATION_0007)?;
+                conn.execute_batch(MIGRATION_0008)?;
                 Ok(())
             }
             Some("2") => {
@@ -479,6 +496,7 @@ impl Store {
                 conn.execute_batch(MIGRATION_0005)?;
                 conn.execute_batch(MIGRATION_0006)?;
                 conn.execute_batch(MIGRATION_0007)?;
+                conn.execute_batch(MIGRATION_0008)?;
                 Ok(())
             }
             Some("3") => {
@@ -486,24 +504,32 @@ impl Store {
                 conn.execute_batch(MIGRATION_0005)?;
                 conn.execute_batch(MIGRATION_0006)?;
                 conn.execute_batch(MIGRATION_0007)?;
+                conn.execute_batch(MIGRATION_0008)?;
                 Ok(())
             }
             Some("4") => {
                 conn.execute_batch(MIGRATION_0005)?;
                 conn.execute_batch(MIGRATION_0006)?;
                 conn.execute_batch(MIGRATION_0007)?;
+                conn.execute_batch(MIGRATION_0008)?;
                 Ok(())
             }
             Some("5") => {
                 conn.execute_batch(MIGRATION_0006)?;
                 conn.execute_batch(MIGRATION_0007)?;
+                conn.execute_batch(MIGRATION_0008)?;
                 Ok(())
             }
             Some("6") => {
                 conn.execute_batch(MIGRATION_0007)?;
+                conn.execute_batch(MIGRATION_0008)?;
                 Ok(())
             }
-            Some("7") => Ok(()),
+            Some("7") => {
+                conn.execute_batch(MIGRATION_0008)?;
+                Ok(())
+            }
+            Some("8") => Ok(()),
             Some(other) => Err(StorageError::UnsupportedSchema(other.to_string())),
             None => {
                 conn.execute_batch(MIGRATION_0001)?;
@@ -513,6 +539,7 @@ impl Store {
                 conn.execute_batch(MIGRATION_0005)?;
                 conn.execute_batch(MIGRATION_0006)?;
                 conn.execute_batch(MIGRATION_0007)?;
+                conn.execute_batch(MIGRATION_0008)?;
                 Ok(())
             }
         }
@@ -612,6 +639,7 @@ impl Store {
         status: String,
         created_at: String,
         updated_at: String,
+        preset: Option<String>,
     ) -> Result<Task> {
         let workspace_ids = Self::task_workspace_ids(conn, &id)?;
         Ok(Task {
@@ -621,6 +649,7 @@ impl Store {
             created_at,
             updated_at,
             workspace_ids,
+            preset,
         })
     }
 
@@ -628,31 +657,47 @@ impl Store {
         let conn = self.lock()?;
         let sql = match filter {
             TaskFilter::Open => {
-                "SELECT id, title, status, created_at, updated_at FROM tasks WHERE status = 'open' ORDER BY updated_at DESC, id DESC"
+                "SELECT id, title, status, created_at, updated_at, preset FROM tasks WHERE status = 'open' ORDER BY updated_at DESC, id DESC"
             }
             TaskFilter::Archived => {
-                "SELECT id, title, status, created_at, updated_at FROM tasks WHERE status = 'archived' ORDER BY updated_at DESC, id DESC"
+                "SELECT id, title, status, created_at, updated_at, preset FROM tasks WHERE status = 'archived' ORDER BY updated_at DESC, id DESC"
             }
             TaskFilter::All => {
-                "SELECT id, title, status, created_at, updated_at FROM tasks ORDER BY updated_at DESC, id DESC"
+                "SELECT id, title, status, created_at, updated_at, preset FROM tasks ORDER BY updated_at DESC, id DESC"
             }
         };
         let mut stmt = conn.prepare(sql)?;
-        let raw: Vec<(String, String, String, String, String)> = stmt
+        let raw: Vec<(String, String, String, String, String, Option<String>)> = stmt
             .query_map([], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         let mut out = Vec::with_capacity(raw.len());
-        for (id, title, status, created_at, updated_at) in raw {
+        for (id, title, status, created_at, updated_at, preset) in raw {
             out.push(Self::row_to_task(
-                &conn, id, title, status, created_at, updated_at,
+                &conn, id, title, status, created_at, updated_at, preset,
             )?);
         }
         Ok(out)
     }
 
     pub fn task_create(&self, title: &str, workspace_id: &str) -> Result<Task> {
+        self.task_create_ex(title, workspace_id, None)
+    }
+
+    pub fn task_create_ex(
+        &self,
+        title: &str,
+        workspace_id: &str,
+        preset: Option<&str>,
+    ) -> Result<Task> {
         let id = new_id();
         let now = now_rfc3339();
         {
@@ -669,8 +714,8 @@ impl Store {
                 return Err(StorageError::NotFound);
             }
             tx.execute(
-                "INSERT INTO tasks (id, title, status, created_at, updated_at) VALUES (?1, ?2, 'open', ?3, ?3)",
-                params![id, title, now],
+                "INSERT INTO tasks (id, title, status, created_at, updated_at, preset) VALUES (?1, ?2, 'open', ?3, ?3, ?4)",
+                params![id, title, now, preset],
             )?;
             tx.execute(
                 "INSERT INTO task_workspaces (task_id, workspace_id) VALUES (?1, ?2)",
@@ -685,23 +730,33 @@ impl Store {
             created_at: now.clone(),
             updated_at: now,
             workspace_ids: vec![workspace_id.to_string()],
+            preset: preset.map(str::to_string),
         })
     }
 
     pub fn task_get(&self, id: &str) -> Result<Option<Task>> {
         let conn = self.lock()?;
-        let row: Option<(String, String, String, String, String)> = conn
+        let row: Option<(String, String, String, String, String, Option<String>)> = conn
             .query_row(
-                "SELECT id, title, status, created_at, updated_at FROM tasks WHERE id = ?1",
+                "SELECT id, title, status, created_at, updated_at, preset FROM tasks WHERE id = ?1",
                 [id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                    ))
+                },
             )
             .optional()?;
         match row {
             None => Ok(None),
-            Some((id, title, status, created_at, updated_at)) => Ok(Some(Self::row_to_task(
-                &conn, id, title, status, created_at, updated_at,
-            )?)),
+            Some((id, title, status, created_at, updated_at, preset)) => Ok(Some(
+                Self::row_to_task(&conn, id, title, status, created_at, updated_at, preset)?,
+            )),
         }
     }
 
@@ -751,7 +806,7 @@ impl Store {
     pub fn agent_list(&self, task_id: &str) -> Result<Vec<Agent>> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
-            "SELECT id, task_id, host_id, parent_id, interface, provider, status, run_location, created_at, provider_session_id, model, effort, fast \
+            "SELECT id, task_id, host_id, parent_id, interface, provider, status, run_location, created_at, provider_session_id, model, effort, fast, role \
              FROM agents WHERE task_id = ?1 ORDER BY created_at ASC, id ASC",
         )?;
         let rows = stmt.query_map([task_id], map_agent_tuple)?;
@@ -803,6 +858,7 @@ impl Store {
             model,
             effort,
             fast,
+            role,
         } = spec;
         if interface != "chat" && interface != "terminal" {
             return Err(StorageError::InvalidParams(format!(
@@ -820,8 +876,8 @@ impl Store {
         {
             let conn = self.lock()?;
             conn.execute(
-                "INSERT INTO agents (id, task_id, host_id, parent_id, interface, provider, status, run_location, created_at, provider_session_id, model, effort, fast) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'idle', 'local', ?7, NULL, ?8, ?9, ?10)",
+                "INSERT INTO agents (id, task_id, host_id, parent_id, interface, provider, status, run_location, created_at, provider_session_id, model, effort, fast, role) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'idle', 'local', ?7, NULL, ?8, ?9, ?10, ?11)",
                 params![
                     id,
                     task_id,
@@ -832,7 +888,8 @@ impl Store {
                     created_at,
                     model.as_deref(),
                     effort.as_deref(),
-                    if fast { 1 } else { 0 }
+                    if fast { 1 } else { 0 },
+                    role
                 ],
             )?;
         }
@@ -850,6 +907,7 @@ impl Store {
             model,
             effort,
             fast,
+            role,
         })
     }
 
@@ -857,7 +915,7 @@ impl Store {
         let conn = self.lock()?;
         let row = conn
             .query_row(
-                "SELECT id, task_id, host_id, parent_id, interface, provider, status, run_location, created_at, provider_session_id, model, effort, fast \
+                "SELECT id, task_id, host_id, parent_id, interface, provider, status, run_location, created_at, provider_session_id, model, effort, fast, role \
                  FROM agents WHERE id = ?1",
                 [id],
                 map_agent_tuple,
@@ -867,6 +925,20 @@ impl Store {
             None => Ok(None),
             Some(t) => Ok(Some(agent_from_tuple(t)?)),
         }
+    }
+
+    pub fn agent_set_role(&self, id: &str, role: &str) -> Result<Agent> {
+        let n = {
+            let conn = self.lock()?;
+            conn.execute(
+                "UPDATE agents SET role = ?1 WHERE id = ?2",
+                params![role, id],
+            )?
+        };
+        if n == 0 {
+            return Err(StorageError::NotFound);
+        }
+        self.agent_get(id)?.ok_or(StorageError::NotFound)
     }
 
     pub fn agent_set_status(&self, id: &str, status: AgentStatus) -> Result<()> {
@@ -2136,6 +2208,7 @@ type AgentTuple = (
     Option<String>,
     Option<String>,
     i64,
+    String,
 );
 
 fn map_loop_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<LoopRow> {
@@ -2203,6 +2276,7 @@ fn map_agent_tuple(r: &rusqlite::Row<'_>) -> rusqlite::Result<AgentTuple> {
         r.get(10)?,
         r.get(11)?,
         r.get(12)?,
+        r.get(13)?,
     ))
 }
 
@@ -2221,6 +2295,7 @@ fn agent_from_tuple(t: AgentTuple) -> Result<Agent> {
         model,
         effort,
         fast,
+        role,
     ) = t;
     Ok(Agent {
         id,
@@ -2236,6 +2311,7 @@ fn agent_from_tuple(t: AgentTuple) -> Result<Agent> {
         model,
         effort,
         fast: fast != 0,
+        role,
     })
 }
 
@@ -2380,7 +2456,7 @@ mod tests {
         {
             let conn = store.lock().unwrap();
             conn.execute(
-                "UPDATE schema_meta SET value = '8' WHERE key = 'schema'",
+                "UPDATE schema_meta SET value = '9' WHERE key = 'schema'",
                 [],
             )
             .unwrap();
@@ -2389,7 +2465,7 @@ mod tests {
         let err = Store::open(&db).unwrap_err();
         assert_eq!(err.code(), "internal");
         match &err {
-            StorageError::UnsupportedSchema(v) => assert_eq!(v, "8"),
+            StorageError::UnsupportedSchema(v) => assert_eq!(v, "9"),
             other => panic!("expected UnsupportedSchema, got {other:?}"),
         }
     }
@@ -2458,7 +2534,7 @@ mod tests {
     }
 
     #[test]
-    fn fresh_db_is_schema_seven() {
+    fn fresh_db_is_schema_eight() {
         let (_tmp, store) = open_store();
         let conn = rusqlite::Connection::open(store.path()).unwrap();
         let schema: String = conn
@@ -2468,7 +2544,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(schema, "7");
+        assert_eq!(schema, "8");
         let n: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'artifacts'",
@@ -2552,7 +2628,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(schema, "7");
+        assert_eq!(schema, "8");
         let n: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'worktrees'",
@@ -2884,7 +2960,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(schema, "7");
+        assert_eq!(schema, "8");
         let n: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'policies'",
@@ -3096,7 +3172,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(schema, "7");
+        assert_eq!(schema, "8");
         let n: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('shells', 'pty_sessions')",
@@ -3199,7 +3275,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(schema, "7");
+        assert_eq!(schema, "8");
         let n: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'artifacts'",
@@ -3442,7 +3518,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(schema, "7");
+        assert_eq!(schema, "8");
         let n: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'loops'",
@@ -3596,7 +3672,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(schema, "7");
+        assert_eq!(schema, "8");
         let n: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'model_profiles'",
@@ -3663,6 +3739,7 @@ mod tests {
                     model: Some("sonnet".into()),
                     effort: Some("high".into()),
                     fast: false,
+                    ..AgentModelSpec::default()
                 },
             )
             .unwrap();
@@ -3704,6 +3781,140 @@ mod tests {
                     || low.contains("api_key")
                     || (low == "key" && t != "schema_meta");
                 assert!(!secret, "secret-like column {c} on {t}");
+            }
+        }
+    }
+
+    #[test]
+    fn migration_0008_matches_contract() {
+        assert!(MIGRATION_0008
+            .contains("ALTER TABLE agents ADD COLUMN role TEXT NOT NULL DEFAULT 'coder'"));
+        assert!(MIGRATION_0008.contains("ALTER TABLE tasks ADD COLUMN preset TEXT"));
+        assert!(MIGRATION_0008
+            .contains("INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('schema', '8')"));
+        let low = MIGRATION_0008.to_ascii_lowercase();
+        assert!(!low.contains("secret"));
+        assert!(!low.contains("phase"));
+        assert!(!low.contains("epic"));
+        assert!(!low.contains("agents_md"));
+        assert!(!low.contains("guide"));
+        assert!(!MIGRATION_0008.contains("api_key"));
+        assert!(!MIGRATION_0001.contains("ADD COLUMN role"));
+        assert!(!MIGRATION_0007.contains("ADD COLUMN role"));
+    }
+
+    #[test]
+    fn migrate_from_seven_applies_0008() {
+        let dir = tempdir().unwrap();
+        let db = dir.path().join("host.db");
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute_batch(MIGRATION_0001).unwrap();
+            conn.execute_batch(MIGRATION_0002).unwrap();
+            conn.execute_batch(MIGRATION_0003).unwrap();
+            conn.execute_batch(MIGRATION_0004).unwrap();
+            conn.execute_batch(MIGRATION_0005).unwrap();
+            conn.execute_batch(MIGRATION_0006).unwrap();
+            conn.execute_batch(MIGRATION_0007).unwrap();
+            let schema: String = conn
+                .query_row(
+                    "SELECT value FROM schema_meta WHERE key = 'schema'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(schema, "7");
+        }
+        let store = Store::open(&db).unwrap();
+        let conn = rusqlite::Connection::open(store.path()).unwrap();
+        let schema: String = conn
+            .query_row(
+                "SELECT value FROM schema_meta WHERE key = 'schema'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(schema, "8");
+        let role_col: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('agents') WHERE name = 'role'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(role_col, 1);
+        let preset_col: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name = 'preset'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(preset_col, 1);
+    }
+
+    #[test]
+    fn task_preset_and_agent_role_roundtrip() {
+        let (_tmp, store) = open_store();
+        let host_id = new_id();
+        store.host_insert_if_absent(&host_id, "h").unwrap();
+        let ws = store.workspace_add("/p", "p").unwrap();
+        let task = store.task_create_ex("t", &ws.id, Some("planning")).unwrap();
+        assert_eq!(task.preset.as_deref(), Some("planning"));
+        let got = store.task_get(&task.id).unwrap().unwrap();
+        assert_eq!(got.preset.as_deref(), Some("planning"));
+        let agent = store
+            .agent_create(&task.id, &host_id, "cli.generic")
+            .unwrap();
+        assert_eq!(agent.role, "coder");
+        store
+            .agent_create_model(
+                &task.id,
+                &host_id,
+                "cli.generic",
+                "chat",
+                None,
+                AgentModelSpec {
+                    role: "planner".into(),
+                    ..AgentModelSpec::default()
+                },
+            )
+            .unwrap();
+        let updated = store.agent_set_role(&agent.id, "reviewer").unwrap();
+        assert_eq!(updated.id, agent.id);
+        assert_eq!(updated.role, "reviewer");
+        assert_eq!(updated.provider.as_str(), "cli.generic");
+        let again = store.agent_get(&agent.id).unwrap().unwrap();
+        assert_eq!(again.role, "reviewer");
+    }
+
+    #[test]
+    fn no_guide_phase_epic_columns_after_0008() {
+        let (_tmp, store) = open_store();
+        let conn = rusqlite::Connection::open(store.path()).unwrap();
+        let mut stmt = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
+            .unwrap();
+        let tables: Vec<String> = stmt
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        for t in tables {
+            let mut info = conn
+                .prepare(&format!("PRAGMA table_info(\"{t}\")"))
+                .unwrap();
+            let cols: Vec<String> = info
+                .query_map([], |r| r.get::<_, String>(1))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect();
+            for c in cols {
+                let low = c.to_ascii_lowercase();
+                assert!(low != "phase", "phase column on {t}");
+                assert!(low != "epic", "epic column on {t}");
+                assert!(low != "agents_md", "agents_md column on {t}");
+                assert!(!low.contains("guide"), "guide column {c} on {t}");
             }
         }
     }

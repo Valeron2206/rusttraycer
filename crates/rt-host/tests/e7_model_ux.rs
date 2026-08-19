@@ -409,7 +409,7 @@ fn assert_no_secret_columns(db: &Path) {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(schema, "7", "schema={schema}");
+    assert_eq!(schema, "8", "schema={schema}");
     let mut stmt = conn
         .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
         .unwrap();

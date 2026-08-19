@@ -102,6 +102,11 @@ pub const METHOD_PROFILE_GET: &str = "profile.get";
 pub const METHOD_PROFILE_UPDATE: &str = "profile.update";
 pub const METHOD_PROFILE_DELETE: &str = "profile.delete";
 pub const METHOD_PREFS_GET: &str = "prefs.get";
+pub const METHOD_WORKSPACE_GUIDES_GET: &str = "workspace.guides.get";
+pub const METHOD_SETTINGS_GUIDE_GET: &str = "settings.guide.get";
+pub const METHOD_SETTINGS_GUIDE_SET: &str = "settings.guide.set";
+pub const METHOD_PRESET_LIST: &str = "preset.list";
+pub const METHOD_AGENT_UPDATE: &str = "agent.update";
 
 /// Tradable methods (handshake itself is not included).
 pub const TRADABLE_METHODS: &[&str] = &[
@@ -167,6 +172,11 @@ pub const TRADABLE_METHODS: &[&str] = &[
     METHOD_PROFILE_UPDATE,
     METHOD_PROFILE_DELETE,
     METHOD_PREFS_GET,
+    METHOD_WORKSPACE_GUIDES_GET,
+    METHOD_SETTINGS_GUIDE_GET,
+    METHOD_SETTINGS_GUIDE_SET,
+    METHOD_PRESET_LIST,
+    METHOD_AGENT_UPDATE,
 ];
 
 pub fn host_method_version() -> MethodVersion {
@@ -180,8 +190,9 @@ pub fn host_method_version() -> MethodVersion {
 /// mutate methods are 1.2; shell/pty methods are 1.3; artifact/comment/
 /// `agent.clear_transcript` methods are 1.4; `agent.create` and A2A/loop
 /// methods are 1.5; model-ux methods (`agent.switch`, `profile.*`, `prefs.get`)
-/// are 1.6; all other tradable methods stay 1.0 (`HOST_METHOD_MINOR` is not
-/// bumped). Unknown names return `None`.
+/// are 1.6; workspace/guides/preset/`agent.update` methods are 1.7; all other
+/// tradable methods stay 1.0 (`HOST_METHOD_MINOR` is not bumped). Unknown
+/// names return `None`.
 pub fn method_version(name: &str) -> Option<MethodVersion> {
     if !TRADABLE_METHODS.iter().any(|m| *m == name) {
         return None;
@@ -221,6 +232,11 @@ pub fn method_version(name: &str) -> Option<MethodVersion> {
         | METHOD_PROFILE_UPDATE
         | METHOD_PROFILE_DELETE
         | METHOD_PREFS_GET => Some(MethodVersion { major: 1, minor: 6 }),
+        METHOD_WORKSPACE_GUIDES_GET
+        | METHOD_SETTINGS_GUIDE_GET
+        | METHOD_SETTINGS_GUIDE_SET
+        | METHOD_PRESET_LIST
+        | METHOD_AGENT_UPDATE => Some(MethodVersion { major: 1, minor: 7 }),
         _ => Some(host_method_version()),
     }
 }
@@ -309,6 +325,8 @@ pub struct Task {
     pub created_at: String,
     pub updated_at: String,
     pub workspace_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -331,6 +349,8 @@ pub struct Agent {
     pub effort: Option<String>,
     #[serde(default)]
     pub fast: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -917,6 +937,63 @@ pub struct PrefsGetOk {
     pub items: Vec<PrefsItem>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GuideFile {
+    pub path: String,
+    pub content: String,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceGuidesOk {
+    pub agents_md: Option<GuideFile>,
+    pub workspace_guide: Option<GuideFile>,
+    pub global_guide: Option<GuideFile>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsGuide {
+    pub path: String,
+    pub content: String,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceGuidesGetParams {
+    pub workspace_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsGuideSetParams {
+    pub content: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PresetItem {
+    pub id: String,
+    pub title: String,
+    pub default_role: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PresetListOk {
+    pub items: Vec<PresetItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentUpdateParams {
+    pub agent_id: String,
+    pub role: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1051,7 +1128,7 @@ mod tests {
         assert_eq!(error_codes::CROSS_HOST, "cross_host");
         assert_eq!(error_codes::NO_INBOX, "no_inbox");
         assert_eq!(error_codes::LOOP_EXHAUSTED, "loop_exhausted");
-        assert_eq!(TRADABLE_METHODS.len(), 62);
+        assert_eq!(TRADABLE_METHODS.len(), 67);
         assert!(TRADABLE_METHODS.contains(&METHOD_POLICY_GET));
         assert!(TRADABLE_METHODS.contains(&METHOD_POLICY_SET));
         assert!(TRADABLE_METHODS.contains(&METHOD_APPROVAL_RESPOND));
@@ -1362,6 +1439,7 @@ mod tests {
             created_at: "c".into(),
             updated_at: "u".into(),
             workspace_ids: vec!["w".into()],
+            preset: None,
         };
         let v = serde_json::to_value(&task).unwrap();
         assert_eq!(v["workspaceIds"][0], "w");
@@ -1384,6 +1462,7 @@ mod tests {
             model: None,
             effort: None,
             fast: false,
+            role: None,
         };
         let v = serde_json::to_value(&agent).unwrap();
         assert_eq!(v["taskId"], "t1");
@@ -1540,6 +1619,7 @@ mod tests {
             model: Some("opus".into()),
             effort: Some("high".into()),
             fast: true,
+            role: None,
         };
         let v = serde_json::to_value(&agent).unwrap();
         assert_eq!(v["providerSessionId"], "sess-1");
@@ -1802,7 +1882,7 @@ mod tests {
         );
         assert!(TRADABLE_METHODS.contains(&METHOD_AGENT_SWITCH));
         assert!(TRADABLE_METHODS.contains(&METHOD_PREFS_GET));
-        assert_eq!(TRADABLE_METHODS.len(), 62);
+        assert_eq!(TRADABLE_METHODS.len(), 67);
 
         let sw: AgentSwitchParams = serde_json::from_str(
             r#"{"agentId":"a1","provider":"cli.codex","model":"o3","effort":"high","fast":false}"#,
@@ -1860,6 +1940,7 @@ mod tests {
             model: Some("gpt".into()),
             effort: Some("low".into()),
             fast: true,
+            role: None,
         };
         let v = serde_json::to_value(&agent).unwrap();
         assert_eq!(v["model"], "gpt");
@@ -1868,5 +1949,147 @@ mod tests {
         let agent2: Agent = serde_json::from_value(v).unwrap();
         assert_eq!(agent2.model.as_deref(), Some("gpt"));
         assert!(agent2.fast);
+    }
+
+    #[test]
+    fn e8_workspace_types_and_versions_camel_case() {
+        assert_eq!(
+            method_version(METHOD_WORKSPACE_GUIDES_GET),
+            Some(MethodVersion { major: 1, minor: 7 })
+        );
+        assert_eq!(
+            method_version(METHOD_SETTINGS_GUIDE_GET),
+            Some(MethodVersion { major: 1, minor: 7 })
+        );
+        assert_eq!(
+            method_version(METHOD_SETTINGS_GUIDE_SET),
+            Some(MethodVersion { major: 1, minor: 7 })
+        );
+        assert_eq!(
+            method_version(METHOD_PRESET_LIST),
+            Some(MethodVersion { major: 1, minor: 7 })
+        );
+        assert_eq!(
+            method_version(METHOD_AGENT_UPDATE),
+            Some(MethodVersion { major: 1, minor: 7 })
+        );
+        assert_eq!(
+            method_version(METHOD_AGENT_SWITCH),
+            Some(MethodVersion { major: 1, minor: 6 })
+        );
+        assert_eq!(
+            method_version(METHOD_AGENT_CREATE),
+            Some(MethodVersion { major: 1, minor: 5 })
+        );
+        assert_eq!(
+            method_version(METHOD_TASK_CREATE),
+            Some(MethodVersion { major: 1, minor: 0 })
+        );
+        assert_eq!(
+            method_version(METHOD_HOST_PING),
+            Some(MethodVersion { major: 1, minor: 0 })
+        );
+        assert_eq!(TRADABLE_METHODS.len(), 67);
+        assert!(TRADABLE_METHODS.contains(&METHOD_WORKSPACE_GUIDES_GET));
+        assert!(TRADABLE_METHODS.contains(&METHOD_AGENT_UPDATE));
+        assert!(!TRADABLE_METHODS
+            .iter()
+            .any(|m| m.to_ascii_lowercase().contains("phase")));
+        assert!(!TRADABLE_METHODS
+            .iter()
+            .any(|m| m.to_ascii_lowercase().contains("epic")));
+
+        let gf = GuideFile {
+            path: "/ws/AGENTS.md".into(),
+            content: "hi".into(),
+            truncated: false,
+        };
+        let v = serde_json::to_value(&gf).unwrap();
+        assert_eq!(v["path"], "/ws/AGENTS.md");
+        assert_eq!(v["content"], "hi");
+        assert_eq!(v["truncated"], false);
+
+        let ok = WorkspaceGuidesOk {
+            agents_md: Some(gf),
+            workspace_guide: None,
+            global_guide: None,
+        };
+        let v = serde_json::to_value(&ok).unwrap();
+        assert_eq!(v["agentsMd"]["path"], "/ws/AGENTS.md");
+        assert!(v["workspaceGuide"].is_null());
+        assert!(v["globalGuide"].is_null());
+        assert!(v.get("agents_md").is_none());
+
+        let sg = SettingsGuide {
+            path: "/data/agent-selection-guide.md".into(),
+            content: "".into(),
+            truncated: false,
+        };
+        let v = serde_json::to_value(&sg).unwrap();
+        assert_eq!(v["path"], "/data/agent-selection-guide.md");
+        assert_eq!(v["content"], "");
+
+        let item = PresetItem {
+            id: "planning".into(),
+            title: "Planning".into(),
+            default_role: "planner".into(),
+        };
+        let v = serde_json::to_value(&item).unwrap();
+        assert_eq!(v["id"], "planning");
+        assert_eq!(v["title"], "Planning");
+        assert_eq!(v["defaultRole"], "planner");
+        assert!(v.get("default_role").is_none());
+
+        let list = PresetListOk { items: vec![item] };
+        let v = serde_json::to_value(&list).unwrap();
+        assert_eq!(v["items"][0]["defaultRole"], "planner");
+
+        let upd: AgentUpdateParams =
+            serde_json::from_str(r#"{"agentId":"a1","role":"reviewer"}"#).unwrap();
+        assert_eq!(upd.agent_id, "a1");
+        assert_eq!(upd.role, "reviewer");
+        let uv = serde_json::to_value(&upd).unwrap();
+        assert_eq!(uv["agentId"], "a1");
+        assert!(uv.get("agent_id").is_none());
+
+        let get: WorkspaceGuidesGetParams =
+            serde_json::from_str(r#"{"workspaceId":"w1"}"#).unwrap();
+        assert_eq!(get.workspace_id, "w1");
+
+        let set: SettingsGuideSetParams = serde_json::from_str(r#"{"content":"x"}"#).unwrap();
+        assert_eq!(set.content, "x");
+
+        let task = Task {
+            id: "t1".into(),
+            title: "T".into(),
+            status: "open".into(),
+            created_at: "c".into(),
+            updated_at: "u".into(),
+            workspace_ids: vec!["w".into()],
+            preset: Some("planning".into()),
+        };
+        let v = serde_json::to_value(&task).unwrap();
+        assert_eq!(v["preset"], "planning");
+        assert_eq!(v["workspaceIds"][0], "w");
+
+        let agent = Agent {
+            id: "a".into(),
+            task_id: "t1".into(),
+            host_id: "h".into(),
+            parent_id: None,
+            interface: "chat".into(),
+            provider: "cli.generic".into(),
+            status: "idle".into(),
+            run_location: "local".into(),
+            created_at: "c".into(),
+            provider_session_id: None,
+            model: None,
+            effort: None,
+            fast: false,
+            role: Some("planner".into()),
+        };
+        let v = serde_json::to_value(&agent).unwrap();
+        assert_eq!(v["role"], "planner");
+        assert_eq!(v["taskId"], "t1");
     }
 }
