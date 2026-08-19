@@ -54,6 +54,30 @@ pub const PTY_METHODS: &[&str] = &[
     METHOD_PTY_CLOSE,
 ];
 
+pub const METHOD_ARTIFACT_CREATE: &str = "artifact.create";
+pub const METHOD_ARTIFACT_GET: &str = "artifact.get";
+pub const METHOD_ARTIFACT_LIST: &str = "artifact.list";
+pub const METHOD_ARTIFACT_UPDATE: &str = "artifact.update";
+pub const METHOD_ARTIFACT_DELETE: &str = "artifact.delete";
+pub const METHOD_ARTIFACT_EXPORT: &str = "artifact.export";
+pub const METHOD_COMMENT_CREATE: &str = "comment.create";
+pub const METHOD_COMMENT_LIST: &str = "comment.list";
+pub const METHOD_COMMENT_RESOLVE: &str = "comment.resolve";
+pub const METHOD_CLEAR_TRANSCRIPT: &str = "agent.clear_transcript";
+
+pub const ARTIFACT_METHODS: &[&str] = &[
+    METHOD_ARTIFACT_CREATE,
+    METHOD_ARTIFACT_GET,
+    METHOD_ARTIFACT_LIST,
+    METHOD_ARTIFACT_UPDATE,
+    METHOD_ARTIFACT_DELETE,
+    METHOD_ARTIFACT_EXPORT,
+    METHOD_COMMENT_CREATE,
+    METHOD_COMMENT_LIST,
+    METHOD_COMMENT_RESOLVE,
+    METHOD_CLEAR_TRANSCRIPT,
+];
+
 #[derive(Debug, Clone)]
 pub struct Session {
     pub host_id: String,
@@ -110,6 +134,10 @@ impl ConnectError {
     }
 
     pub fn is_pty_unsupported(&self) -> bool {
+        self.is_unsupported_method() || self.is_version_mismatch()
+    }
+
+    pub fn is_artifacts_unsupported(&self) -> bool {
         self.is_unsupported_method() || self.is_version_mismatch()
     }
 
@@ -216,6 +244,9 @@ fn hello_methods() -> Value {
     }
     for name in PTY_METHODS {
         map.insert(name.to_string(), json!({ "major": 1, "minor": 3 }));
+    }
+    for name in ARTIFACT_METHODS {
+        map.insert(name.to_string(), json!({ "major": 1, "minor": 4 }));
     }
     Value::Object(map)
 }
@@ -849,6 +880,138 @@ impl Session {
     pub fn pty_close(&self, pty_id: &str) -> Result<Value, ConnectError> {
         self.call(METHOD_PTY_CLOSE, json!({ "ptyId": pty_id }))
     }
+
+    pub fn artifacts_accepted(&self) -> bool {
+        fn ok(map: &BTreeMap<String, rt_protocol::MethodVersion>, name: &str) -> bool {
+            map.get(name)
+                .map(|v| v.major == 1 && v.minor >= 4)
+                .unwrap_or(false)
+        }
+        ARTIFACT_METHODS.iter().all(|name| ok(&self.accepted, name))
+    }
+
+    pub fn artifacts_rejected(&self) -> bool {
+        ARTIFACT_METHODS
+            .iter()
+            .any(|name| self.rejected.contains_key(*name))
+    }
+
+    pub fn artifact_list(
+        &self,
+        task_id: &str,
+        kind: Option<&str>,
+    ) -> Result<ArtifactListOk, ConnectError> {
+        let mut params = json!({ "taskId": task_id });
+        if let Some(kind) = kind {
+            params["kind"] = json!(kind);
+        }
+        parse_ok(self.call(METHOD_ARTIFACT_LIST, params)?)
+    }
+
+    pub fn artifact_get(&self, artifact_id: &str) -> Result<ArtifactOk, ConnectError> {
+        parse_ok(self.call(METHOD_ARTIFACT_GET, json!({ "artifactId": artifact_id }))?)
+    }
+
+    pub fn artifact_create(
+        &self,
+        task_id: &str,
+        kind: &str,
+        title: &str,
+        body: &str,
+        parent_id: Option<&str>,
+        assignee: Option<&str>,
+    ) -> Result<ArtifactOk, ConnectError> {
+        parse_ok(self.call(
+            METHOD_ARTIFACT_CREATE,
+            json!({
+                "taskId": task_id,
+                "parentId": parent_id,
+                "kind": kind,
+                "title": title,
+                "body": body,
+                "assignee": assignee,
+                "sourceMessageId": Value::Null,
+            }),
+        )?)
+    }
+
+    pub fn artifact_update(
+        &self,
+        artifact_id: &str,
+        title: Option<&str>,
+        body: Option<&str>,
+        status: Option<&str>,
+        assignee: Option<&str>,
+        parent_id: Option<Option<&str>>,
+    ) -> Result<ArtifactOk, ConnectError> {
+        let mut params = json!({ "artifactId": artifact_id });
+        if let Some(title) = title {
+            params["title"] = json!(title);
+        }
+        if let Some(body) = body {
+            params["body"] = json!(body);
+        }
+        if let Some(status) = status {
+            params["status"] = json!(status);
+        }
+        if let Some(assignee) = assignee {
+            params["assignee"] = json!(assignee);
+        }
+        if let Some(parent) = parent_id {
+            params["parentId"] = json!(parent);
+        }
+        parse_ok(self.call(METHOD_ARTIFACT_UPDATE, params)?)
+    }
+
+    pub fn artifact_delete(&self, artifact_id: &str) -> Result<ArtifactDeleteOk, ConnectError> {
+        parse_ok(self.call(METHOD_ARTIFACT_DELETE, json!({ "artifactId": artifact_id }))?)
+    }
+
+    pub fn artifact_export(
+        &self,
+        artifact_id: &str,
+        format: &str,
+    ) -> Result<ArtifactExportOk, ConnectError> {
+        parse_ok(self.call(
+            METHOD_ARTIFACT_EXPORT,
+            json!({ "artifactId": artifact_id, "format": format }),
+        )?)
+    }
+
+    pub fn comment_list(&self, artifact_id: &str) -> Result<CommentListOk, ConnectError> {
+        parse_ok(self.call(METHOD_COMMENT_LIST, json!({ "artifactId": artifact_id }))?)
+    }
+
+    pub fn comment_create(
+        &self,
+        artifact_id: &str,
+        thread_id: Option<&str>,
+        anchor_start: Option<i64>,
+        anchor_end: Option<i64>,
+        body: &str,
+    ) -> Result<CommentThreadOk, ConnectError> {
+        let mut params = json!({
+            "artifactId": artifact_id,
+            "threadId": thread_id,
+            "body": body,
+        });
+        if thread_id.is_none() {
+            params["anchorStart"] = json!(anchor_start.unwrap_or(0));
+            params["anchorEnd"] = json!(anchor_end.unwrap_or(0));
+        }
+        parse_ok(self.call(METHOD_COMMENT_CREATE, params)?)
+    }
+
+    pub fn comment_resolve(&self, thread_id: &str) -> Result<CommentThreadOk, ConnectError> {
+        parse_ok(self.call(METHOD_COMMENT_RESOLVE, json!({ "threadId": thread_id }))?)
+    }
+
+    pub fn agent_clear_transcript(
+        &self,
+        agent_id: &str,
+    ) -> Result<ClearTranscriptOk, ConnectError> {
+        parse_ok(self.call(METHOD_CLEAR_TRANSCRIPT, json!({ "agentId": agent_id }))?)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1031,6 +1194,112 @@ pub struct PtyOpenOk {
     pub pty_id: String,
     #[serde(default)]
     pub resumed: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactOk {
+    pub id: String,
+    pub task_id: String,
+    #[serde(default)]
+    pub parent_id: Option<String>,
+    pub kind: String,
+    pub title: String,
+    #[serde(default)]
+    pub body: String,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub assignee: Option<String>,
+    #[serde(default)]
+    pub source_message_id: Option<String>,
+    #[serde(default)]
+    pub created_at: String,
+    #[serde(default)]
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactListOk {
+    #[serde(default)]
+    pub items: Vec<ArtifactOk>,
+    #[serde(default)]
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactExportOk {
+    #[serde(default)]
+    pub format: String,
+    #[serde(default)]
+    pub markdown: String,
+    #[serde(default)]
+    pub filename: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactDeleteOk {
+    #[serde(default)]
+    pub deleted: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommentOk {
+    pub id: String,
+    pub body: String,
+    #[serde(default)]
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommentThreadOk {
+    pub id: String,
+    #[serde(default)]
+    pub artifact_id: String,
+    #[serde(default)]
+    pub anchor_start: i64,
+    #[serde(default)]
+    pub anchor_end: i64,
+    #[serde(default, deserialize_with = "bool_from_wire")]
+    pub resolved: bool,
+    #[serde(default)]
+    pub comments: Vec<CommentOk>,
+    #[serde(default)]
+    pub created_at: String,
+    #[serde(default)]
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommentListOk {
+    #[serde(default)]
+    pub threads: Vec<CommentThreadOk>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClearTranscriptOk {
+    #[serde(default)]
+    pub cleared: i64,
+}
+
+fn bool_from_wire<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    match value {
+        Value::Bool(b) => Ok(b),
+        Value::Number(n) => Ok(n.as_i64().unwrap_or(0) != 0),
+        Value::String(s) => Ok(s == "true" || s == "1"),
+        _ => Ok(false),
+    }
 }
 
 pub fn keepalive(session: &Session) -> Result<(), ConnectError> {
@@ -2902,6 +3171,220 @@ mod tests {
             assert_eq!(hs.params["methods"][name]["major"], 1, "{name}");
             assert_eq!(hs.params["methods"][name]["minor"], 3, "{name}");
         }
+    }
+
+    #[test]
+    fn handshake_advertises_artifact_methods_1_4() {
+        let mock = start_catalog_mock("host-a", "tok-1");
+        let _session = connect(&pid("host-a", &mock.origin)).expect("online");
+        let hs = mock
+            .hits
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|h| h.method == "handshake")
+            .cloned()
+            .expect("handshake");
+        for name in ARTIFACT_METHODS {
+            assert_eq!(hs.params["methods"][name]["major"], 1, "{name}");
+            assert_eq!(hs.params["methods"][name]["minor"], 4, "{name}");
+        }
+        assert_eq!(hs.params["methods"]["artifact.create"]["minor"], 4);
+        assert_eq!(hs.params["methods"]["artifact.export"]["minor"], 4);
+        assert_eq!(hs.params["methods"]["agent.clear_transcript"]["minor"], 4);
+        assert_eq!(hs.params["methods"]["comment.create"]["minor"], 4);
+    }
+
+    fn start_artifacts_rpc_mock() -> CatalogMock {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(Mutex::new(Vec::new()));
+        let hits_t = hits.clone();
+        thread::spawn(move || {
+            for stream in listener.incoming().take(32) {
+                let Ok(mut stream) = stream else { break };
+                let (headers, body) = read_http_request(&mut stream);
+                let has_session = headers.to_ascii_lowercase().contains("x-rt-session:");
+                let (method, params) = if headers.starts_with("GET /health") {
+                    ("GET /health".to_string(), json!({}))
+                } else {
+                    let parsed: Value = serde_json::from_slice(&body).unwrap_or(json!({}));
+                    (
+                        parsed
+                            .get("method")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("other")
+                            .to_string(),
+                        parsed.get("params").cloned().unwrap_or(json!({})),
+                    )
+                };
+                hits_t.lock().unwrap().push(RpcHit {
+                    method: method.clone(),
+                    params: params.clone(),
+                    has_session,
+                });
+                let kind = params
+                    .get("kind")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("spec")
+                    .to_string();
+                let status = if kind == "ticket" || kind == "story" {
+                    json!("todo")
+                } else {
+                    Value::Null
+                };
+                let sample = json!({
+                    "id": "art-1",
+                    "taskId": "task-1",
+                    "parentId": null,
+                    "kind": kind,
+                    "title": params.get("title").cloned().unwrap_or(json!("Auth")),
+                    "body": params.get("body").cloned().unwrap_or(json!("# Auth")),
+                    "status": status,
+                    "assignee": null,
+                    "sourceMessageId": null,
+                    "createdAt": "t",
+                    "updatedAt": "t"
+                });
+                let thread = json!({
+                    "id": "th-1",
+                    "artifactId": "art-1",
+                    "anchorStart": 0,
+                    "anchorEnd": 12,
+                    "resolved": method == "comment.resolve",
+                    "comments": [{ "id": "c-1", "body": "nit", "createdAt": "t" }],
+                    "createdAt": "t",
+                    "updatedAt": "t"
+                });
+                let body = match method.as_str() {
+                    "GET /health" => json!({"ok": true, "hostId": "host-a"}).to_string(),
+                    "handshake" => {
+                        let mut accepted = serde_json::Map::new();
+                        for name in ARTIFACT_METHODS {
+                            accepted.insert(name.to_string(), json!({"major": 1, "minor": 4}));
+                        }
+                        json!({
+                            "id": "echo",
+                            "ok": {
+                                "hostId": "host-a",
+                                "hostVersion": "0.1.0",
+                                "sessionToken": "tok-1",
+                                "accepted": accepted,
+                                "rejected": {}
+                            }
+                        })
+                        .to_string()
+                    }
+                    "host.ping" => json!({
+                        "id": "echo",
+                        "ok": { "hostId": "host-a", "now": "t" }
+                    })
+                    .to_string(),
+                    "artifact.create" | "artifact.get" | "artifact.update" => {
+                        json!({ "id": "echo", "ok": sample }).to_string()
+                    }
+                    "artifact.list" => json!({
+                        "id": "echo",
+                        "ok": { "items": [sample], "truncated": false }
+                    })
+                    .to_string(),
+                    "artifact.export" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "format": params.get("format").cloned().unwrap_or(json!("md")),
+                            "markdown": "# Auth",
+                            "filename": "art-1.md"
+                        }
+                    })
+                    .to_string(),
+                    "artifact.delete" => json!({
+                        "id": "echo",
+                        "ok": { "deleted": ["art-1"] }
+                    })
+                    .to_string(),
+                    "comment.create" | "comment.resolve" => {
+                        json!({ "id": "echo", "ok": thread }).to_string()
+                    }
+                    "comment.list" => json!({
+                        "id": "echo",
+                        "ok": { "threads": [thread] }
+                    })
+                    .to_string(),
+                    "agent.clear_transcript" => json!({
+                        "id": "echo",
+                        "ok": { "cleared": 2 }
+                    })
+                    .to_string(),
+                    _ => json!({
+                        "id": "echo",
+                        "error": { "code": "unsupported_method", "message": "no" }
+                    })
+                    .to_string(),
+                };
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(resp.as_bytes());
+            }
+        });
+        CatalogMock {
+            origin: format!("http://{addr}"),
+            hits,
+        }
+    }
+
+    #[test]
+    fn artifact_rpc_methods_and_export_format() {
+        let mock = start_artifacts_rpc_mock();
+        let session = connect(&pid("host-a", &mock.origin)).expect("online");
+        assert!(session.artifacts_accepted());
+        let created = session
+            .artifact_create("task-1", "spec", "Auth", "# Auth\n", None, None)
+            .expect("create");
+        assert_eq!(created.kind, "spec");
+        session
+            .artifact_update("art-1", None, Some("body"), None, None, None)
+            .expect("update");
+        let exported = session
+            .artifact_export("art-1", crate::artifacts::EXPORT_FORMAT)
+            .expect("export");
+        assert_eq!(exported.format, "md");
+        session
+            .comment_create("art-1", None, Some(0), Some(12), "nit")
+            .expect("thread");
+        session
+            .comment_create("art-1", Some("th-1"), None, None, "reply")
+            .expect("reply");
+        session.comment_resolve("th-1").expect("resolve");
+        session.agent_clear_transcript("ag-1").expect("clear");
+        let hits = mock.hits.lock().unwrap().clone();
+        let create = hits.iter().find(|h| h.method == "artifact.create").unwrap();
+        assert_eq!(create.params["kind"], "spec");
+        let update = hits.iter().find(|h| h.method == "artifact.update").unwrap();
+        assert_eq!(update.params["artifactId"], "art-1");
+        assert_eq!(update.params["body"], "body");
+        assert!(update.params.get("path").is_none());
+        let export = hits.iter().find(|h| h.method == "artifact.export").unwrap();
+        assert_eq!(export.params["format"], "md");
+        let thread = hits
+            .iter()
+            .find(|h| h.method == "comment.create" && h.params["threadId"].is_null())
+            .unwrap();
+        assert_eq!(thread.params["anchorStart"], 0);
+        assert_eq!(thread.params["anchorEnd"], 12);
+        let reply = hits
+            .iter()
+            .find(|h| h.method == "comment.create" && h.params["threadId"] == "th-1")
+            .unwrap();
+        assert_eq!(reply.params["body"], "reply");
+        assert!(hits.iter().any(|h| h.method == "comment.resolve"));
+        let clear = hits
+            .iter()
+            .find(|h| h.method == "agent.clear_transcript")
+            .unwrap();
+        assert_eq!(clear.params["agentId"], "ag-1");
+        assert!(!hits.iter().any(|h| h.method == "files.write"));
     }
 
     #[test]

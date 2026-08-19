@@ -5,6 +5,10 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::Instant;
 
+use crate::artifacts::{
+    self, ArtifactKind, ArtifactStub, CommentThread, ARTIFACTS_UNAVAILABLE, CREATE_KINDS,
+    EXPORT_FORMAT, FILTER_ALL,
+};
 use crate::discovery::{self, DiscoverError};
 use crate::ladder::{
     self, AgentPolicy, PaneKind, PendingApproval, PolicyMode, SplitLayout, PICKER_EMPTY,
@@ -310,6 +314,24 @@ pub struct AppState {
     pub pty_alive: HashSet<String>,
     pub pty_input: String,
     pub terminal_status: Option<String>,
+    pub artifacts: Vec<ArtifactStub>,
+    pub selected_artifact_id: Option<String>,
+    pub artifact_kind_filter: String,
+    pub artifact_status_filter: String,
+    pub artifact_create_kind: ArtifactKind,
+    pub artifact_create_title: String,
+    pub artifact_create_as_child: bool,
+    pub artifact_title_draft: String,
+    pub artifact_body_draft: String,
+    pub artifact_status_draft: String,
+    pub artifact_assignee_draft: String,
+    pub artifact_editing: bool,
+    pub artifact_comment_draft: String,
+    pub artifact_reply_drafts: HashMap<String, String>,
+    pub artifact_threads: Vec<CommentThread>,
+    pub artifact_selection: Option<(usize, usize)>,
+    pub artifacts_status: Option<String>,
+    pub show_clear_transcript_confirm: bool,
     pending_cancel: Option<String>,
     rpc_tx: Sender<RpcIncoming>,
     rpc_rx: Receiver<RpcIncoming>,
@@ -390,6 +412,24 @@ impl AppState {
             pty_alive: HashSet::new(),
             pty_input: String::new(),
             terminal_status: None,
+            artifacts: Vec::new(),
+            selected_artifact_id: None,
+            artifact_kind_filter: FILTER_ALL.into(),
+            artifact_status_filter: FILTER_ALL.into(),
+            artifact_create_kind: ArtifactKind::Spec,
+            artifact_create_title: String::new(),
+            artifact_create_as_child: false,
+            artifact_title_draft: String::new(),
+            artifact_body_draft: String::new(),
+            artifact_status_draft: String::new(),
+            artifact_assignee_draft: String::new(),
+            artifact_editing: false,
+            artifact_comment_draft: String::new(),
+            artifact_reply_drafts: HashMap::new(),
+            artifact_threads: Vec::new(),
+            artifact_selection: None,
+            artifacts_status: None,
+            show_clear_transcript_confirm: false,
             pending_cancel: None,
             rpc_tx,
             rpc_rx,
@@ -549,6 +589,7 @@ impl AppState {
                         self.ws_banner = None;
                         self.refresh_doctor();
                         self.refresh_terminal_capability();
+                        self.refresh_artifacts_capability();
                         self.refresh_tasks_catalog();
                         if self.screen == Screen::Canvas {
                             self.refresh_canvas_after_reconnect();
@@ -624,6 +665,33 @@ impl AppState {
             self.terminal_status = Some(format!("PTY завершился ({code})"));
             return;
         }
+        if let ws::WsEvent::ArtifactUpdated {
+            artifact_id,
+            task_id,
+        } = &event
+        {
+            if self.selected_task_id.as_deref() == Some(task_id.as_str()) {
+                self.load_artifacts();
+                if self.selected_artifact_id.as_deref() == Some(artifact_id.as_str()) {
+                    self.load_artifact_detail(artifact_id);
+                }
+            }
+            return;
+        }
+        if let ws::WsEvent::ArtifactDeleted {
+            artifact_id,
+            task_id,
+        } = &event
+        {
+            if self.selected_task_id.as_deref() == Some(task_id.as_str()) {
+                if self.selected_artifact_id.as_deref() == Some(artifact_id.as_str()) {
+                    self.selected_artifact_id = None;
+                    self.artifact_threads.clear();
+                }
+                self.load_artifacts();
+            }
+            return;
+        }
         if let ws::WsEvent::AgentApproval {
             approval_id,
             agent_id,
@@ -676,6 +744,11 @@ impl AppState {
             ApplyOutcome::TaskUpdated => {
                 if self.is_online() {
                     self.reload_task_list();
+                }
+            }
+            ApplyOutcome::ArtifactChanged => {
+                if self.is_online() {
+                    self.load_artifacts();
                 }
             }
             ApplyOutcome::Appended
@@ -969,6 +1042,7 @@ impl AppState {
         self.load_selected_agent();
         self.refresh_shells();
         self.load_file_tree_root();
+        self.load_artifacts();
         self.canvas_loaded_for = Some(task_id.to_string());
     }
 
@@ -1704,6 +1778,9 @@ impl AppState {
         self.workspace_path = None;
         self.tasks.clear();
         self.clear_live_pty();
+        self.artifacts.clear();
+        self.artifact_threads.clear();
+        self.selected_artifact_id = None;
     }
 
     pub fn set_workspace_path(&mut self, path: String) {
@@ -2219,6 +2296,428 @@ impl AppState {
             Err(err) => {
                 self.surface_ladder_error(err);
             }
+        }
+    }
+
+    pub fn artifacts_host_ok(&self) -> bool {
+        self.session
+            .as_ref()
+            .map(|s| s.artifacts_accepted() && !s.artifacts_rejected())
+            .unwrap_or(false)
+    }
+
+    pub fn comments_visible(&self) -> bool {
+        self.selected_artifact_id.is_some()
+    }
+
+    pub fn can_create_artifact(&self) -> bool {
+        self.can_rpc() && self.selected_task_id.is_some() && self.artifacts_host_ok()
+    }
+
+    pub fn can_clear_transcript(&self) -> bool {
+        self.can_rpc()
+            && self.selected_task_id.is_some()
+            && self.selected_agent().is_some()
+            && self.artifacts_host_ok()
+    }
+
+    pub fn selected_artifact(&self) -> Option<&ArtifactStub> {
+        let id = self.selected_artifact_id.as_ref()?;
+        self.artifacts.iter().find(|a| &a.id == id)
+    }
+
+    fn refresh_artifacts_capability(&mut self) {
+        match &self.session {
+            Some(s) if s.artifacts_accepted() && !s.artifacts_rejected() => {
+                if self.artifacts_status.as_deref() == Some(ARTIFACTS_UNAVAILABLE) {
+                    self.artifacts_status = None;
+                }
+            }
+            Some(_) | None => {
+                if self.can_rpc() {
+                    self.artifacts_status = Some(ARTIFACTS_UNAVAILABLE.into());
+                }
+            }
+        }
+    }
+
+    fn surface_artifacts_error(&mut self, err: ConnectError) {
+        if err.is_artifacts_unsupported() {
+            self.artifacts_status = Some(ARTIFACTS_UNAVAILABLE.into());
+            self.toast = Some(ARTIFACTS_UNAVAILABLE.into());
+        } else {
+            let label = err.as_label();
+            self.artifacts_status = Some(label.clone());
+            self.toast = Some(label);
+        }
+    }
+
+    fn load_artifacts(&mut self) {
+        let Some(task_id) = self.selected_task_id.clone() else {
+            self.artifacts.clear();
+            self.artifact_threads.clear();
+            self.selected_artifact_id = None;
+            return;
+        };
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        if !session.artifacts_accepted() || session.artifacts_rejected() {
+            self.artifacts_status = Some(ARTIFACTS_UNAVAILABLE.into());
+            return;
+        }
+        match session.artifact_list(&task_id, None) {
+            Ok(list) => {
+                if list.truncated && self.artifacts_status.is_none() {
+                    self.artifacts_status = Some("список артефактов усечён".into());
+                }
+                self.artifacts = list.items.into_iter().map(ArtifactStub::from).collect();
+                if self
+                    .selected_artifact_id
+                    .as_ref()
+                    .map(|id| !self.artifacts.iter().any(|a| &a.id == id))
+                    .unwrap_or(false)
+                {
+                    self.selected_artifact_id = None;
+                    self.artifact_threads.clear();
+                }
+                if let Some(id) = self.selected_artifact_id.clone() {
+                    self.load_artifact_detail(&id);
+                }
+                if self.artifacts_status.as_deref() == Some(ARTIFACTS_UNAVAILABLE) {
+                    self.artifacts_status = None;
+                }
+            }
+            Err(err) => self.surface_artifacts_error(err),
+        }
+    }
+
+    fn load_artifact_detail(&mut self, artifact_id: &str) {
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        if !session.artifacts_accepted() {
+            return;
+        }
+        match session.artifact_get(artifact_id) {
+            Ok(ok) => {
+                let stub = ArtifactStub::from(ok);
+                if let Some(existing) = self.artifacts.iter_mut().find(|a| a.id == stub.id) {
+                    *existing = stub.clone();
+                }
+                self.artifact_title_draft = stub.title.clone();
+                self.artifact_body_draft = stub.body.clone();
+                self.artifact_status_draft = stub.status.clone().unwrap_or_default();
+                self.artifact_assignee_draft = stub.assignee.clone().unwrap_or_default();
+            }
+            Err(err) => self.surface_artifacts_error(err),
+        }
+        match session.comment_list(artifact_id) {
+            Ok(list) => {
+                self.artifact_threads = list.threads.into_iter().map(CommentThread::from).collect();
+            }
+            Err(err) => self.surface_artifacts_error(err),
+        }
+    }
+
+    pub fn select_artifact(&mut self, id: String) {
+        self.selected_artifact_id = Some(id.clone());
+        self.artifact_editing = false;
+        self.artifact_selection = None;
+        self.load_artifact_detail(&id);
+    }
+
+    pub fn create_artifact(&mut self) {
+        if self.selected_task_id.is_none() {
+            self.toast = Some(NEED_TASK.into());
+            return;
+        }
+        if !self.can_create_artifact() {
+            if self.can_rpc() && !self.artifacts_host_ok() {
+                self.toast = Some(ARTIFACTS_UNAVAILABLE.into());
+                self.artifacts_status = Some(ARTIFACTS_UNAVAILABLE.into());
+            }
+            return;
+        }
+        let Some(task_id) = self.selected_task_id.clone() else {
+            return;
+        };
+        let title = self.artifact_create_title.trim().to_string();
+        if title.is_empty() {
+            self.toast = Some(artifacts::CREATE_TITLE_HINT.into());
+            return;
+        }
+        let kind = self.artifact_create_kind.as_wire();
+        if !CREATE_KINDS.contains(&kind) {
+            return;
+        }
+        let parent = if self.artifact_create_as_child {
+            self.selected_artifact_id.clone()
+        } else {
+            None
+        };
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        match session.artifact_create(&task_id, kind, &title, "", parent.as_deref(), None) {
+            Ok(ok) => {
+                self.artifact_create_title.clear();
+                let stub = ArtifactStub::from(ok);
+                let id = stub.id.clone();
+                self.artifacts.push(stub);
+                self.select_artifact(id);
+            }
+            Err(err) => self.surface_artifacts_error(err),
+        }
+    }
+
+    pub fn save_artifact_body(&mut self) {
+        let Some(id) = self.selected_artifact_id.clone() else {
+            return;
+        };
+        if !self.artifacts_host_ok() {
+            self.toast = Some(ARTIFACTS_UNAVAILABLE.into());
+            return;
+        }
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        let title = self.artifact_title_draft.trim().to_string();
+        let body = self.artifact_body_draft.clone();
+        let allows_status = self
+            .selected_artifact()
+            .map(|a| a.allows_status())
+            .unwrap_or(false);
+        let status = if allows_status && !self.artifact_status_draft.trim().is_empty() {
+            Some(self.artifact_status_draft.trim())
+        } else {
+            None
+        };
+        let assignee = if allows_status && !self.artifact_assignee_draft.trim().is_empty() {
+            Some(self.artifact_assignee_draft.trim())
+        } else {
+            None
+        };
+        match session.artifact_update(&id, Some(&title), Some(&body), status, assignee, None) {
+            Ok(ok) => {
+                let stub = ArtifactStub::from(ok);
+                if let Some(existing) = self.artifacts.iter_mut().find(|a| a.id == stub.id) {
+                    *existing = stub;
+                }
+                self.artifact_editing = false;
+            }
+            Err(err) => self.surface_artifacts_error(err),
+        }
+    }
+
+    pub fn set_artifact_status(&mut self, status: String) {
+        self.artifact_status_draft = status;
+        self.save_artifact_body();
+    }
+
+    pub fn delete_selected_artifact(&mut self) {
+        let Some(id) = self.selected_artifact_id.clone() else {
+            return;
+        };
+        if !self.artifacts_host_ok() {
+            self.toast = Some(ARTIFACTS_UNAVAILABLE.into());
+            return;
+        }
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        match session.artifact_delete(&id) {
+            Ok(ok) => {
+                self.artifacts
+                    .retain(|a| !ok.deleted.iter().any(|d| d == &a.id));
+                self.selected_artifact_id = None;
+                self.artifact_threads.clear();
+            }
+            Err(err) => self.surface_artifacts_error(err),
+        }
+    }
+
+    pub fn export_selected_markdown(&mut self) -> Option<(String, String)> {
+        let id = self.selected_artifact_id.clone()?;
+        if !self.artifacts_host_ok() {
+            self.toast = Some(ARTIFACTS_UNAVAILABLE.into());
+            return None;
+        }
+        let session = self.session.clone()?;
+        match session.artifact_export(&id, EXPORT_FORMAT) {
+            Ok(ok) => {
+                let filename = if ok.filename.trim().is_empty() {
+                    format!("{id}.md")
+                } else {
+                    ok.filename
+                };
+                if ok.format == "pdf" {
+                    self.toast = Some("PDF не поддерживается".into());
+                    return None;
+                }
+                Some((filename, ok.markdown))
+            }
+            Err(err) => {
+                self.surface_artifacts_error(err);
+                None
+            }
+        }
+    }
+
+    pub fn save_exported_markdown(&mut self, filename: &str, markdown: &str) {
+        if let Some(path) = rfd::FileDialog::new()
+            .set_title(artifacts::EXPORT_MARKDOWN)
+            .set_file_name(filename)
+            .add_filter("Markdown", &["md"])
+            .save_file()
+        {
+            match std::fs::write(&path, markdown) {
+                Ok(()) => self.toast = Some(artifacts::EXPORT_SAVED.into()),
+                Err(err) => self.toast = Some(err.to_string()),
+            }
+        }
+    }
+
+    pub fn request_clear_transcript(&mut self) {
+        if self.selected_task_id.is_none() {
+            self.toast = Some(NEED_TASK.into());
+            return;
+        }
+        if self.selected_agent().is_none() {
+            return;
+        }
+        if !self.artifacts_host_ok() {
+            self.toast = Some(ARTIFACTS_UNAVAILABLE.into());
+            self.artifacts_status = Some(ARTIFACTS_UNAVAILABLE.into());
+            return;
+        }
+        self.show_clear_transcript_confirm = true;
+    }
+
+    pub fn cancel_clear_transcript(&mut self) {
+        self.show_clear_transcript_confirm = false;
+    }
+
+    pub fn confirm_clear_transcript(&mut self) {
+        self.show_clear_transcript_confirm = false;
+        if !self.can_clear_transcript() {
+            if self.selected_task_id.is_none() {
+                self.toast = Some(NEED_TASK.into());
+            } else if self.can_rpc() && !self.artifacts_host_ok() {
+                self.toast = Some(ARTIFACTS_UNAVAILABLE.into());
+            }
+            return;
+        }
+        let Some(agent_id) = self.selected_agent().map(|a| a.id.clone()) else {
+            return;
+        };
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        match session.agent_clear_transcript(&agent_id) {
+            Ok(ok) => {
+                let _ = ok.cleared;
+                self.messages.clear();
+            }
+            Err(err) => self.surface_artifacts_error(err),
+        }
+    }
+
+    pub fn open_comment_thread(&mut self) {
+        let Some(artifact_id) = self.selected_artifact_id.clone() else {
+            return;
+        };
+        let Some((start, end)) = self
+            .artifact_selection
+            .and_then(|(s, e)| artifacts::utf8_range(s, e))
+        else {
+            self.toast = Some(artifacts::NO_SELECTION.into());
+            return;
+        };
+        let body = self.artifact_comment_draft.trim().to_string();
+        if body.is_empty() {
+            self.toast = Some(artifacts::COMMENT_HINT.into());
+            return;
+        }
+        if !self.artifacts_host_ok() {
+            self.toast = Some(ARTIFACTS_UNAVAILABLE.into());
+            return;
+        }
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        match session.comment_create(
+            &artifact_id,
+            None,
+            Some(start as i64),
+            Some(end as i64),
+            &body,
+        ) {
+            Ok(thread) => {
+                self.artifact_comment_draft.clear();
+                self.artifact_threads.push(CommentThread::from(thread));
+            }
+            Err(err) => self.surface_artifacts_error(err),
+        }
+    }
+
+    pub fn reply_comment(&mut self, thread_id: String) {
+        let Some(artifact_id) = self.selected_artifact_id.clone() else {
+            return;
+        };
+        let body = self
+            .artifact_reply_drafts
+            .get(&thread_id)
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
+        if body.is_empty() {
+            return;
+        }
+        if !self.artifacts_host_ok() {
+            self.toast = Some(ARTIFACTS_UNAVAILABLE.into());
+            return;
+        }
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        match session.comment_create(&artifact_id, Some(&thread_id), None, None, &body) {
+            Ok(thread) => {
+                self.artifact_reply_drafts.remove(&thread_id);
+                let updated = CommentThread::from(thread);
+                if let Some(existing) = self
+                    .artifact_threads
+                    .iter_mut()
+                    .find(|t| t.id == updated.id)
+                {
+                    *existing = updated;
+                } else {
+                    self.artifact_threads.push(updated);
+                }
+            }
+            Err(err) => self.surface_artifacts_error(err),
+        }
+    }
+
+    pub fn resolve_comment(&mut self, thread_id: String) {
+        if !self.artifacts_host_ok() {
+            self.toast = Some(ARTIFACTS_UNAVAILABLE.into());
+            return;
+        }
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        match session.comment_resolve(&thread_id) {
+            Ok(thread) => {
+                let updated = CommentThread::from(thread);
+                if let Some(existing) = self
+                    .artifact_threads
+                    .iter_mut()
+                    .find(|t| t.id == updated.id)
+                {
+                    *existing = updated;
+                }
+            }
+            Err(err) => self.surface_artifacts_error(err),
         }
     }
 
@@ -3995,5 +4494,361 @@ mod tests {
         assert_eq!(state.messages[0].content, "hi");
         assert_eq!(state.pty_scrollback("pty-1"), "ls\n");
         assert!(!state.messages.iter().any(|m| m.content.contains("ls")));
+    }
+
+    fn session_without_1_4() -> crate::rpc::Session {
+        use std::collections::BTreeMap;
+        let mut rejected = BTreeMap::new();
+        for name in crate::rpc::ARTIFACT_METHODS {
+            rejected.insert((*name).to_string(), "unsupported".into());
+        }
+        crate::rpc::Session {
+            host_id: "host-a".into(),
+            host_version: "0.1.0".into(),
+            session_token: "tok-1".into(),
+            rpc_url: "http://127.0.0.1:1".into(),
+            ws_url: None,
+            accepted: BTreeMap::new(),
+            rejected,
+        }
+    }
+
+    fn start_artifacts_state_mock() -> SliceMock {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(Mutex::new(Vec::new()));
+        let hits_t = hits.clone();
+        thread::spawn(move || {
+            let store = Arc::new(Mutex::new(Vec::<Value>::new()));
+            let messages_left = Arc::new(Mutex::new(2i64));
+            for stream in listener.incoming().take(48) {
+                let Ok(mut stream) = stream else { break };
+                let (headers, body) = read_http_request(&mut stream);
+                let (method, params) = if headers.starts_with("GET /health") {
+                    ("GET /health".to_string(), json!({}))
+                } else {
+                    let parsed: Value = serde_json::from_slice(&body).unwrap_or(json!({}));
+                    (
+                        parsed
+                            .get("method")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("other")
+                            .to_string(),
+                        parsed.get("params").cloned().unwrap_or(json!({})),
+                    )
+                };
+                hits_t.lock().unwrap().push(RpcHit {
+                    method: method.clone(),
+                    params: params.clone(),
+                });
+                let kind = params
+                    .get("kind")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("spec")
+                    .to_string();
+                let status = if kind == "ticket" || kind == "story" {
+                    json!("todo")
+                } else {
+                    Value::Null
+                };
+                let sample = json!({
+                    "id": params.get("artifactId").cloned().unwrap_or(json!("art-1")),
+                    "taskId": params.get("taskId").cloned().unwrap_or(json!("task-1")),
+                    "parentId": params.get("parentId").cloned().unwrap_or(Value::Null),
+                    "kind": kind,
+                    "title": params.get("title").cloned().unwrap_or(json!("Auth")),
+                    "body": params.get("body").cloned().unwrap_or(json!("body")),
+                    "status": status,
+                    "assignee": null,
+                    "sourceMessageId": null,
+                    "createdAt": "t",
+                    "updatedAt": "t"
+                });
+                let thread = json!({
+                    "id": params.get("threadId").cloned().unwrap_or(json!("th-1")),
+                    "artifactId": "art-1",
+                    "anchorStart": params.get("anchorStart").cloned().unwrap_or(json!(0)),
+                    "anchorEnd": params.get("anchorEnd").cloned().unwrap_or(json!(12)),
+                    "resolved": method == "comment.resolve",
+                    "comments": [{ "id": "c-1", "body": params.get("body").cloned().unwrap_or(json!("nit")), "createdAt": "t" }],
+                    "createdAt": "t",
+                    "updatedAt": "t"
+                });
+                if method == "artifact.create" {
+                    store.lock().unwrap().push(sample.clone());
+                }
+                if method == "artifact.update" {
+                    let mut items = store.lock().unwrap();
+                    if let Some(existing) = items.iter_mut().find(|a| a["id"] == sample["id"]) {
+                        if let Some(body) = params.get("body") {
+                            existing["body"] = body.clone();
+                        }
+                        if let Some(title) = params.get("title") {
+                            existing["title"] = title.clone();
+                        }
+                    } else {
+                        items.push(sample.clone());
+                    }
+                }
+                let listed = store.lock().unwrap().clone();
+                let body = match method.as_str() {
+                    "GET /health" => json!({"ok": true, "hostId": "host-a"}).to_string(),
+                    "handshake" => {
+                        let mut accepted = serde_json::Map::new();
+                        for name in crate::rpc::ARTIFACT_METHODS {
+                            accepted.insert(name.to_string(), json!({"major": 1, "minor": 4}));
+                        }
+                        json!({
+                            "id": "echo",
+                            "ok": {
+                                "hostId": "host-a",
+                                "hostVersion": "0.1.0",
+                                "sessionToken": "tok-1",
+                                "accepted": accepted,
+                                "rejected": {}
+                            }
+                        })
+                        .to_string()
+                    }
+                    "host.ping" => json!({
+                        "id": "echo",
+                        "ok": { "hostId": "host-a", "now": "t" }
+                    })
+                    .to_string(),
+                    "artifact.create" | "artifact.get" | "artifact.update" => {
+                        json!({ "id": "echo", "ok": sample }).to_string()
+                    }
+                    "artifact.list" => json!({
+                        "id": "echo",
+                        "ok": { "items": listed, "truncated": false }
+                    })
+                    .to_string(),
+                    "artifact.export" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "format": params.get("format").cloned().unwrap_or(json!("md")),
+                            "markdown": "# Auth",
+                            "filename": "art-1.md"
+                        }
+                    })
+                    .to_string(),
+                    "comment.create" | "comment.resolve" => {
+                        json!({ "id": "echo", "ok": thread }).to_string()
+                    }
+                    "comment.list" => json!({
+                        "id": "echo",
+                        "ok": { "threads": [] }
+                    })
+                    .to_string(),
+                    "agent.clear_transcript" => {
+                        *messages_left.lock().unwrap() = 0;
+                        json!({ "id": "echo", "ok": { "cleared": 2 } }).to_string()
+                    }
+                    "agent.get_context" => json!({
+                        "id": "echo",
+                        "ok": { "messages": [] }
+                    })
+                    .to_string(),
+                    _ => json!({
+                        "id": "echo",
+                        "error": { "code": "unsupported_method", "message": "no" }
+                    })
+                    .to_string(),
+                };
+                write_http_json(&mut stream, &body);
+            }
+        });
+        SliceMock {
+            origin: format!("http://{addr}"),
+            hits,
+        }
+    }
+
+    #[test]
+    fn create_sends_kind_spec_ticket_story_review() {
+        let mock = start_artifacts_state_mock();
+        let session = connect(&pid(&mock.origin)).expect("online");
+        let mut state = online_state(session);
+        for kind in ArtifactKind::ALL {
+            state.artifact_create_kind = kind;
+            state.artifact_create_title = format!("item-{}", kind.as_wire());
+            state.create_artifact();
+        }
+        let hits = mock.hits.lock().unwrap().clone();
+        let kinds: Vec<String> = hits
+            .iter()
+            .filter(|h| h.method == "artifact.create")
+            .map(|h| h.params["kind"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(kinds, vec!["spec", "ticket", "story", "review"]);
+        assert!(!hits.iter().any(|h| h.method == "files.write"));
+    }
+
+    #[test]
+    fn update_body_uses_artifact_update_not_files_write() {
+        let mock = start_artifacts_state_mock();
+        let session = connect(&pid(&mock.origin)).expect("online");
+        let mut state = online_state(session);
+        state.artifact_create_kind = ArtifactKind::Spec;
+        state.artifact_create_title = "Auth".into();
+        state.create_artifact();
+        state.artifact_body_draft = "new body".into();
+        state.save_artifact_body();
+        let hits = mock.hits.lock().unwrap().clone();
+        let update = hits
+            .iter()
+            .find(|h| h.method == "artifact.update")
+            .expect("artifact.update");
+        assert_eq!(update.params["body"], "new body");
+        assert!(update.params.get("path").is_none());
+        assert!(!hits.iter().any(|h| h.method == "files.write"));
+    }
+
+    #[test]
+    fn export_markdown_sends_method_and_format() {
+        let mock = start_artifacts_state_mock();
+        let session = connect(&pid(&mock.origin)).expect("online");
+        let mut state = online_state(session);
+        state.selected_artifact_id = Some("art-1".into());
+        let exported = state.export_selected_markdown().expect("export");
+        assert_eq!(exported.0, "art-1.md");
+        let hits = mock.hits.lock().unwrap().clone();
+        let export = hits
+            .iter()
+            .find(|h| h.method == "artifact.export")
+            .expect("export");
+        assert_eq!(export.params["format"], "md");
+        assert_eq!(export.params["artifactId"], "art-1");
+        assert!(!hits.iter().any(|h| h.method == "files.write"));
+    }
+
+    #[test]
+    fn clear_transcript_requires_confirm_then_keeps_artifacts() {
+        let mock = start_artifacts_state_mock();
+        let session = connect(&pid(&mock.origin)).expect("online");
+        let mut state = online_state(session);
+        state.messages.push(ChatMessage {
+            id: "m1".into(),
+            role: "user".into(),
+            content: "keep then clear".into(),
+        });
+        state.artifact_create_kind = ArtifactKind::Spec;
+        state.artifact_create_title = "Spec".into();
+        state.create_artifact();
+        assert!(!state.artifacts.is_empty());
+        state.request_clear_transcript();
+        assert!(state.show_clear_transcript_confirm);
+        assert_eq!(state.messages.len(), 1);
+        let hits_before = mock
+            .hits
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|h| h.method == "agent.clear_transcript")
+            .count();
+        assert_eq!(hits_before, 0);
+        state.cancel_clear_transcript();
+        assert!(!state.show_clear_transcript_confirm);
+        assert_eq!(state.messages.len(), 1);
+        state.request_clear_transcript();
+        state.confirm_clear_transcript();
+        assert!(!state.show_clear_transcript_confirm);
+        assert!(state.messages.is_empty());
+        assert!(!state.artifacts.is_empty());
+        let hits = mock.hits.lock().unwrap().clone();
+        assert!(hits.iter().any(|h| h.method == "agent.clear_transcript"));
+    }
+
+    #[test]
+    fn no_task_cannot_create_or_clear() {
+        let mut state = AppState::new();
+        state.pending_discover = false;
+        state.demo = false;
+        state.host_status = HostStatus::Online;
+        state.session = Some(session_without_1_4());
+        assert!(state.selected_task_id.is_none());
+        state.artifact_create_title = "x".into();
+        state.create_artifact();
+        assert_eq!(state.toast.as_deref(), Some(NEED_TASK));
+        assert!(state.artifacts.is_empty());
+        state.request_clear_transcript();
+        assert!(!state.show_clear_transcript_confirm);
+        assert_eq!(state.toast.as_deref(), Some(NEED_TASK));
+    }
+
+    #[test]
+    fn old_host_artifacts_toast_and_does_not_panic() {
+        let mut state = AppState::new();
+        state.pending_discover = false;
+        state.demo = false;
+        state.host_status = HostStatus::Online;
+        state.session = Some(session_without_1_4());
+        state.workspace_id = Some("ws-1".into());
+        state.selected_task_id = Some("task-1".into());
+        state.selected_agent_id = Some("ag-1".into());
+        state.agents.push(AgentStub {
+            id: "ag-1".into(),
+            task_id: "task-1".into(),
+            provider: "cli.generic".into(),
+            status: AgentStatus::Idle,
+            interface: "chat".into(),
+        });
+        state.artifact_create_title = "x".into();
+        state.create_artifact();
+        assert_eq!(state.toast.as_deref(), Some(ARTIFACTS_UNAVAILABLE));
+        assert_eq!(
+            state.artifacts_status.as_deref(),
+            Some(ARTIFACTS_UNAVAILABLE)
+        );
+        assert!(state.artifacts.is_empty());
+        state.composer_text = "hello".into();
+        // chat / write / pty stay addressable — no panic on degrade
+        let _ = state.composer_enabled();
+        let _ = state.write_ready();
+        let _ = state.terminal_host_ok();
+        state.export_selected_markdown();
+        assert_eq!(state.toast.as_deref(), Some(ARTIFACTS_UNAVAILABLE));
+    }
+
+    #[test]
+    fn comments_open_reply_resolve_rpc() {
+        let mock = start_artifacts_state_mock();
+        let session = connect(&pid(&mock.origin)).expect("online");
+        let mut state = online_state(session);
+        state.selected_artifact_id = Some("art-1".into());
+        state.artifact_selection = Some((0, 12));
+        state.artifact_comment_draft = "nit".into();
+        state.open_comment_thread();
+        state
+            .artifact_reply_drafts
+            .insert("th-1".into(), "reply".into());
+        state.reply_comment("th-1".into());
+        state.resolve_comment("th-1".into());
+        let hits = mock.hits.lock().unwrap().clone();
+        let open = hits
+            .iter()
+            .find(|h| h.method == "comment.create" && h.params["threadId"].is_null())
+            .expect("open");
+        assert_eq!(open.params["anchorStart"], 0);
+        assert_eq!(open.params["anchorEnd"], 12);
+        assert_eq!(open.params["body"], "nit");
+        let reply = hits
+            .iter()
+            .find(|h| h.method == "comment.create" && h.params["threadId"] == "th-1")
+            .expect("reply");
+        assert_eq!(reply.params["body"], "reply");
+        let resolve = hits
+            .iter()
+            .find(|h| h.method == "comment.resolve")
+            .expect("resolve");
+        assert_eq!(resolve.params["threadId"], "th-1");
+    }
+
+    #[test]
+    fn comments_hidden_without_selected_artifact() {
+        let mut state = AppState::new();
+        assert!(!state.comments_visible());
+        state.selected_artifact_id = Some("art-1".into());
+        assert!(state.comments_visible());
     }
 }

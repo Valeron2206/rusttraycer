@@ -1,3 +1,10 @@
+use crate::artifacts::{
+    self, ArtifactKind, ARTIFACTS_PANE, ARTIFACTS_UNAVAILABLE, CLEAR_CONFIRM_BODY,
+    CLEAR_CONFIRM_OK, CLEAR_CONFIRM_TITLE, CLEAR_TRANSCRIPT, COMMENTS_HEADING, COMMENT_HINT,
+    COMMENT_ON_SELECTION, CREATE_AS_CHILD, CREATE_BUTTON, CREATE_KIND_LABEL, CREATE_TITLE_HINT,
+    DELETE_ARTIFACT, EDIT_BODY, EXPORT_MARKDOWN, FILTER_ALL, FILTER_KIND, FILTER_STATUS, NEED_TASK,
+    REPLY_BUTTON, RESOLVED_LABEL, RESOLVE_BUTTON, SAVE_BODY, STATUS_VALUES, VIEW_BODY,
+};
 use crate::ladder::{
     AgentPolicy, PaneKind, PolicyMode, APPROVAL_ALWAYS, APPROVAL_DENY, APPROVAL_ONCE,
     APPROVAL_TITLE, CAPS_LABEL, COMMIT_BUTTON, COMMIT_HINT, OPEN_IN_EDITOR, PICKER_EMPTY,
@@ -85,6 +92,10 @@ pub fn show_write_dialogs(ctx: &egui::Context, state: &mut AppState) {
     show_push_confirm(ctx, state);
 }
 
+pub fn show_artifact_dialogs(ctx: &egui::Context, state: &mut AppState) {
+    show_clear_transcript_confirm(ctx, state);
+}
+
 fn show_task_tabs(ctx: &egui::Context, state: &mut AppState) {
     if state.open_task_ids.is_empty() {
         return;
@@ -167,6 +178,7 @@ fn show_pane(
         }
         PaneKind::Host => crate::screens::host::show_body(ui, state),
         PaneKind::Terminal => show_shells(ui, state),
+        PaneKind::Artifacts => show_artifacts(ui, state),
     }
 }
 
@@ -194,6 +206,33 @@ fn show_yolo_confirm(ctx: &egui::Context, state: &mut AppState) {
         });
     if !open {
         state.cancel_yolo_confirm();
+    }
+}
+
+fn show_clear_transcript_confirm(ctx: &egui::Context, state: &mut AppState) {
+    if !state.show_clear_transcript_confirm {
+        return;
+    }
+    let mut open = true;
+    egui::Window::new(CLEAR_CONFIRM_TITLE)
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ctx, |ui| {
+            ui.label(CLEAR_CONFIRM_BODY);
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button(CLEAR_CONFIRM_OK).clicked() {
+                    state.confirm_clear_transcript();
+                }
+                if ui.button("Отмена").clicked() {
+                    state.cancel_clear_transcript();
+                }
+            });
+        });
+    if !open {
+        state.cancel_clear_transcript();
     }
 }
 
@@ -951,6 +990,11 @@ fn show_chat(ui: &mut egui::Ui, state: &mut AppState) {
         if show_stop && ui.button("Стоп").clicked() {
             state.cancel_running_agent();
         }
+        ui.add_enabled_ui(state.can_clear_transcript(), |ui| {
+            if ui.button(CLEAR_TRANSCRIPT).clicked() {
+                state.request_clear_transcript();
+            }
+        });
         ui.weak("один активный turn · очередь не строится");
     });
     if let Some(reason) = reason {
@@ -983,4 +1027,338 @@ fn bubble(ui: &mut egui::Ui, _id: &str, role: &str, content: &str) {
                 ui.label(content);
             });
     });
+}
+
+fn show_artifacts(ui: &mut egui::Ui, state: &mut AppState) {
+    ui.heading(ARTIFACTS_PANE);
+    if let Some(status) = state.artifacts_status.clone() {
+        ui.weak(status);
+    } else if state.can_rpc() && !state.artifacts_host_ok() {
+        ui.weak(ARTIFACTS_UNAVAILABLE);
+    }
+    if state.selected_task_id.is_none() {
+        ui.weak(NEED_TASK);
+    }
+    ui.add_space(6.0);
+    show_artifact_filters(ui, state);
+    ui.add_space(6.0);
+    show_artifact_create(ui, state);
+    ui.add_space(6.0);
+    ui.separator();
+    egui::ScrollArea::vertical()
+        .id_salt("artifact_tree")
+        .max_height(180.0)
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            show_artifact_tree(ui, state);
+        });
+    ui.add_space(6.0);
+    ui.separator();
+    show_artifact_viewer(ui, state);
+    if state.comments_visible() {
+        ui.add_space(8.0);
+        ui.separator();
+        show_comments(ui, state);
+    }
+}
+
+fn show_artifact_filters(ui: &mut egui::Ui, state: &mut AppState) {
+    ui.horizontal(|ui| {
+        ui.weak(FILTER_KIND);
+        let mut kind = state.artifact_kind_filter.clone();
+        egui::ComboBox::from_id_salt("artifact_kind_filter")
+            .selected_text(kind.clone())
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut kind, FILTER_ALL.into(), FILTER_ALL);
+                for k in ArtifactKind::ALL {
+                    ui.selectable_value(&mut kind, k.as_wire().to_string(), k.label_ru());
+                }
+            });
+        state.artifact_kind_filter = kind;
+        ui.weak(FILTER_STATUS);
+        let mut status = state.artifact_status_filter.clone();
+        egui::ComboBox::from_id_salt("artifact_status_filter")
+            .selected_text(status.clone())
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut status, FILTER_ALL.into(), FILTER_ALL);
+                for s in STATUS_VALUES {
+                    ui.selectable_value(&mut status, (*s).to_string(), s);
+                }
+            });
+        state.artifact_status_filter = status;
+    });
+}
+
+fn show_artifact_create(ui: &mut egui::Ui, state: &mut AppState) {
+    ui.horizontal(|ui| {
+        ui.weak(CREATE_KIND_LABEL);
+        let mut kind = state.artifact_create_kind;
+        egui::ComboBox::from_id_salt("artifact_create_kind")
+            .selected_text(kind.label_ru())
+            .show_ui(ui, |ui| {
+                for k in ArtifactKind::ALL {
+                    ui.selectable_value(&mut kind, k, k.label_ru());
+                }
+            });
+        state.artifact_create_kind = kind;
+        ui.add(
+            egui::TextEdit::singleline(&mut state.artifact_create_title)
+                .hint_text(CREATE_TITLE_HINT)
+                .desired_width(160.0),
+        );
+        ui.checkbox(&mut state.artifact_create_as_child, CREATE_AS_CHILD);
+        ui.add_enabled_ui(state.can_create_artifact(), |ui| {
+            if ui.button(CREATE_BUTTON).clicked() {
+                state.create_artifact();
+            }
+        });
+    });
+}
+
+fn show_artifact_tree(ui: &mut egui::Ui, state: &mut AppState) {
+    let kind = if state.artifact_kind_filter == FILTER_ALL {
+        None
+    } else {
+        Some(state.artifact_kind_filter.as_str())
+    };
+    let status = if state.artifact_status_filter == FILTER_ALL {
+        None
+    } else {
+        Some(state.artifact_status_filter.as_str())
+    };
+    let tree = artifacts::build_tree(&state.artifacts, kind, status);
+    if tree.is_empty() {
+        ui.weak("нет артефактов");
+        return;
+    }
+    let selected = state.selected_artifact_id.clone();
+    let mut pick = None;
+    fn row(
+        ui: &mut egui::Ui,
+        state: &AppState,
+        node: &artifacts::ArtifactTreeNode,
+        selected: Option<&str>,
+        pick: &mut Option<String>,
+        depth: usize,
+    ) {
+        let title = state
+            .artifacts
+            .iter()
+            .find(|a| a.id == node.id)
+            .map(|a| format!("{} · {}", a.kind, a.title))
+            .unwrap_or_else(|| node.id.clone());
+        ui.horizontal(|ui| {
+            ui.add_space(depth as f32 * 12.0);
+            if ui
+                .selectable_label(selected == Some(node.id.as_str()), title)
+                .clicked()
+            {
+                *pick = Some(node.id.clone());
+            }
+        });
+        for child in &node.children {
+            row(ui, state, child, selected, pick, depth + 1);
+        }
+    }
+    for node in &tree {
+        row(ui, state, node, selected.as_deref(), &mut pick, 0);
+    }
+    if let Some(id) = pick {
+        state.select_artifact(id);
+    }
+}
+
+fn show_artifact_viewer(ui: &mut egui::Ui, state: &mut AppState) {
+    let Some(id) = state.selected_artifact_id.clone() else {
+        ui.weak("выберите артефакт");
+        return;
+    };
+    let meta = state.artifacts.iter().find(|a| a.id == id).map(|a| {
+        (
+            a.kind.clone(),
+            a.allows_status(),
+            a.status.clone(),
+            a.created_at.clone(),
+            a.updated_at.clone(),
+        )
+    });
+    let Some((kind, allows_status, status, created_at, updated_at)) = meta else {
+        ui.weak("выберите артефакт");
+        return;
+    };
+    ui.horizontal(|ui| {
+        ui.strong(&state.artifact_title_draft);
+        ui.weak(kind);
+        if let Some(st) = status {
+            ui.weak(st);
+        }
+        if !updated_at.is_empty() {
+            ui.weak(updated_at);
+        } else if !created_at.is_empty() {
+            ui.weak(created_at);
+        }
+    });
+    ui.add(
+        egui::TextEdit::singleline(&mut state.artifact_title_draft).desired_width(f32::INFINITY),
+    );
+    if allows_status {
+        ui.horizontal(|ui| {
+            let mut next = state.artifact_status_draft.clone();
+            egui::ComboBox::from_id_salt("artifact_status")
+                .selected_text(if next.is_empty() {
+                    "todo"
+                } else {
+                    next.as_str()
+                })
+                .show_ui(ui, |ui| {
+                    for s in STATUS_VALUES {
+                        ui.selectable_value(&mut next, (*s).to_string(), s);
+                    }
+                });
+            if next != state.artifact_status_draft {
+                state.set_artifact_status(next);
+            }
+            ui.add(
+                egui::TextEdit::singleline(&mut state.artifact_assignee_draft)
+                    .hint_text("assignee")
+                    .desired_width(120.0),
+            );
+        });
+    }
+    ui.horizontal(|ui| {
+        if ui
+            .selectable_label(!state.artifact_editing, VIEW_BODY)
+            .clicked()
+        {
+            state.artifact_editing = false;
+        }
+        if ui
+            .selectable_label(state.artifact_editing, EDIT_BODY)
+            .clicked()
+        {
+            state.artifact_editing = true;
+        }
+        if ui.button(SAVE_BODY).clicked() {
+            state.save_artifact_body();
+        }
+        if ui.button(EXPORT_MARKDOWN).clicked() {
+            if let Some((filename, markdown)) = state.export_selected_markdown() {
+                state.save_exported_markdown(&filename, &markdown);
+            }
+        }
+        if ui.button(DELETE_ARTIFACT).clicked() {
+            state.delete_selected_artifact();
+        }
+    });
+    ui.add_space(4.0);
+    if state.artifact_editing {
+        let output = egui::TextEdit::multiline(&mut state.artifact_body_draft)
+            .desired_width(f32::INFINITY)
+            .desired_rows(12)
+            .show(ui);
+        if let Some(range) = output.cursor_range {
+            let a = range.primary.ccursor.index;
+            let b = range.secondary.ccursor.index;
+            let (start, end) = if a <= b { (a, b) } else { (b, a) };
+            state.artifact_selection = Some((start, end));
+        }
+    } else {
+        let output = egui::TextEdit::multiline(&mut state.artifact_body_draft)
+            .desired_width(f32::INFINITY)
+            .desired_rows(4)
+            .hint_text("выделите текст для комментария")
+            .show(ui);
+        if let Some(range) = output.cursor_range {
+            let a = range.primary.ccursor.index;
+            let b = range.secondary.ccursor.index;
+            let (start, end) = if a <= b { (a, b) } else { (b, a) };
+            state.artifact_selection = Some((start, end));
+        }
+        ui.add_space(6.0);
+        artifacts::show_markdown(ui, &state.artifact_body_draft);
+    }
+}
+
+fn show_comments(ui: &mut egui::Ui, state: &mut AppState) {
+    ui.heading(COMMENTS_HEADING);
+    ui.horizontal(|ui| {
+        ui.add(
+            egui::TextEdit::singleline(&mut state.artifact_comment_draft)
+                .hint_text(COMMENT_HINT)
+                .desired_width(220.0),
+        );
+        if ui.button(COMMENT_ON_SELECTION).clicked() {
+            state.open_comment_thread();
+        }
+    });
+    let thread_ids: Vec<String> = state
+        .artifact_threads
+        .iter()
+        .map(|t| t.id.clone())
+        .collect();
+    for id in thread_ids {
+        let Some((resolved, start, end, created_at, updated_at, comments)) =
+            state.artifact_threads.iter().find(|t| t.id == id).map(|t| {
+                (
+                    t.resolved,
+                    t.anchor_start,
+                    t.anchor_end,
+                    t.created_at.clone(),
+                    t.updated_at.clone(),
+                    t.comments
+                        .iter()
+                        .map(|c| (c.body.clone(), c.created_at.clone()))
+                        .collect::<Vec<_>>(),
+                )
+            })
+        else {
+            continue;
+        };
+        egui::Frame::new()
+            .fill(egui::Color32::from_rgb(30, 30, 36))
+            .inner_margin(egui::Margin::same(8))
+            .corner_radius(6.0)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.weak(format!("{start}–{end}"));
+                    if !created_at.is_empty() {
+                        ui.weak(&created_at);
+                    } else if !updated_at.is_empty() {
+                        ui.weak(&updated_at);
+                    }
+                    if resolved {
+                        ui.weak(RESOLVED_LABEL);
+                    } else if ui.small_button(RESOLVE_BUTTON).clicked() {
+                        state.resolve_comment(id.clone());
+                    }
+                });
+                for (body, at) in &comments {
+                    ui.label(body);
+                    if !at.is_empty() {
+                        ui.weak(at);
+                    }
+                }
+                let mut draft = state
+                    .artifact_reply_drafts
+                    .get(&id)
+                    .cloned()
+                    .unwrap_or_default();
+                let mut send_reply = false;
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut draft)
+                            .hint_text(COMMENT_HINT)
+                            .desired_width(180.0),
+                    );
+                    if ui.small_button(REPLY_BUTTON).clicked() {
+                        send_reply = true;
+                    }
+                });
+                state.artifact_reply_drafts.insert(id.clone(), draft);
+                if send_reply {
+                    state.reply_comment(id.clone());
+                }
+            });
+        ui.add_space(4.0);
+    }
 }

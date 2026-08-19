@@ -124,6 +124,7 @@ pub enum PaneKind {
     Files,
     Host,
     Terminal,
+    Artifacts,
 }
 
 impl PaneKind {
@@ -134,6 +135,7 @@ impl PaneKind {
             Self::Files => "files",
             Self::Host => "host",
             Self::Terminal => "terminal",
+            Self::Artifacts => "artifacts",
         }
     }
 
@@ -144,6 +146,7 @@ impl PaneKind {
             "files" => Some(Self::Files),
             "host" => Some(Self::Host),
             "terminal" => Some(Self::Terminal),
+            "artifacts" => Some(Self::Artifacts),
             _ => None,
         }
     }
@@ -155,15 +158,17 @@ impl PaneKind {
             Self::Files => "Файлы",
             Self::Host => "Host",
             Self::Terminal => crate::terminal::TERMINALS_PANE,
+            Self::Artifacts => crate::artifacts::ARTIFACTS_PANE,
         }
     }
 
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Canvas,
         Self::Git,
         Self::Files,
         Self::Host,
         Self::Terminal,
+        Self::Artifacts,
     ];
 }
 
@@ -280,6 +285,9 @@ mod tests {
         assert_eq!(PaneKind::from_id("terminal"), Some(PaneKind::Terminal));
         assert_eq!(PaneKind::Terminal.as_id(), "terminal");
         assert_eq!(PaneKind::Terminal.label_ru(), "Терминалы");
+        assert_eq!(PaneKind::from_id("artifacts"), Some(PaneKind::Artifacts));
+        assert_eq!(PaneKind::Artifacts.as_id(), "artifacts");
+        assert_eq!(PaneKind::Artifacts.label_ru(), "Артефакты");
     }
 
     #[test]
