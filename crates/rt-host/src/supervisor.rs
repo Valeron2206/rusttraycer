@@ -71,8 +71,9 @@ impl Inflight {
                 }
             }
         }
-        // Slot gone, generation mismatch, or poison: do not leak a detached task.
-        handle.abort();
+        // Slot gone (cancel already took it), generation mismatch, or poison:
+        // drop the handle so the turn task can flush leftover tokens.
+        drop(handle);
     }
 
     /// Drop the slot only if it still belongs to `gen`.
@@ -94,6 +95,15 @@ impl Inflight {
             Ok(g) => g.get(agent_id).is_some_and(|s| s.gen == gen),
             Err(_) => false,
         }
+    }
+
+    /// Remove the slot and return the join handle without aborting, so the
+    /// old task can flush leftover tokens and exit. `None` if there was no slot.
+    pub fn take(&self, agent_id: &str) -> Result<Option<JoinHandle<()>>, HostError> {
+        Ok(self
+            .lock_map()?
+            .remove(agent_id)
+            .and_then(|slot| slot.handle))
     }
 
     /// Wait up to `grace` for turns to finish, then abort the rest (kills children).
@@ -148,8 +158,10 @@ pub async fn run_turn(
     agent_id: String,
     task_id: String,
     events: tokio::sync::broadcast::Sender<WsEvent>,
+    ownership: (Inflight, u64),
 ) {
     tracing::info!(agent_id = %agent_id, task_id = %task_id, "turn start");
+    let (inflight, gen) = ownership;
     let mut stream = backend.start_turn(req);
     let mut buf = String::new();
     let mut tick = interval(FLUSH_EVERY);
@@ -177,6 +189,11 @@ pub async fn run_turn(
     };
 
     let set_status = |status: AgentStatus| {
+        // Only the generation that still owns the slot may write a terminal
+        // status. A cancelled or superseded turn must not clobber a newer Running.
+        if !inflight.owns(&agent_id, gen) {
+            return;
+        }
         if let Err(e) = store.agent_set_status(&agent_id, status) {
             tracing::error!("set agent status: {e}");
         }
@@ -205,7 +222,11 @@ pub async fn run_turn(
                     Some(TurnEvent::Failed { message }) => {
                         tracing::warn!(agent_id, %message, "turn failed");
                         flush(&mut buf, &store, &events, &agent_id, &task_id);
-                        set_status(AgentStatus::Error);
+                        // Cancel may emit Failed { cancelled } before take().
+                        // That is not a failure even if this generation still owns.
+                        if message != "cancelled" {
+                            set_status(AgentStatus::Error);
+                        }
                         return;
                     }
                     None => {
@@ -259,7 +280,15 @@ pub(crate) fn spawn_turn(args: SpawnTurn) -> JoinHandle<()> {
     let agent_done = agent_id.clone();
 
     tokio::spawn(async move {
-        let fut = run_turn(store, backend, req, agent_id, task_id, events);
+        let fut = run_turn(
+            store,
+            backend,
+            req,
+            agent_id,
+            task_id,
+            events,
+            (inflight_done.clone(), gen),
+        );
         let timed = tokio::time::timeout(timeout, fut);
         let outcome = std::panic::AssertUnwindSafe(timed).catch_unwind().await;
         match outcome {
@@ -286,18 +315,22 @@ pub(crate) fn spawn_turn(args: SpawnTurn) -> JoinHandle<()> {
             }
             Err(_) => {
                 tracing::error!(agent_id = %agent_for_err, "turn task panicked");
-                if let Err(e) = store_for_err.agent_set_status(&agent_for_err, AgentStatus::Error) {
-                    tracing::error!(error = %e, "set agent status after panic");
-                }
-                if events_for_err
-                    .send(WsEvent::agent_status(
-                        &task_for_err,
-                        &agent_for_err,
-                        AgentStatus::Error,
-                    ))
-                    .is_err()
-                {
-                    tracing::debug!("no ws subscribers for panic status");
+                if inflight_done.owns(&agent_done, gen) {
+                    if let Err(e) =
+                        store_for_err.agent_set_status(&agent_for_err, AgentStatus::Error)
+                    {
+                        tracing::error!(error = %e, "set agent status after panic");
+                    }
+                    if events_for_err
+                        .send(WsEvent::agent_status(
+                            &task_for_err,
+                            &agent_for_err,
+                            AgentStatus::Error,
+                        ))
+                        .is_err()
+                    {
+                        tracing::debug!("no ws subscribers for panic status");
+                    }
                 }
             }
         }

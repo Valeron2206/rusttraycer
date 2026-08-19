@@ -46,6 +46,7 @@ fn all_methods() -> Value {
         "agent.get",
         "agent.send",
         "agent.get_context",
+        "agent.cancel",
         "files.tree",
         "files.read",
         "worktree.ensure",
@@ -143,8 +144,27 @@ async fn host_loop_echo_files_and_busy() {
     assert!(hs["ok"]["accepted"]["files.tree"].is_object(), "{hs}");
     let token = hs["ok"]["sessionToken"].as_str().unwrap().to_string();
 
-    let unknown = rpc(&client, &base, Some(&token), "agent.cancel", json!({})).await;
-    assert_eq!(unknown["error"]["code"], "unsupported_method");
+    assert!(hs["ok"]["accepted"]["agent.cancel"].is_object(), "{hs}");
+    let cancel_missing = rpc(&client, &base, Some(&token), "agent.cancel", json!({})).await;
+    assert_eq!(cancel_missing["error"]["code"], "invalid_params");
+    let cancel_bad = rpc(
+        &client,
+        &base,
+        Some(&token),
+        "agent.cancel",
+        json!({ "agentId": "not-a-uuid" }),
+    )
+    .await;
+    assert_eq!(cancel_bad["error"]["code"], "invalid_params");
+    let cancel_missing_agent = rpc(
+        &client,
+        &base,
+        Some(&token),
+        "agent.cancel",
+        json!({ "agentId": "0191f0c6-cccc-7000-8000-000000000003" }),
+    )
+    .await;
+    assert_eq!(cancel_missing_agent["error"]["code"], "not_found");
 
     let empty_hs = rpc(
         &client,
@@ -302,6 +322,17 @@ async fn host_loop_echo_files_and_busy() {
         }
     }
     assert!(idle, "agent did not return to idle");
+
+    let idle_cancel = rpc(
+        &client,
+        &base,
+        Some(&token),
+        "agent.cancel",
+        json!({ "agentId": agent_id }),
+    )
+    .await;
+    assert_eq!(idle_cancel["ok"]["agentId"], agent_id);
+    assert_eq!(idle_cancel["ok"]["cancelled"], false);
 
     let ctx = rpc(
         &client,

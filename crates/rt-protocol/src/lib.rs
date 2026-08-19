@@ -43,6 +43,7 @@ pub const METHOD_AGENT_CREATE: &str = "agent.create";
 pub const METHOD_AGENT_GET: &str = "agent.get";
 pub const METHOD_AGENT_SEND: &str = "agent.send";
 pub const METHOD_AGENT_GET_CONTEXT: &str = "agent.get_context";
+pub const METHOD_AGENT_CANCEL: &str = "agent.cancel";
 pub const METHOD_FILES_TREE: &str = "files.tree";
 pub const METHOD_FILES_READ: &str = "files.read";
 pub const METHOD_WORKTREE_ENSURE: &str = "worktree.ensure";
@@ -67,6 +68,7 @@ pub const TRADABLE_METHODS: &[&str] = &[
     METHOD_AGENT_GET,
     METHOD_AGENT_SEND,
     METHOD_AGENT_GET_CONTEXT,
+    METHOD_AGENT_CANCEL,
     METHOD_FILES_TREE,
     METHOD_FILES_READ,
     METHOD_WORKTREE_ENSURE,
@@ -195,6 +197,13 @@ pub struct Message {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct CancelOk {
+    pub agent_id: String,
+    pub cancelled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct FileEntry {
     pub name: String,
     pub path: String,
@@ -294,7 +303,18 @@ mod tests {
         assert!(TRADABLE_METHODS.contains(&METHOD_WORKTREE_LIST));
         assert!(TRADABLE_METHODS.contains(&METHOD_GIT_STATUS));
         assert!(TRADABLE_METHODS.contains(&METHOD_GIT_DIFF));
-        assert!(!TRADABLE_METHODS.iter().any(|m| *m == "agent.cancel"));
+        assert!(TRADABLE_METHODS.contains(&METHOD_AGENT_CANCEL));
+        let cancel = CancelOk {
+            agent_id: "a1".into(),
+            cancelled: true,
+        };
+        let cv = serde_json::to_value(&cancel).unwrap();
+        assert_eq!(cv["agentId"], "a1");
+        assert_eq!(cv["cancelled"], true);
+        assert!(cv.get("agent_id").is_none());
+        let back: CancelOk = serde_json::from_value(cv).unwrap();
+        assert_eq!(back.agent_id, "a1");
+        assert!(back.cancelled);
 
         let wt = Worktree {
             id: "w1".into(),

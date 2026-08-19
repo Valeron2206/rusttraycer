@@ -151,6 +151,15 @@ mod tests {
     }
 
     #[test]
+    fn agent_cancel_accepted_at_1_0() {
+        let mut client = BTreeMap::new();
+        client.insert("agent.cancel".into(), MethodVersion { major: 1, minor: 0 });
+        let (acc, rej) = negotiate(&client);
+        assert!(rej.is_empty(), "{rej:?}");
+        assert_eq!(acc["agent.cancel"], MethodVersion { major: 1, minor: 0 });
+    }
+
+    #[test]
     fn handshake_is_not_tradable() {
         let mut client = BTreeMap::new();
         client.insert("handshake".into(), MethodVersion { major: 1, minor: 0 });
