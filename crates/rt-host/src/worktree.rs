@@ -1,11 +1,12 @@
 //! Git worktree + `git.status` / `git.diff` / mutate via the `git` CLI. No git2.
 
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use rt_protocol::{
-    GitCommitOk, GitDiff, GitDiffFile, GitPushOk, GitStatus, GitStatusEntry, Worktree,
-    WorktreeGcItem, WorktreeGcOk, WorktreeGcReason,
+    GitCommitOk, GitDiff, GitDiffFile, GitPushOk, GitStatus, GitStatusEntry, PrCheck, PrCommit,
+    PrFile, PrGetOk, PrGetParams, Worktree, WorktreeGcItem, WorktreeGcOk, WorktreeGcReason,
 };
 use serde_json::Value;
 
@@ -122,6 +123,22 @@ impl HostService {
             });
         }
         Ok(WorktreeGcOk { dry_run, items })
+    }
+
+    pub fn pr_get(&self, params: &PrGetParams) -> Result<PrGetOk> {
+        let selector = resolve_pr_selector(params)?;
+        if params.workspace_id.is_empty() {
+            return Err(HostError::InvalidParams("workspaceId is required".into()));
+        }
+        let workspace = self
+            .store
+            .workspace_get(&params.workspace_id)?
+            .ok_or_else(|| HostError::NotFound(format!("workspace {}", params.workspace_id)))?;
+        let cwd = resolve_git_cwd(Path::new(&workspace.path));
+        require_gh_auth(&cwd)?;
+        let mut ok = gh_pr_view(&cwd, &selector)?;
+        ok.diff = local_pr_diff(&cwd);
+        Ok(ok)
     }
 
     pub fn git_status(&self, params: &Value) -> Result<GitStatus> {
@@ -408,6 +425,317 @@ fn require_git(path: &Path) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+fn resolve_git_cwd(path: &Path) -> PathBuf {
+    if is_git_repo(path) {
+        return path.to_path_buf();
+    }
+    match git_output(path, &["rev-parse", "--show-toplevel"]) {
+        Ok(out) if out.status.success() => {
+            let top = String::from_utf8_lossy(&out.stdout);
+            let top = top.trim();
+            if !top.is_empty() {
+                return PathBuf::from(top);
+            }
+        }
+        _ => {}
+    }
+    path.to_path_buf()
+}
+
+fn parse_github_pr_number(url: &str) -> Option<u64> {
+    let lower = url.to_ascii_lowercase();
+    let host = lower.find("github.com")?;
+    let after_host = &url[host + "github.com".len()..];
+    let after_host_l = after_host.to_ascii_lowercase();
+    let pull = after_host_l.find("/pull/")?;
+    let rest = &after_host[pull + "/pull/".len()..];
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if digits.is_empty() {
+        return None;
+    }
+    digits.parse().ok()
+}
+
+#[derive(Debug)]
+enum PrSelector {
+    Number(u64),
+    Url(String),
+}
+
+impl PrSelector {
+    fn as_arg(&self) -> String {
+        match self {
+            Self::Number(n) => n.to_string(),
+            Self::Url(u) => u.clone(),
+        }
+    }
+}
+
+fn resolve_pr_selector(params: &PrGetParams) -> Result<PrSelector> {
+    let number = params.number;
+    let url = params
+        .url
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    match (number, url) {
+        (None, None) => Err(HostError::InvalidParams("number or url is required".into())),
+        (Some(n), None) => Ok(PrSelector::Number(n)),
+        (None, Some(u)) => match parse_github_pr_number(u) {
+            Some(_) => Ok(PrSelector::Url(u.to_string())),
+            None => Err(HostError::InvalidParams(
+                "url must be github.com/.../pull/N".into(),
+            )),
+        },
+        (Some(n), Some(u)) => match parse_github_pr_number(u) {
+            None => Err(HostError::InvalidParams(
+                "url must be github.com/.../pull/N".into(),
+            )),
+            Some(un) if un != n => Err(HostError::InvalidParams("number and url conflict".into())),
+            Some(_) => Ok(PrSelector::Number(n)),
+        },
+    }
+}
+
+fn gh_command(cwd: &Path) -> Command {
+    let mut cmd = Command::new("gh");
+    cmd.current_dir(cwd);
+    cmd.env("GH_PROMPT_DISABLED", "1");
+    cmd.env("GIT_TERMINAL_PROMPT", "0");
+    cmd
+}
+
+fn gh_spawn_error(err: io::Error) -> HostError {
+    if err.kind() == io::ErrorKind::NotFound {
+        HostError::AuthRequired("gh is not installed".into())
+    } else {
+        HostError::AuthRequired(format!("gh: {err}"))
+    }
+}
+
+fn is_gh_auth_error(text: &str) -> bool {
+    let low = text.to_ascii_lowercase();
+    low.contains("http 401")
+        || low.contains("401 unauthorized")
+        || low.contains("not logged into")
+        || low.contains("not logged in")
+        || low.contains("authentication required")
+        || low.contains("to log in, run")
+        || low.contains("gh auth login")
+        || low.contains("not authenticated")
+}
+
+fn is_gh_not_found(text: &str) -> bool {
+    let low = text.to_ascii_lowercase();
+    low.contains("could not find")
+        || low.contains("could not resolve")
+        || low.contains("no pull requests")
+        || low.contains("does not exist")
+        || low.contains("not found")
+        || low.contains("http 404")
+}
+
+fn require_gh_auth(cwd: &Path) -> Result<()> {
+    let out = gh_command(cwd)
+        .args(["auth", "status"])
+        .output()
+        .map_err(gh_spawn_error)?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let stderr = redact_secrets(&String::from_utf8_lossy(&out.stderr));
+    let stdout = redact_secrets(&String::from_utf8_lossy(&out.stdout));
+    let detail = if !stderr.trim().is_empty() {
+        stderr
+    } else if !stdout.trim().is_empty() {
+        stdout
+    } else {
+        "gh auth status failed".into()
+    };
+    Err(HostError::AuthRequired(detail))
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct GhPrView {
+    number: u64,
+    url: String,
+    title: String,
+    state: String,
+    #[serde(default)]
+    commits: Vec<GhCommit>,
+    #[serde(default)]
+    files: Vec<GhFile>,
+    #[serde(default, rename = "statusCheckRollup")]
+    status_check_rollup: Vec<GhCheck>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct GhCommit {
+    #[serde(default)]
+    oid: String,
+    #[serde(default, rename = "messageHeadline")]
+    message_headline: String,
+    #[serde(default)]
+    authors: Vec<GhAuthor>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct GhAuthor {
+    name: Option<String>,
+    login: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct GhFile {
+    path: String,
+    #[serde(default)]
+    additions: u64,
+    #[serde(default)]
+    deletions: u64,
+    #[serde(default, rename = "changeType")]
+    change_type: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct GhCheck {
+    name: Option<String>,
+    context: Option<String>,
+    status: Option<String>,
+    state: Option<String>,
+    conclusion: Option<String>,
+}
+
+fn map_gh_pr_view(view: GhPrView) -> PrGetOk {
+    let checks = view
+        .status_check_rollup
+        .into_iter()
+        .filter_map(|c| {
+            let name = c
+                .name
+                .filter(|s| !s.is_empty())
+                .or_else(|| c.context.filter(|s| !s.is_empty()))?;
+            let status = c
+                .status
+                .filter(|s| !s.is_empty())
+                .or_else(|| c.state.clone())
+                .unwrap_or_default();
+            let conclusion = c.conclusion.filter(|s| !s.is_empty()).or_else(|| {
+                c.state
+                    .filter(|s| !s.is_empty() && !status.eq_ignore_ascii_case("pending"))
+            });
+            Some(PrCheck {
+                name,
+                status,
+                conclusion,
+            })
+        })
+        .collect();
+    let commits = view
+        .commits
+        .into_iter()
+        .map(|c| {
+            let author = c.authors.into_iter().find_map(|a| {
+                a.name
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| a.login.filter(|s| !s.is_empty()))
+            });
+            PrCommit {
+                sha: c.oid,
+                title: c.message_headline,
+                author,
+            }
+        })
+        .collect();
+    let files = view
+        .files
+        .into_iter()
+        .map(|f| {
+            let status = f
+                .change_type
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "MODIFIED".into());
+            PrFile {
+                path: f.path,
+                additions: f.additions,
+                deletions: f.deletions,
+                status,
+            }
+        })
+        .collect();
+    PrGetOk {
+        number: view.number,
+        url: view.url,
+        title: view.title,
+        state: view.state,
+        checks,
+        commits,
+        files,
+        diff: String::new(),
+    }
+}
+
+fn classify_gh_pr_error(stdout: &str, stderr: &str) -> HostError {
+    let combined = redact_secrets(&format!("{stdout}\n{stderr}"));
+    if is_gh_auth_error(&combined) {
+        return HostError::AuthRequired(combined);
+    }
+    if is_gh_not_found(&combined) {
+        return HostError::NotFound(format!("pull request: {combined}"));
+    }
+    let stderr = redact_secrets(stderr);
+    if stderr.trim().is_empty() {
+        HostError::Internal("gh pr view failed".into())
+    } else {
+        HostError::Internal(format!("gh pr view failed: {stderr}"))
+    }
+}
+
+fn gh_pr_view(cwd: &Path, selector: &PrSelector) -> Result<PrGetOk> {
+    let arg = selector.as_arg();
+    let out = gh_command(cwd)
+        .args([
+            "pr",
+            "view",
+            &arg,
+            "--json",
+            "number,url,title,state,commits,files,statusCheckRollup",
+        ])
+        .output()
+        .map_err(gh_spawn_error)?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if !out.status.success() {
+        return Err(classify_gh_pr_error(&stdout, &stderr));
+    }
+    if is_gh_auth_error(&stdout) || is_gh_auth_error(&stderr) {
+        return Err(classify_gh_pr_error(&stdout, &stderr));
+    }
+    let view: GhPrView = serde_json::from_str(stdout.trim()).map_err(|e| {
+        HostError::Internal(format!(
+            "gh pr view json: {e}: {}",
+            redact_secrets(stdout.trim())
+        ))
+    })?;
+    Ok(map_gh_pr_view(view))
+}
+
+fn local_pr_diff(root: &Path) -> String {
+    if !is_git_repo(root) {
+        return String::new();
+    }
+    let Some(base) = default_branch(root) else {
+        return String::new();
+    };
+    let mb = match git_stdout(root, &["merge-base", "HEAD", &base]) {
+        Ok(s) => s.trim().to_string(),
+        Err(_) => return String::new(),
+    };
+    if mb.is_empty() {
+        return String::new();
+    }
+    git_stdout(root, &["diff", &mb]).unwrap_or_default()
 }
 
 fn classify_gc_reason(
@@ -1482,5 +1810,67 @@ mod tests {
         let (paths, hunks) = parse_patch_stats(&patch.replace("\\n", "\n"));
         assert_eq!(paths, vec!["src/a.rs"]);
         assert_eq!(hunks, 2);
+    }
+
+    #[test]
+    fn parse_github_pr_number_accepts_canonical_urls() {
+        assert_eq!(
+            parse_github_pr_number("https://github.com/acme/repo/pull/90"),
+            Some(90)
+        );
+        assert_eq!(
+            parse_github_pr_number("github.com/acme/repo/pull/7/files"),
+            Some(7)
+        );
+        assert_eq!(parse_github_pr_number("https://example.com/pull/1"), None);
+        assert_eq!(parse_github_pr_number("https://github.com/acme/repo"), None);
+        assert_eq!(parse_github_pr_number(""), None);
+    }
+
+    #[test]
+    fn resolve_pr_selector_requires_number_or_url() {
+        let err = resolve_pr_selector(&rt_protocol::PrGetParams {
+            workspace_id: "w".into(),
+            number: None,
+            url: None,
+        })
+        .unwrap_err();
+        assert_eq!(err.code(), "invalid_params");
+        let err = resolve_pr_selector(&rt_protocol::PrGetParams {
+            workspace_id: "w".into(),
+            number: Some(1),
+            url: Some("https://github.com/acme/repo/pull/2".into()),
+        })
+        .unwrap_err();
+        assert_eq!(err.code(), "invalid_params");
+        let ok = resolve_pr_selector(&rt_protocol::PrGetParams {
+            workspace_id: "w".into(),
+            number: Some(90),
+            url: Some("https://github.com/acme/repo/pull/90".into()),
+        })
+        .unwrap();
+        assert_eq!(ok.as_arg(), "90");
+    }
+
+    #[test]
+    fn map_gh_pr_view_maps_checks_commits_files() {
+        let raw = r#"{
+            "number": 90,
+            "url": "https://github.com/acme/repo/pull/90",
+            "title": "feat: pr.get",
+            "state": "OPEN",
+            "commits": [{"oid":"abc123","messageHeadline":"feat: pr.get","authors":[{"name":"Valeriy","login":"v"}]}],
+            "files": [{"path":"src/lib.rs","additions":3,"deletions":1,"changeType":"MODIFIED"}],
+            "statusCheckRollup": [{"name":"ci","status":"COMPLETED","conclusion":"SUCCESS"}]
+        }"#;
+        let view: GhPrView = serde_json::from_str(raw).unwrap();
+        let ok = map_gh_pr_view(view);
+        assert_eq!(ok.number, 90);
+        assert_eq!(ok.checks[0].name, "ci");
+        assert_eq!(ok.checks[0].conclusion.as_deref(), Some("SUCCESS"));
+        assert_eq!(ok.commits[0].sha, "abc123");
+        assert_eq!(ok.commits[0].author.as_deref(), Some("Valeriy"));
+        assert_eq!(ok.files[0].status, "MODIFIED");
+        assert!(ok.diff.is_empty());
     }
 }

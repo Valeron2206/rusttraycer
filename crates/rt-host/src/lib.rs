@@ -50,6 +50,8 @@ pub enum HostError {
     VersionMismatch(String),
     #[error("unauthorized")]
     Unauthorized,
+    #[error("auth required: {0}")]
+    AuthRequired(String),
     #[error("file too large: {0}")]
     FileTooLarge(String),
     #[error("file is binary: {0}")]
@@ -98,6 +100,7 @@ impl HostError {
             Self::UnsupportedMethod(_) => "unsupported_method",
             Self::VersionMismatch(_) => "version_mismatch",
             Self::Unauthorized => "unauthorized",
+            Self::AuthRequired(_) => "auth_required",
             Self::FileTooLarge(_) => "file_too_large",
             Self::FileBinary(_) => "file_binary",
             Self::GitIdentity(_) => "git_identity",
@@ -474,6 +477,7 @@ mod tests {
             "version_mismatch"
         );
         assert_eq!(HostError::Unauthorized.code(), "unauthorized");
+        assert_eq!(HostError::AuthRequired("gh".into()).code(), "auth_required");
         assert_eq!(HostError::FileTooLarge("x".into()).code(), "file_too_large");
         assert_eq!(HostError::FileBinary("x".into()).code(), "file_binary");
         assert_eq!(HostError::GitIdentity("x".into()).code(), "git_identity");

@@ -39,6 +39,7 @@ pub mod error_codes {
     pub const LOOP_EXHAUSTED: &str = "loop_exhausted";
     pub const CONFLICT: &str = "conflict";
     pub const NOT_SUPPORTED: &str = "not_supported";
+    pub const AUTH_REQUIRED: &str = "auth_required";
 }
 
 pub const METHOD_HANDSHAKE: &str = "handshake";
@@ -116,6 +117,7 @@ pub const METHOD_WORKTREE_GC: &str = "worktree.gc";
 pub const METHOD_ACCOUNT_LIST: &str = "account.list";
 pub const METHOD_ACCOUNT_CREATE: &str = "account.create";
 pub const METHOD_AGENT_STEER: &str = "agent.steer";
+pub const METHOD_PR_GET: &str = "pr.get";
 
 pub const EXPORT_KIND: &str = "rusttraycer.export";
 pub const EXPORT_VERSION: u32 = 1;
@@ -197,6 +199,7 @@ pub const TRADABLE_METHODS: &[&str] = &[
     METHOD_ACCOUNT_LIST,
     METHOD_ACCOUNT_CREATE,
     METHOD_AGENT_STEER,
+    METHOD_PR_GET,
 ];
 
 pub fn host_method_version() -> MethodVersion {
@@ -213,7 +216,7 @@ pub fn host_method_version() -> MethodVersion {
 /// workspace/guides/preset/`agent.update` methods are 1.7;
 /// `sync.export`/`sync.import` are 1.8; `artifact.export`, `search.query`,
 /// `worktree.gc`, `agent.create`, `shell.create`, `account.list`,
-/// `account.create`, and `agent.steer` are 1.9; all other
+/// `account.create`, `agent.steer`, and `pr.get` are 1.9; all other
 /// tradable methods stay 1.0 (`HOST_METHOD_MINOR` is not bumped).
 /// Unknown names return `None`.
 pub fn method_version(name: &str) -> Option<MethodVersion> {
@@ -246,7 +249,8 @@ pub fn method_version(name: &str) -> Option<MethodVersion> {
         | METHOD_SHELL_CREATE
         | METHOD_ACCOUNT_LIST
         | METHOD_ACCOUNT_CREATE
-        | METHOD_AGENT_STEER => Some(MethodVersion { major: 1, minor: 9 }),
+        | METHOD_AGENT_STEER
+        | METHOD_PR_GET => Some(MethodVersion { major: 1, minor: 9 }),
         METHOD_A2A_TRANSCRIPT
         | METHOD_A2A_DELIVER
         | METHOD_LOOP_START
@@ -1224,6 +1228,56 @@ pub struct AgentSteerOk {
     pub steered: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrGetParams {
+    pub workspace_id: String,
+    #[serde(default)]
+    pub number: Option<u64>,
+    #[serde(default)]
+    pub url: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrCheck {
+    pub name: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conclusion: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrCommit {
+    pub sha: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrFile {
+    pub path: String,
+    pub additions: u64,
+    pub deletions: u64,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrGetOk {
+    pub number: u64,
+    pub url: String,
+    pub title: String,
+    pub state: String,
+    pub checks: Vec<PrCheck>,
+    pub commits: Vec<PrCommit>,
+    pub files: Vec<PrFile>,
+    pub diff: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1360,7 +1414,8 @@ mod tests {
         assert_eq!(error_codes::LOOP_EXHAUSTED, "loop_exhausted");
         assert_eq!(error_codes::CONFLICT, "conflict");
         assert_eq!(error_codes::NOT_SUPPORTED, "not_supported");
-        assert_eq!(TRADABLE_METHODS.len(), 74);
+        assert_eq!(error_codes::AUTH_REQUIRED, "auth_required");
+        assert_eq!(TRADABLE_METHODS.len(), 75);
         assert!(TRADABLE_METHODS.contains(&METHOD_POLICY_GET));
         assert!(TRADABLE_METHODS.contains(&METHOD_POLICY_SET));
         assert!(TRADABLE_METHODS.contains(&METHOD_APPROVAL_RESPOND));
@@ -1414,6 +1469,11 @@ mod tests {
             method_version(METHOD_AGENT_STEER),
             Some(MethodVersion { major: 1, minor: 9 })
         );
+        assert_eq!(
+            method_version(METHOD_PR_GET),
+            Some(MethodVersion { major: 1, minor: 9 })
+        );
+        assert!(TRADABLE_METHODS.contains(&METHOD_PR_GET));
         assert_eq!(
             method_version(METHOD_AGENT_SWITCH),
             Some(MethodVersion { major: 1, minor: 6 })
@@ -2146,7 +2206,7 @@ mod tests {
         );
         assert!(TRADABLE_METHODS.contains(&METHOD_AGENT_SWITCH));
         assert!(TRADABLE_METHODS.contains(&METHOD_PREFS_GET));
-        assert_eq!(TRADABLE_METHODS.len(), 74);
+        assert_eq!(TRADABLE_METHODS.len(), 75);
 
         let sw: AgentSwitchParams = serde_json::from_str(
             r#"{"agentId":"a1","provider":"cli.codex","model":"o3","effort":"high","fast":false}"#,
@@ -2253,7 +2313,7 @@ mod tests {
             method_version(METHOD_HOST_PING),
             Some(MethodVersion { major: 1, minor: 0 })
         );
-        assert_eq!(TRADABLE_METHODS.len(), 74);
+        assert_eq!(TRADABLE_METHODS.len(), 75);
         assert!(TRADABLE_METHODS.contains(&METHOD_WORKSPACE_GUIDES_GET));
         assert!(TRADABLE_METHODS.contains(&METHOD_AGENT_UPDATE));
         assert!(!TRADABLE_METHODS
@@ -2388,7 +2448,7 @@ mod tests {
             Some(MethodVersion { major: 1, minor: 0 })
         );
         assert_eq!(host_method_version(), MethodVersion { major: 1, minor: 0 });
-        assert_eq!(TRADABLE_METHODS.len(), 74);
+        assert_eq!(TRADABLE_METHODS.len(), 75);
         assert!(TRADABLE_METHODS.contains(&METHOD_SYNC_EXPORT));
         assert!(TRADABLE_METHODS.contains(&METHOD_SYNC_IMPORT));
         assert_eq!(EXPORT_KIND, "rusttraycer.export");
@@ -2603,5 +2663,90 @@ mod tests {
             serde_json::from_str(r#"{"agentId":"a1","accountId":"acc1"}"#).unwrap();
         assert_eq!(sw.agent_id, "a1");
         assert_eq!(sw.account_id.as_deref(), Some("acc1"));
+    }
+
+    #[test]
+    fn pr_get_types_camel_case_no_token_pat() {
+        let p: PrGetParams = serde_json::from_str(
+            r#"{"workspaceId":"w1","number":90,"url":"https://github.com/acme/repo/pull/90"}"#,
+        )
+        .unwrap();
+        assert_eq!(p.workspace_id, "w1");
+        assert_eq!(p.number, Some(90));
+        assert_eq!(
+            p.url.as_deref(),
+            Some("https://github.com/acme/repo/pull/90")
+        );
+        let pv = serde_json::to_value(&p).unwrap();
+        assert_eq!(pv["workspaceId"], "w1");
+        assert!(pv.get("workspace_id").is_none());
+        assert!(pv.get("token").is_none());
+        assert!(pv.get("pat").is_none());
+
+        let ok = PrGetOk {
+            number: 90,
+            url: "https://github.com/acme/repo/pull/90".into(),
+            title: "feat: pr.get".into(),
+            state: "OPEN".into(),
+            checks: vec![PrCheck {
+                name: "ci".into(),
+                status: "COMPLETED".into(),
+                conclusion: Some("SUCCESS".into()),
+            }],
+            commits: vec![PrCommit {
+                sha: "abc123".into(),
+                title: "feat: pr.get".into(),
+                author: Some("Valeriy".into()),
+            }],
+            files: vec![PrFile {
+                path: "src/lib.rs".into(),
+                additions: 3,
+                deletions: 1,
+                status: "MODIFIED".into(),
+            }],
+            diff: "diff --git a/src/lib.rs b/src/lib.rs\n".into(),
+        };
+        let v = serde_json::to_value(&ok).unwrap();
+        assert_eq!(v["number"], 90);
+        assert_eq!(v["url"], "https://github.com/acme/repo/pull/90");
+        assert_eq!(v["title"], "feat: pr.get");
+        assert_eq!(v["state"], "OPEN");
+        assert_eq!(v["checks"][0]["name"], "ci");
+        assert_eq!(v["checks"][0]["status"], "COMPLETED");
+        assert_eq!(v["checks"][0]["conclusion"], "SUCCESS");
+        assert_eq!(v["commits"][0]["sha"], "abc123");
+        assert_eq!(v["commits"][0]["title"], "feat: pr.get");
+        assert_eq!(v["commits"][0]["author"], "Valeriy");
+        assert_eq!(v["files"][0]["path"], "src/lib.rs");
+        assert_eq!(v["files"][0]["additions"], 3);
+        assert_eq!(v["files"][0]["deletions"], 1);
+        assert_eq!(v["files"][0]["status"], "MODIFIED");
+        assert!(v["diff"].as_str().unwrap().contains("lib.rs"));
+        fn walk(v: &Value, path: &str) {
+            match v {
+                Value::Object(m) => {
+                    for (k, val) in m {
+                        let low = k.to_ascii_lowercase();
+                        assert!(
+                            low != "token" && low != "pat",
+                            "secret-like field {k} at {path}"
+                        );
+                        walk(val, &format!("{path}.{k}"));
+                    }
+                }
+                Value::Array(a) => {
+                    for (i, val) in a.iter().enumerate() {
+                        walk(val, &format!("{path}[{i}]"));
+                    }
+                }
+                _ => {}
+            }
+        }
+        walk(&pv, "params");
+        walk(&v, "ok");
+        assert_eq!(
+            method_version(METHOD_PR_GET),
+            Some(MethodVersion { major: 1, minor: 9 })
+        );
     }
 }
