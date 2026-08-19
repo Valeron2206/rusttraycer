@@ -226,10 +226,13 @@ pub async fn prepare(config: HostConfig) -> Result<RunningHost> {
     }
 
     let backends = config.backends.unwrap_or_else(|| {
-        let mut m: std::collections::HashMap<String, std::sync::Arc<dyn rt_runtime::AgentBackend>> =
-            std::collections::HashMap::new();
-        let cli = rt_runtime::CliGeneric::from_env();
-        m.insert(cli.id().to_string(), std::sync::Arc::new(cli));
+        let mut m: HashMap<String, Arc<dyn AgentBackend>> = HashMap::new();
+        let generic = rt_runtime::CliGeneric::from_env();
+        m.insert(generic.id().to_string(), Arc::new(generic));
+        let claude = rt_runtime::CliClaude::from_env();
+        m.insert(claude.id().to_string(), Arc::new(claude));
+        let codex = rt_runtime::CliCodex::from_env();
+        m.insert(codex.id().to_string(), Arc::new(codex));
         m
     });
     let service = HostService::new(
