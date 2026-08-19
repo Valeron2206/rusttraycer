@@ -114,13 +114,20 @@ async fn health_handshake_doctor_files() {
 
     let doctor = rpc(&client, &base, Some(&token), "host.doctor", json!({})).await;
     let providers = doctor["ok"]["providers"].as_array().unwrap();
-    assert_eq!(providers.len(), 1);
-    assert_eq!(providers[0]["id"], "cli.generic");
+    assert_eq!(providers.len(), 3);
+    let ids: Vec<&str> = providers.iter().filter_map(|p| p["id"].as_str()).collect();
+    assert!(ids.contains(&"cli.generic"));
+    assert!(ids.contains(&"cli.claude"));
+    assert!(ids.contains(&"cli.codex"));
+    let generic = providers
+        .iter()
+        .find(|p| p["id"] == "cli.generic")
+        .expect("cli.generic in providers");
     let env_set = std::env::var("RUSTTRAYCER_GENERIC_CMD")
         .ok()
         .map(|s| !s.trim().is_empty())
         .unwrap_or(false);
-    assert_eq!(providers[0]["available"], env_set);
+    assert_eq!(generic["available"], env_set);
 
     let ws_dir = dir.path().join("proj");
     std::fs::create_dir(&ws_dir).unwrap();

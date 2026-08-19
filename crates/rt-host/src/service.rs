@@ -18,7 +18,7 @@ use crate::files;
 use crate::handshake::{self, HandshakeParams, HandshakeResult};
 use crate::rpc::WsEvent;
 use crate::supervisor::{self, Inflight};
-use crate::{generic_cmd_probe, HostError, Result};
+use crate::{HostError, Result};
 
 const MAX_CONTENT: usize = 1024 * 1024;
 const MAX_TITLE_CHARS: usize = 200;
@@ -219,12 +219,19 @@ impl HostService {
     pub fn doctor(&self) -> Result<DoctorResult> {
         let counts = self.store.counts()?;
         let db_ok = self.store.integrity_ok().unwrap_or(false);
-        let probe = generic_cmd_probe();
-        let providers = vec![ProviderInfo {
-            id: "cli.generic".into(),
-            available: probe.available,
-            detail: probe.detail,
-        }];
+        let mut providers: Vec<ProviderInfo> = self
+            .backends
+            .values()
+            .map(|backend| {
+                let avail = backend.available();
+                ProviderInfo {
+                    id: backend.id().to_string(),
+                    available: avail.available,
+                    detail: avail.detail,
+                }
+            })
+            .collect();
+        providers.sort_by(|a, b| a.id.cmp(&b.id));
         Ok(DoctorResult {
             host_id: self.host_id.clone(),
             pid: self.pid,
@@ -323,9 +330,9 @@ impl HostService {
 
     pub fn agent_create(&self, task_id: &str, provider: Option<&str>) -> Result<Agent> {
         let provider = provider.unwrap_or("cli.generic");
-        if provider != "cli.generic" {
+        if !matches!(provider, "cli.generic" | "cli.claude" | "cli.codex") {
             return Err(HostError::InvalidParams(format!(
-                "provider must be cli.generic, got {provider}"
+                "provider must be cli.generic|cli.claude|cli.codex, got {provider}"
             )));
         }
         if self.store.task_get(task_id)?.is_none() {
@@ -805,6 +812,44 @@ mod tests {
         let v = serde_json::to_value(&agent).unwrap();
         assert_eq!(v["provider"], "cli.generic");
         assert_eq!(v["interface"], "chat");
+    }
+
+    #[test]
+    fn create_cli_claude_is_known_harness() {
+        let (dir, svc) = setup_with(Arc::new(SlowBackend));
+        let ws_dir = dir.path().join("ws-claude");
+        std::fs::create_dir(&ws_dir).unwrap();
+        let ws = svc.workspace_add(ws_dir.to_str().unwrap()).unwrap();
+        let task = svc.task_create("t", &ws.id).unwrap();
+        let agent = svc.agent_create(&task.id, Some("cli.claude")).unwrap();
+        assert_eq!(agent.provider.as_str(), "cli.claude");
+        assert_eq!(agent.interface, "chat");
+        assert_eq!(agent.status, AgentStatus::Idle);
+        assert_eq!(
+            svc.agent_create(&task.id, Some("unknown"))
+                .unwrap_err()
+                .code(),
+            "invalid_params"
+        );
+    }
+
+    #[test]
+    fn create_cli_codex_is_known_harness() {
+        let (dir, svc) = setup_with(Arc::new(SlowBackend));
+        let ws_dir = dir.path().join("ws-codex");
+        std::fs::create_dir(&ws_dir).unwrap();
+        let ws = svc.workspace_add(ws_dir.to_str().unwrap()).unwrap();
+        let task = svc.task_create("t", &ws.id).unwrap();
+        let agent = svc.agent_create(&task.id, Some("cli.codex")).unwrap();
+        assert_eq!(agent.provider.as_str(), "cli.codex");
+        assert_eq!(agent.interface, "chat");
+        assert_eq!(agent.status, AgentStatus::Idle);
+        assert_eq!(
+            svc.agent_create(&task.id, Some("unknown"))
+                .unwrap_err()
+                .code(),
+            "invalid_params"
+        );
     }
 
     #[test]
