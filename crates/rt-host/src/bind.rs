@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::HostError;
 
-pub const PROTOCOL_CRATE: &str = "0.1.0";
+pub const PROTOCOL_CRATE: &str = "1.0.0";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -228,7 +228,7 @@ mod tests {
         write_pid_file(dir.path(), &info).unwrap();
         let text = fs::read_to_string(pid_path(dir.path())).unwrap();
         let v: serde_json::Value = serde_json::from_str(&text).unwrap();
-        assert_eq!(v["protocol"]["crate"], "0.1.0");
+        assert_eq!(v["protocol"]["crate"], "1.0.0");
         assert_eq!(v["rpcUrl"], "http://127.0.0.1:1234");
         assert_eq!(v["wsUrl"], "ws://127.0.0.1:1234/ws");
     }
