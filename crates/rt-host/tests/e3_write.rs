@@ -1060,37 +1060,85 @@ async fn files_patch_check_then_apply() {
     let _ = join.await;
 }
 
-#[test]
-fn git_commit_without_identity_is_git_identity() {
-    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _g = LOCK.lock().unwrap();
-    let prev_global = std::env::var("GIT_CONFIG_GLOBAL").ok();
-    let prev_system = std::env::var("GIT_CONFIG_SYSTEM").ok();
-    let prev_nosys = std::env::var("GIT_CONFIG_NOSYSTEM").ok();
+/// Serializes tests that mutate process-wide git identity / config env.
+static GIT_IDENTITY_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+const GIT_IDENTITY_ENV_KEYS: &[&str] = &[
+    "GIT_CONFIG_GLOBAL",
+    "GIT_CONFIG_SYSTEM",
+    "GIT_CONFIG_NOSYSTEM",
+    "GIT_AUTHOR_NAME",
+    "GIT_AUTHOR_EMAIL",
+    "GIT_COMMITTER_NAME",
+    "GIT_COMMITTER_EMAIL",
+];
+
+struct GitIdentityEnvGuard {
+    prev: Vec<(&'static str, Option<String>)>,
+}
+
+/// Isolate git config files and clear author/committer env. Restored on drop.
+fn isolate_git_identity_env() -> GitIdentityEnvGuard {
+    let prev = GIT_IDENTITY_ENV_KEYS
+        .iter()
+        .map(|k| (*k, std::env::var(k).ok()))
+        .collect();
     std::env::set_var("GIT_CONFIG_GLOBAL", "/dev/null");
     std::env::set_var("GIT_CONFIG_SYSTEM", "/dev/null");
     std::env::set_var("GIT_CONFIG_NOSYSTEM", "1");
+    for k in [
+        "GIT_AUTHOR_NAME",
+        "GIT_AUTHOR_EMAIL",
+        "GIT_COMMITTER_NAME",
+        "GIT_COMMITTER_EMAIL",
+    ] {
+        std::env::remove_var(k);
+    }
+    GitIdentityEnvGuard { prev }
+}
 
-    let dir = tempfile::tempdir().unwrap();
-    let store = rt_storage::Store::open(dir.path().join("host.db")).unwrap();
+impl GitIdentityEnvGuard {
+    fn set_author_committer(&self, name: &str, email: &str) {
+        std::env::set_var("GIT_AUTHOR_NAME", name);
+        std::env::set_var("GIT_AUTHOR_EMAIL", email);
+        std::env::set_var("GIT_COMMITTER_NAME", name);
+        std::env::set_var("GIT_COMMITTER_EMAIL", email);
+    }
+}
+
+impl Drop for GitIdentityEnvGuard {
+    fn drop(&mut self) {
+        for (k, v) in self.prev.drain(..) {
+            match v {
+                Some(val) => std::env::set_var(k, val),
+                None => std::env::remove_var(k),
+            }
+        }
+    }
+}
+
+fn host_svc(dir: &std::path::Path) -> rt_host::service::HostService {
+    let store = rt_storage::Store::open(dir.join("host.db")).unwrap();
     store.migrate().unwrap();
     let host_id = rt_storage::new_id();
     store.host_insert_if_absent(&host_id, "test").unwrap();
-    let svc = rt_host::service::HostService::new(
+    rt_host::service::HostService::new(
         store,
         std::collections::HashMap::new(),
         host_id,
-        dir.path().to_path_buf(),
+        dir.to_path_buf(),
         "http://127.0.0.1:0".into(),
         std::process::id(),
-    );
-    let proj = dir.path().join("proj");
-    std::fs::create_dir_all(&proj).unwrap();
-    git(&proj, &["init", "-b", "main"]);
-    git(&proj, &["config", "commit.gpgsign", "false"]);
+    )
+}
+
+fn init_repo_without_config_identity(proj: &Path) {
+    std::fs::create_dir_all(proj).unwrap();
+    git(proj, &["init", "-b", "main"]);
+    git(proj, &["config", "commit.gpgsign", "false"]);
     std::fs::write(proj.join("README.md"), "hello\n").unwrap();
     git(
-        &proj,
+        proj,
         &[
             "-c",
             "user.email=t@t.test",
@@ -1101,7 +1149,7 @@ fn git_commit_without_identity_is_git_identity() {
         ],
     );
     git(
-        &proj,
+        proj,
         &[
             "-c",
             "user.email=t@t.test",
@@ -1112,6 +1160,37 @@ fn git_commit_without_identity_is_git_identity() {
             "init",
         ],
     );
+}
+
+fn local_git_config(cwd: &Path, key: &str) -> Option<String> {
+    let out = Command::new("git")
+        .args(["config", "--local", "--get", key])
+        .current_dir(cwd)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .expect("git config");
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
+}
+
+#[test]
+fn git_commit_without_identity_is_git_identity() {
+    let _g = GIT_IDENTITY_ENV_LOCK.lock().unwrap();
+    let _env = isolate_git_identity_env();
+
+    let dir = tempfile::tempdir().unwrap();
+    let svc = host_svc(dir.path());
+    let proj = dir.path().join("proj");
+    init_repo_without_config_identity(&proj);
     std::fs::write(proj.join("README.md"), "changed\n").unwrap();
     git(&proj, &["add", "README.md"]);
     let ws = svc.workspace_add(proj.to_str().unwrap()).unwrap();
@@ -1120,19 +1199,41 @@ fn git_commit_without_identity_is_git_identity() {
         .unwrap_err();
     assert_eq!(err.code(), "git_identity");
     assert!(err.to_string().contains("git config user.email"), "{err}");
+    assert!(err.to_string().contains("GIT_AUTHOR_NAME"), "{err}");
+}
 
-    match prev_global {
-        Some(v) => std::env::set_var("GIT_CONFIG_GLOBAL", v),
-        None => std::env::remove_var("GIT_CONFIG_GLOBAL"),
-    }
-    match prev_system {
-        Some(v) => std::env::set_var("GIT_CONFIG_SYSTEM", v),
-        None => std::env::remove_var("GIT_CONFIG_SYSTEM"),
-    }
-    match prev_nosys {
-        Some(v) => std::env::set_var("GIT_CONFIG_NOSYSTEM", v),
-        None => std::env::remove_var("GIT_CONFIG_NOSYSTEM"),
-    }
+#[test]
+fn git_commit_accepts_author_committer_env_without_git_config() {
+    let _g = GIT_IDENTITY_ENV_LOCK.lock().unwrap();
+    let env = isolate_git_identity_env();
+
+    let dir = tempfile::tempdir().unwrap();
+    let svc = host_svc(dir.path());
+    let proj = dir.path().join("proj");
+    init_repo_without_config_identity(&proj);
+    std::fs::write(proj.join("README.md"), "from env\n").unwrap();
+    git(&proj, &["add", "README.md"]);
+    let ws = svc.workspace_add(proj.to_str().unwrap()).unwrap();
+
+    env.set_author_committer("Env Author", "env@rusttraycer.local");
+    let ok = svc
+        .git_commit(&json!({ "workspaceId": ws.id, "message": "df-002 env identity" }))
+        .expect("git.commit must succeed with GIT_AUTHOR/COMMITTER env");
+    assert!(!ok.commit.is_empty(), "{ok:?}");
+    assert_eq!(ok.branch, "main");
+    assert!(
+        local_git_config(&proj, "user.name").is_none(),
+        "must not write user.name to .git/config"
+    );
+    assert!(
+        local_git_config(&proj, "user.email").is_none(),
+        "must not write user.email to .git/config"
+    );
+    let cfg = std::fs::read_to_string(proj.join(".git/config")).unwrap();
+    assert!(
+        !cfg.contains("[user]") && !cfg.contains("user.name") && !cfg.contains("user.email"),
+        ".git/config must stay free of identity: {cfg}"
+    );
 }
 
 #[tokio::test]
