@@ -71,10 +71,10 @@ Sources (live, 2026-08-19):
 | C56 | Local workflow presets planning/review/debug/document | directive E8; ADR-0004; [e8-workspace-v2](e8-workspace-v2.md) | missing | E8 | Ф5 | 14, 16 |
 | C57 | Export/import durable entities (clone-not-migrate) | directive E9; ADR-0003; [e9-sync-v2](e9-sync-v2.md) | missing | E9 | Ф6 | 2, 3 |
 | C58 | Self-hosted `rt-sync` | directive E9; ADR-0003; [e9-sync-v2](e9-sync-v2.md) | missing | E9 | later | 2 |
-| C59 | `GET /metrics` (loopback only) | directive E10; ADR-0008 (not vendor) | missing | E10 | Ф6 | — |
-| C60 | CLI `status` / `logs` / `reset-db` | directive E10 | missing | E10 | Ф6 | — |
-| C61 | Linux AppImage + .deb | install.md; ADR-0006 | missing | E10 | Ф6 | — |
-| C62 | macOS aarch64 | install.md; ADR-0006 | missing | E10 | Ф6 | — |
+| C59 | `GET /metrics` (loopback only) | directive E10; ADR-0008; [e10-ops-v2](e10-ops-v2.md) | missing | E10 | Ф6 | — |
+| C60 | CLI `status` / `logs` / `reset-db` | directive E10; [e10-ops-v2](e10-ops-v2.md) | missing | E10 | Ф6 | — |
+| C61 | Linux AppImage + .deb | install.md; ADR-0006; [e10-ops-v2](e10-ops-v2.md) | missing | E10 | Ф6 | — |
+| C62 | macOS aarch64 | install.md; ADR-0006; [e10-ops-v2](e10-ops-v2.md) | missing | E10 | Ф6 | — |
 | C63 | Resource monitor / notification hooks / prompt stash / drag-to-tile | changelog; 1.1.10 notes | missing | E1 | Ф1 | — |
 | C64 | Epic PR View (checks, commits, files, local diffs) | 1.1.10 #870; [e3-write-v2](e3-write-v2.md) | missing | E3 | later | 9 |
 | C65 | Worktree cleanup / PR context / branch prefix | changelog | partial | E1 | Ф1 | 5 |
