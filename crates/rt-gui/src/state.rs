@@ -8,6 +8,7 @@ use std::time::Instant;
 use crate::discovery::{self, DiscoverError};
 use crate::ladder::{
     self, AgentPolicy, PaneKind, PendingApproval, PolicyMode, SplitLayout, PICKER_EMPTY,
+    PICKER_HINT,
 };
 use crate::rpc::{
     CancelOk, ConnectError, DoctorOk, DoctorProvider, GitDiffOk, GitStatusOk, Worktree,
@@ -984,8 +985,10 @@ impl AppState {
 
     pub fn create_agent(&mut self) {
         if !self.can_create_agent() {
-            if self.providers.is_empty() || self.picker_provider.is_none() {
+            if self.providers.is_empty() {
                 self.toast = Some(PICKER_EMPTY.into());
+            } else if self.picker_provider.is_none() {
+                self.toast = Some(PICKER_HINT.into());
             }
             return;
         }
@@ -993,7 +996,7 @@ impl AppState {
             return;
         };
         let Some(provider) = self.picker_provider.clone() else {
-            self.toast = Some(PICKER_EMPTY.into());
+            self.toast = Some(PICKER_HINT.into());
             return;
         };
         if !self.providers.iter().any(|p| p.id == provider) {
@@ -1377,7 +1380,7 @@ impl AppState {
             .map(|id| self.providers.iter().any(|p| &p.id == id))
             .unwrap_or(false);
         if !keep {
-            self.picker_provider = self.providers.first().map(|p| p.id.clone());
+            self.picker_provider = None;
         }
         self.doctor = Some(doctor);
     }
@@ -1499,6 +1502,11 @@ impl AppState {
             self.ladder_status = Some(label.clone());
         }
         self.toast = Some(label);
+    }
+
+    /// Title-bar X: same path as «Отказать» — `approval.respond` with deny.
+    pub fn close_approval_card(&mut self) {
+        self.respond_approval("deny");
     }
 
     pub fn respond_approval(&mut self, decision: &str) {
@@ -2490,6 +2498,92 @@ mod tests {
     }
 
     #[test]
+    fn apply_doctor_does_not_auto_pick_first() {
+        let mock = start_e1_mock();
+        let session = connect(&pid(&mock.origin)).expect("online");
+        let mut state = online_state(session);
+        state.agents.clear();
+        state.selected_agent_id = None;
+        state.refresh_doctor();
+        assert_eq!(
+            state
+                .providers
+                .iter()
+                .map(|p| p.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["byoa.foo", "cli.claude"]
+        );
+        assert!(state.picker_provider.is_none());
+        assert!(!state.can_create_agent());
+        state.create_agent();
+        assert_eq!(state.toast.as_deref(), Some(PICKER_HINT));
+        let methods: Vec<_> = mock
+            .hits
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|h| h.method.clone())
+            .collect();
+        assert!(
+            !methods.contains(&"agent.create".to_string()),
+            "create without pick must not send a provider: {methods:?}"
+        );
+    }
+
+    #[test]
+    fn apply_doctor_keeps_user_pick_and_clears_stale() {
+        let mut state = AppState::new();
+        state.pending_discover = false;
+        state.demo = false;
+        state.host_status = HostStatus::Online;
+        state.selected_task_id = Some("task-1".into());
+        let listed = DoctorOk {
+            providers: vec![
+                DoctorProvider {
+                    id: "byoa.foo".into(),
+                    available: true,
+                    detail: "/bin/foo".into(),
+                    caps: None,
+                },
+                DoctorProvider {
+                    id: "cli.claude".into(),
+                    available: false,
+                    detail: "missing".into(),
+                    caps: None,
+                },
+            ],
+            ..Default::default()
+        };
+        state.apply_doctor(listed.clone());
+        assert!(state.picker_provider.is_none());
+        state.set_picker_provider("cli.claude".into());
+        assert_eq!(state.picker_provider.as_deref(), Some("cli.claude"));
+        state.apply_doctor(listed);
+        assert_eq!(state.picker_provider.as_deref(), Some("cli.claude"));
+        state.apply_doctor(DoctorOk {
+            providers: vec![DoctorProvider {
+                id: "byoa.foo".into(),
+                available: true,
+                detail: "/bin/foo".into(),
+                caps: None,
+            }],
+            ..Default::default()
+        });
+        assert!(
+            state.picker_provider.is_none(),
+            "stale pick must clear, not fall back to first"
+        );
+        assert_eq!(
+            state
+                .providers
+                .iter()
+                .map(|p| p.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["byoa.foo"]
+        );
+    }
+
+    #[test]
     fn select_agent_swaps_context() {
         let mock = start_e1_mock();
         let session = connect(&pid(&mock.origin)).expect("online");
@@ -2566,6 +2660,64 @@ mod tests {
             .expect("respond");
         assert_eq!(resp.params["approvalId"], "ap-9");
         assert_eq!(resp.params["decision"], "allow-once");
+    }
+
+    #[test]
+    fn approval_card_close_sends_deny() {
+        let mock = start_ladder_ok_mock();
+        let session = connect(&pid(&mock.origin)).expect("online");
+        let mut state = online_state(session);
+        state.pending_approvals.insert(
+            "ag-1".into(),
+            crate::ladder::PendingApproval {
+                approval_id: "ap-9".into(),
+                agent_id: "ag-1".into(),
+                task_id: "task-1".into(),
+                kind: "exec".into(),
+                summary: "spawn byoa.foo".into(),
+            },
+        );
+        state.close_approval_card();
+        assert!(state.selected_approval().is_none());
+        assert!(state.toast.is_none());
+        let hits = mock.hits.lock().unwrap().clone();
+        let resp = hits
+            .iter()
+            .find(|h| h.method == "approval.respond")
+            .expect("approval.respond");
+        assert_eq!(resp.params["approvalId"], "ap-9");
+        assert_eq!(resp.params["decision"], "deny");
+    }
+
+    #[test]
+    fn approval_card_close_deny_fail_toasts_and_keeps_card() {
+        let mock = start_e1_mock();
+        let session = connect(&pid(&mock.origin)).expect("online");
+        let mut state = online_state(session);
+        state.pending_approvals.insert(
+            "ag-1".into(),
+            crate::ladder::PendingApproval {
+                approval_id: "ap-9".into(),
+                agent_id: "ag-1".into(),
+                task_id: "task-1".into(),
+                kind: "exec".into(),
+                summary: "spawn byoa.foo".into(),
+            },
+        );
+        state.close_approval_card();
+        assert!(
+            state.selected_approval().is_some(),
+            "card must stay until host accepts deny"
+        );
+        let toast = state.toast.clone().expect("toast via Сообщение");
+        assert!(toast.contains("unsupported_method"), "{toast}");
+        let hits = mock.hits.lock().unwrap().clone();
+        let resp = hits
+            .iter()
+            .find(|h| h.method == "approval.respond")
+            .expect("approval.respond still fired");
+        assert_eq!(resp.params["approvalId"], "ap-9");
+        assert_eq!(resp.params["decision"], "deny");
     }
 
     #[test]
