@@ -36,6 +36,17 @@ impl ConnectError {
         matches!(self, Self::Rpc { code, .. } if code == "not_found")
     }
 
+    pub fn is_agent_busy(&self) -> bool {
+        matches!(self, Self::Rpc { code, .. } if code == rt_protocol::error_codes::AGENT_BUSY)
+    }
+
+    pub fn is_invalid_params(&self) -> bool {
+        matches!(
+            self,
+            Self::Rpc { code, .. } if code == rt_protocol::error_codes::INVALID_PARAMS
+        )
+    }
+
     pub fn as_label(&self) -> String {
         match self {
             Self::Health(msg) => format!("health: {msg}"),
