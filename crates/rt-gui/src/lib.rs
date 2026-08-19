@@ -4,6 +4,7 @@
 mod app;
 mod chrome;
 mod discovery;
+mod ladder;
 mod rpc;
 mod screens;
 mod state;

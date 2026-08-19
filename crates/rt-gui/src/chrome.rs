@@ -1,3 +1,4 @@
+use crate::ladder::YOLO_BANNER;
 use crate::state::{AppState, HostStatus, Screen};
 
 pub fn show(ctx: &egui::Context, state: &mut AppState) {
@@ -18,7 +19,8 @@ pub fn show(ctx: &egui::Context, state: &mut AppState) {
                     .selected_task_title()
                     .map(|t| t.to_string())
                     .unwrap_or_else(|| "Task".to_string());
-                let canvas_enabled = state.selected_task_id.is_some();
+                let canvas_enabled =
+                    state.selected_task_id.is_some() || !state.open_task_ids.is_empty();
                 nav_item(ui, state, Screen::Canvas, &canvas_label, canvas_enabled);
 
                 nav_item(ui, state, Screen::Host, "Host", true);
@@ -51,6 +53,17 @@ pub fn show(ctx: &egui::Context, state: &mut AppState) {
                             }
                         });
                     });
+                });
+        });
+    }
+
+    if state.yolo_on() {
+        egui::TopBottomPanel::top("yolo_banner").show(ctx, |ui| {
+            egui::Frame::new()
+                .fill(egui::Color32::from_rgb(120, 48, 16))
+                .inner_margin(egui::Margin::symmetric(12, 8))
+                .show(ui, |ui| {
+                    ui.colored_label(egui::Color32::from_rgb(255, 220, 170), YOLO_BANNER);
                 });
         });
     }

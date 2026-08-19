@@ -29,6 +29,7 @@ impl eframe::App for RtGuiApp {
 
         screens::tasks::show_new_task_dialog(ctx, &mut self.state);
         screens::tasks::show_rename_dialog(ctx, &mut self.state);
+        screens::canvas::show_ladder_dialogs(ctx, &mut self.state);
 
         if let Some(toast) = self.state.toast.clone() {
             egui::Window::new("Сообщение")

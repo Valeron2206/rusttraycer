@@ -1,5 +1,6 @@
 //! HTTP client for host RPC. No spawn. Agent/files over RPC; WS is in `ws`.
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use serde::de::DeserializeOwned;
@@ -11,6 +12,10 @@ use crate::state::PidInfo;
 const TIMEOUT: Duration = Duration::from_secs(2);
 const CLIENT_VERSION: &str = rt_protocol::CRATE_VERSION;
 
+pub const METHOD_POLICY_GET: &str = "policy.get";
+pub const METHOD_POLICY_SET: &str = "policy.set";
+pub const METHOD_APPROVAL_RESPOND: &str = "approval.respond";
+
 #[derive(Debug, Clone)]
 pub struct Session {
     pub host_id: String,
@@ -18,6 +23,8 @@ pub struct Session {
     pub session_token: String,
     pub rpc_url: String,
     pub ws_url: Option<String>,
+    pub accepted: BTreeMap<String, rt_protocol::MethodVersion>,
+    pub rejected: BTreeMap<String, String>,
 }
 
 #[derive(Debug)]
@@ -43,6 +50,13 @@ impl ConnectError {
         matches!(
             self,
             Self::Rpc { code, .. } if code == rt_protocol::error_codes::INVALID_PARAMS
+        )
+    }
+
+    pub fn is_unsupported_method(&self) -> bool {
+        matches!(
+            self,
+            Self::Rpc { code, .. } if code == rt_protocol::error_codes::UNSUPPORTED_METHOD
         )
     }
 
@@ -79,6 +93,10 @@ struct ServerHello {
     host_id: String,
     host_version: String,
     session_token: String,
+    #[serde(default)]
+    accepted: BTreeMap<String, rt_protocol::MethodVersion>,
+    #[serde(default)]
+    rejected: BTreeMap<String, rt_protocol::RejectedMethod>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -112,6 +130,13 @@ fn hello_methods() -> Value {
         "git.diff",
     ] {
         map.insert(name.to_string(), json!({ "major": 1, "minor": 0 }));
+    }
+    for name in [
+        METHOD_POLICY_GET,
+        METHOD_POLICY_SET,
+        METHOD_APPROVAL_RESPOND,
+    ] {
+        map.insert(name.to_string(), json!({ "major": 1, "minor": 1 }));
     }
     Value::Object(map)
 }
@@ -241,12 +266,19 @@ pub fn connect(info: &PidInfo) -> Result<Session, ConnectError> {
         });
     }
 
+    let rejected = hello
+        .rejected
+        .into_iter()
+        .map(|(k, v)| (k, v.reason))
+        .collect();
     Ok(Session {
         host_id: hello.host_id,
         host_version: hello.host_version,
         session_token: hello.session_token,
         rpc_url: origin,
         ws_url: info.ws_url.clone(),
+        accepted: hello.accepted,
+        rejected,
     })
 }
 
@@ -478,6 +510,63 @@ impl Session {
         }
         parse_ok(self.call("git.diff", params)?)
     }
+
+    pub fn host_doctor(&self) -> Result<DoctorOk, ConnectError> {
+        parse_ok(self.call(rt_protocol::METHOD_HOST_DOCTOR, json!({}))?)
+    }
+
+    pub fn ladder_accepted(&self) -> bool {
+        fn ok(map: &BTreeMap<String, rt_protocol::MethodVersion>, name: &str) -> bool {
+            map.get(name)
+                .map(|v| v.major == 1 && v.minor >= 1)
+                .unwrap_or(false)
+        }
+        ok(&self.accepted, METHOD_POLICY_GET)
+            && ok(&self.accepted, METHOD_POLICY_SET)
+            && ok(&self.accepted, METHOD_APPROVAL_RESPOND)
+    }
+
+    pub fn ladder_rejected(&self) -> bool {
+        self.rejected.contains_key(METHOD_POLICY_GET)
+            || self.rejected.contains_key(METHOD_POLICY_SET)
+            || self.rejected.contains_key(METHOD_APPROVAL_RESPOND)
+    }
+
+    pub fn policy_get(&self, agent_id: &str) -> Result<PolicyOk, ConnectError> {
+        parse_ok(self.call(METHOD_POLICY_GET, json!({ "agentId": agent_id }))?)
+    }
+
+    pub fn policy_set(
+        &self,
+        agent_id: &str,
+        mode: &str,
+        scope: &str,
+        yolo: bool,
+    ) -> Result<PolicyOk, ConnectError> {
+        parse_ok(self.call(
+            METHOD_POLICY_SET,
+            json!({
+                "agentId": agent_id,
+                "mode": mode,
+                "scope": scope,
+                "yolo": yolo,
+            }),
+        )?)
+    }
+
+    pub fn approval_respond(
+        &self,
+        approval_id: &str,
+        decision: &str,
+    ) -> Result<ApprovalRespondOk, ConnectError> {
+        parse_ok(self.call(
+            METHOD_APPROVAL_RESPOND,
+            json!({
+                "approvalId": approval_id,
+                "decision": decision,
+            }),
+        )?)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -529,6 +618,87 @@ pub struct GitDiffOk {
 pub struct GitDiffFile {
     pub path: String,
     pub patch: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct HarnessCapsView {
+    #[serde(default)]
+    pub one_shot: bool,
+    #[serde(default)]
+    pub long_lived: bool,
+    #[serde(default)]
+    pub stream_tokens: bool,
+    #[serde(default)]
+    pub tools: bool,
+    #[serde(default)]
+    pub session_resume: bool,
+    #[serde(default)]
+    pub a2a_inbox: bool,
+    #[serde(default)]
+    pub pty: bool,
+    #[serde(default)]
+    pub needs_api_key: bool,
+    #[serde(default)]
+    pub api_key_env: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DoctorProvider {
+    pub id: String,
+    #[serde(default)]
+    pub available: bool,
+    #[serde(default)]
+    pub detail: String,
+    #[serde(default)]
+    pub caps: Option<HarnessCapsView>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct DoctorOk {
+    #[serde(default)]
+    pub host_id: String,
+    #[serde(default)]
+    pub pid: u64,
+    #[serde(default)]
+    pub rpc_url: String,
+    #[serde(default)]
+    pub db_ok: bool,
+    #[serde(default)]
+    pub data_dir: String,
+    #[serde(default)]
+    pub db_path: String,
+    #[serde(default)]
+    pub log_path: String,
+    #[serde(default)]
+    pub providers: Vec<DoctorProvider>,
+    #[serde(default)]
+    pub workspace_count: i64,
+    #[serde(default)]
+    pub task_count: i64,
+    #[serde(default)]
+    pub agent_count: i64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PolicyOk {
+    pub mode: String,
+    #[serde(default)]
+    pub scope: String,
+    #[serde(default)]
+    pub yolo: bool,
+    #[serde(default)]
+    pub source: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovalRespondOk {
+    #[serde(default)]
+    pub applied: bool,
 }
 
 pub fn keepalive(session: &Session) -> Result<(), ConnectError> {
@@ -1809,5 +1979,232 @@ mod tests {
                 .any(|h| h.method == "files.tree" && h.params["worktreeId"] == "wt-1"),
             "{hits:?}"
         );
+    }
+
+    #[test]
+    fn handshake_advertises_policy_methods_1_1() {
+        let mock = start_catalog_mock("host-a", "tok-1");
+        let _session = connect(&pid("host-a", &mock.origin)).expect("online");
+        let hs = mock
+            .hits
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|h| h.method == "handshake")
+            .cloned()
+            .expect("handshake");
+        for name in [
+            METHOD_POLICY_GET,
+            METHOD_POLICY_SET,
+            METHOD_APPROVAL_RESPOND,
+        ] {
+            assert_eq!(hs.params["methods"][name]["major"], 1, "{name}");
+            assert_eq!(hs.params["methods"][name]["minor"], 1, "{name}");
+        }
+    }
+
+    fn start_doctor_policy_mock(mode: &'static str) -> CatalogMock {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(Mutex::new(Vec::new()));
+        let hits_t = hits.clone();
+        thread::spawn(move || {
+            for stream in listener.incoming().take(24) {
+                let Ok(mut stream) = stream else { break };
+                let (headers, body) = read_http_request(&mut stream);
+                let has_session = headers.to_ascii_lowercase().contains("x-rt-session:");
+                let (method, params) = if headers.starts_with("GET /health") {
+                    ("GET /health".to_string(), json!({}))
+                } else {
+                    let parsed: Value = serde_json::from_slice(&body).unwrap_or(json!({}));
+                    (
+                        parsed
+                            .get("method")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("other")
+                            .to_string(),
+                        parsed.get("params").cloned().unwrap_or(json!({})),
+                    )
+                };
+                hits_t.lock().unwrap().push(RpcHit {
+                    method: method.clone(),
+                    params: params.clone(),
+                    has_session,
+                });
+                let body = match (mode, method.as_str()) {
+                    (_, "GET /health") => json!({"ok": true, "hostId": "host-a"}).to_string(),
+                    (_, "handshake") => json!({
+                        "id": "echo",
+                        "ok": {
+                            "hostId": "host-a",
+                            "hostVersion": "0.1.0",
+                            "sessionToken": "tok-1",
+                            "accepted": {
+                                "policy.get": {"major": 1, "minor": 1},
+                                "policy.set": {"major": 1, "minor": 1},
+                                "approval.respond": {"major": 1, "minor": 1}
+                            },
+                            "rejected": {}
+                        }
+                    })
+                    .to_string(),
+                    (_, "host.ping") => json!({
+                        "id": "echo",
+                        "ok": { "hostId": "host-a", "now": "2026-08-17T12:00:00Z" }
+                    })
+                    .to_string(),
+                    ("ok", "host.doctor") => json!({
+                        "id": "echo",
+                        "ok": {
+                            "hostId": "host-a",
+                            "providers": [
+                                {
+                                    "id": "byoa.foo",
+                                    "available": true,
+                                    "detail": "/bin/foo",
+                                    "caps": {
+                                        "oneShot": true,
+                                        "longLived": false,
+                                        "streamTokens": true,
+                                        "tools": false,
+                                        "sessionResume": false,
+                                        "a2aInbox": false,
+                                        "pty": false,
+                                        "needsApiKey": false,
+                                        "apiKeyEnv": null
+                                    }
+                                },
+                                {
+                                    "id": "cli.claude",
+                                    "available": false,
+                                    "detail": "missing"
+                                }
+                            ]
+                        }
+                    })
+                    .to_string(),
+                    ("ok", "policy.get") => json!({
+                        "id": "echo",
+                        "ok": {
+                            "mode": "ask",
+                            "scope": "agent",
+                            "yolo": false,
+                            "source": "default"
+                        }
+                    })
+                    .to_string(),
+                    ("ok", "policy.set") => {
+                        let yolo = params
+                            .get("yolo")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+                        let mode = params.get("mode").and_then(|v| v.as_str()).unwrap_or("ask");
+                        json!({
+                            "id": "echo",
+                            "ok": {
+                                "mode": mode,
+                                "scope": "agent",
+                                "yolo": yolo,
+                                "source": "agent"
+                            }
+                        })
+                        .to_string()
+                    }
+                    ("ok", "approval.respond") => json!({
+                        "id": "echo",
+                        "ok": { "applied": true }
+                    })
+                    .to_string(),
+                    ("old", "host.doctor")
+                    | ("old", "policy.get")
+                    | ("old", "policy.set")
+                    | ("old", "approval.respond") => json!({
+                        "id": "echo",
+                        "error": { "code": "unsupported_method", "message": "no 1.1" }
+                    })
+                    .to_string(),
+                    _ => json!({
+                        "id": "echo",
+                        "error": { "code": "unsupported_method", "message": "no" }
+                    })
+                    .to_string(),
+                };
+                write_http_json(&mut stream, &body);
+            }
+        });
+        CatalogMock {
+            origin: format!("http://{addr}"),
+            hits,
+        }
+    }
+
+    #[test]
+    fn host_doctor_parses_providers_and_optional_caps() {
+        let mock = start_doctor_policy_mock("ok");
+        let session = connect(&pid("host-a", &mock.origin)).expect("online");
+        let doctor = session.host_doctor().expect("doctor");
+        assert_eq!(doctor.providers.len(), 2);
+        assert_eq!(doctor.providers[0].id, "byoa.foo");
+        assert!(doctor.providers[0].available);
+        let caps = doctor.providers[0].caps.as_ref().expect("caps");
+        assert!(caps.one_shot);
+        assert!(!caps.pty);
+        assert_eq!(doctor.providers[1].id, "cli.claude");
+        assert!(doctor.providers[1].caps.is_none());
+        let hit = mock
+            .hits
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|h| h.method == "host.doctor")
+            .cloned()
+            .expect("host.doctor");
+        assert!(hit.has_session);
+    }
+
+    #[test]
+    fn policy_and_approval_roundtrip() {
+        let mock = start_doctor_policy_mock("ok");
+        let session = connect(&pid("host-a", &mock.origin)).expect("online");
+        assert!(session.ladder_accepted());
+        let got = session.policy_get("ag-1").expect("get");
+        assert_eq!(got.mode, "ask");
+        assert!(!got.yolo);
+        assert_eq!(got.source, "default");
+        let set = session
+            .policy_set("ag-1", "allow-always", "agent", true)
+            .expect("set");
+        assert_eq!(set.mode, "allow-always");
+        assert!(set.yolo);
+        let resp = session
+            .approval_respond("ap-1", "allow-once")
+            .expect("respond");
+        assert!(resp.applied);
+        let hits = mock.hits.lock().unwrap().clone();
+        let get = hits.iter().find(|h| h.method == "policy.get").unwrap();
+        assert_eq!(get.params["agentId"], "ag-1");
+        let set_hit = hits.iter().find(|h| h.method == "policy.set").unwrap();
+        assert_eq!(set_hit.params["agentId"], "ag-1");
+        assert_eq!(set_hit.params["mode"], "allow-always");
+        assert_eq!(set_hit.params["yolo"], true);
+        let ap = hits
+            .iter()
+            .find(|h| h.method == "approval.respond")
+            .unwrap();
+        assert_eq!(ap.params["approvalId"], "ap-1");
+        assert_eq!(ap.params["decision"], "allow-once");
+    }
+
+    #[test]
+    fn policy_get_missing_method_is_error_not_panic() {
+        let mock = start_doctor_policy_mock("old");
+        let session = connect(&pid("host-a", &mock.origin)).expect("online");
+        let err = session.policy_get("ag-1").unwrap_err();
+        assert!(err.is_unsupported_method(), "{err:?}");
+        let label = err.as_label();
+        assert!(label.contains("unsupported_method"), "{label}");
+        let err = session.host_doctor().unwrap_err();
+        assert!(err.is_unsupported_method());
+        let _ = mock;
     }
 }

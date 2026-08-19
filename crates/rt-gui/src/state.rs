@@ -6,7 +6,12 @@ use std::thread;
 use std::time::Instant;
 
 use crate::discovery::{self, DiscoverError};
-use crate::rpc::{CancelOk, ConnectError, GitDiffOk, GitStatusOk, Worktree};
+use crate::ladder::{
+    self, AgentPolicy, PaneKind, PendingApproval, PolicyMode, SplitLayout, PICKER_EMPTY,
+};
+use crate::rpc::{
+    CancelOk, ConnectError, DoctorOk, DoctorProvider, GitDiffOk, GitStatusOk, Worktree,
+};
 use crate::ws::{self, ApplyOutcome, WsBridge, WsIncoming};
 
 enum RpcIncoming {
@@ -259,6 +264,16 @@ pub struct AppState {
     pub git_diff: Option<GitDiffOk>,
     pub git_selected_path: Option<String>,
     pub git_note: Option<String>,
+    pub providers: Vec<DoctorProvider>,
+    pub doctor: Option<DoctorOk>,
+    pub picker_provider: Option<String>,
+    pub open_task_ids: Vec<String>,
+    pub selected_agent_by_task: HashMap<String, String>,
+    pub split: SplitLayout,
+    pub policies: HashMap<String, AgentPolicy>,
+    pub pending_approvals: HashMap<String, PendingApproval>,
+    pub show_yolo_confirm: bool,
+    pub ladder_status: Option<String>,
     pending_cancel: Option<String>,
     rpc_tx: Sender<RpcIncoming>,
     rpc_rx: Receiver<RpcIncoming>,
@@ -314,6 +329,16 @@ impl AppState {
             git_diff: None,
             git_selected_path: None,
             git_note: None,
+            providers: Vec::new(),
+            doctor: None,
+            picker_provider: None,
+            open_task_ids: Vec::new(),
+            selected_agent_by_task: HashMap::new(),
+            split: ladder::load_split_layout(),
+            policies: HashMap::new(),
+            pending_approvals: HashMap::new(),
+            show_yolo_confirm: false,
+            ladder_status: None,
             pending_cancel: None,
             rpc_tx,
             rpc_rx,
@@ -470,6 +495,7 @@ impl AppState {
                         self.host_status = HostStatus::Online;
                         self.last_rpc = Some(Instant::now());
                         self.ws_banner = None;
+                        self.refresh_doctor();
                         self.refresh_tasks_catalog();
                         if self.screen == Screen::Canvas {
                             self.refresh_canvas_after_reconnect();
@@ -536,6 +562,30 @@ impl AppState {
     }
 
     fn apply_ws_event(&mut self, event: ws::WsEvent) {
+        if let ws::WsEvent::AgentApproval {
+            approval_id,
+            agent_id,
+            task_id,
+            kind,
+            summary,
+        } = &event
+        {
+            let on_open = self.open_task_ids.iter().any(|id| id == task_id)
+                || self.selected_task_id.as_deref() == Some(task_id.as_str());
+            if on_open && !approval_id.is_empty() {
+                self.pending_approvals.insert(
+                    agent_id.clone(),
+                    PendingApproval {
+                        approval_id: approval_id.clone(),
+                        agent_id: agent_id.clone(),
+                        task_id: task_id.clone(),
+                        kind: kind.clone(),
+                        summary: summary.clone(),
+                    },
+                );
+            }
+            return;
+        }
         let task_filter = self.selected_task_id.clone();
         let agent_filter = self.selected_agent_id.clone();
         let outcome = ws::apply_event(
@@ -566,7 +616,10 @@ impl AppState {
                     self.reload_task_list();
                 }
             }
-            ApplyOutcome::Appended | ApplyOutcome::Deduped | ApplyOutcome::Ignored => {}
+            ApplyOutcome::Appended
+            | ApplyOutcome::Deduped
+            | ApplyOutcome::Ignored
+            | ApplyOutcome::Approval => {}
         }
     }
 
@@ -610,7 +663,8 @@ impl AppState {
     pub fn can_create_agent(&self) -> bool {
         self.can_rpc()
             && self.selected_task_id.is_some()
-            && self.agents_for_selected_task().is_empty()
+            && self.picker_provider.is_some()
+            && !self.providers.is_empty()
     }
 
     pub fn worktree_id(&self) -> Option<&str> {
@@ -784,15 +838,51 @@ impl AppState {
     }
 
     pub fn open_task(&mut self, id: String) {
+        self.remember_selected_agent();
+        if !self.open_task_ids.iter().any(|open| open == &id) {
+            self.open_task_ids.push(id.clone());
+        }
         self.selected_task_id = Some(id.clone());
         self.screen = Screen::Canvas;
         self.selected_file = None;
         self.file_preview = None;
+        self.selected_agent_id = self.selected_agent_by_task.get(&id).cloned();
         if self.demo {
             return;
         }
         self.reload_canvas(&id);
         self.ws_subscribe(&id);
+    }
+
+    pub fn switch_task_tab(&mut self, id: String) {
+        if self.selected_task_id.as_deref() == Some(id.as_str()) {
+            return;
+        }
+        self.open_task(id);
+    }
+
+    pub fn close_task_tab(&mut self, id: &str) {
+        self.open_task_ids.retain(|open| open != id);
+        self.selected_agent_by_task.remove(id);
+        self.pending_approvals.retain(|_, ap| ap.task_id != id);
+        if self.selected_task_id.as_deref() != Some(id) {
+            return;
+        }
+        if let Some(next) = self.open_task_ids.last().cloned() {
+            self.selected_task_id = None;
+            self.open_task(next);
+        } else {
+            self.selected_task_id = None;
+            self.selected_agent_id = None;
+            self.screen = Screen::Tasks;
+        }
+    }
+
+    fn remember_selected_agent(&mut self) {
+        if let (Some(task_id), Some(agent_id)) = (&self.selected_task_id, &self.selected_agent_id) {
+            self.selected_agent_by_task
+                .insert(task_id.clone(), agent_id.clone());
+        }
     }
 
     fn reload_canvas(&mut self, task_id: &str) {
@@ -866,6 +956,7 @@ impl AppState {
                 self.toast = Some(err.as_label());
             }
         }
+        self.load_policy_for(&agent_id);
         self.load_git_panel();
     }
 
@@ -893,18 +984,30 @@ impl AppState {
 
     pub fn create_agent(&mut self) {
         if !self.can_create_agent() {
+            if self.providers.is_empty() || self.picker_provider.is_none() {
+                self.toast = Some(PICKER_EMPTY.into());
+            }
             return;
         }
         let Some(task_id) = self.selected_task_id.clone() else {
             return;
         };
+        let Some(provider) = self.picker_provider.clone() else {
+            self.toast = Some(PICKER_EMPTY.into());
+            return;
+        };
+        if !self.providers.iter().any(|p| p.id == provider) {
+            self.toast = Some(PICKER_EMPTY.into());
+            return;
+        }
         let Some(session) = self.session.clone() else {
             return;
         };
-        match session.agent_create(&task_id, "cli.generic") {
+        match session.agent_create(&task_id, &provider) {
             Ok(agent) => {
                 let stub = AgentStub::from(agent);
                 self.selected_agent_id = Some(stub.id.clone());
+                self.remember_selected_agent();
                 self.agents.push(stub);
                 self.load_selected_agent();
             }
@@ -919,7 +1022,14 @@ impl AppState {
             return;
         }
         self.selected_agent_id = Some(id);
+        self.remember_selected_agent();
         self.load_selected_agent();
+    }
+
+    pub fn set_picker_provider(&mut self, id: String) {
+        if self.providers.iter().any(|p| p.id == id) {
+            self.picker_provider = Some(id);
+        }
     }
 
     pub fn cancel_running_agent(&mut self) {
@@ -1244,6 +1354,175 @@ impl AppState {
             true
         } else {
             false
+        }
+    }
+
+    pub fn refresh_doctor(&mut self) {
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        match session.host_doctor() {
+            Ok(doctor) => self.apply_doctor(doctor),
+            Err(err) => {
+                self.toast = Some(err.as_label());
+            }
+        }
+    }
+
+    fn apply_doctor(&mut self, doctor: DoctorOk) {
+        self.providers = doctor.providers.clone();
+        let keep = self
+            .picker_provider
+            .as_ref()
+            .map(|id| self.providers.iter().any(|p| &p.id == id))
+            .unwrap_or(false);
+        if !keep {
+            self.picker_provider = self.providers.first().map(|p| p.id.clone());
+        }
+        self.doctor = Some(doctor);
+    }
+
+    pub fn selected_provider(&self) -> Option<&DoctorProvider> {
+        let id = self.picker_provider.as_ref()?;
+        self.providers.iter().find(|p| &p.id == id)
+    }
+
+    pub fn persist_split(&mut self) {
+        ladder::save_split_layout(&self.split);
+    }
+
+    pub fn set_split_pane(&mut self, side: &str, kind: PaneKind) {
+        match side {
+            "left" => self.split.left = kind,
+            "right" => self.split.right = kind,
+            _ => return,
+        }
+        self.persist_split();
+    }
+
+    pub fn selected_policy(&self) -> AgentPolicy {
+        match self.selected_agent() {
+            Some(agent) => self.policies.get(&agent.id).cloned().unwrap_or_default(),
+            None => AgentPolicy::default(),
+        }
+    }
+
+    pub fn yolo_on(&self) -> bool {
+        self.selected_policy().yolo
+    }
+
+    pub fn selected_approval(&self) -> Option<&PendingApproval> {
+        let agent_id = self.selected_agent()?.id.as_str();
+        self.pending_approvals.get(agent_id)
+    }
+
+    pub fn request_yolo_on(&mut self) {
+        if self.yolo_on() {
+            return;
+        }
+        self.show_yolo_confirm = true;
+    }
+
+    pub fn cancel_yolo_confirm(&mut self) {
+        self.show_yolo_confirm = false;
+    }
+
+    pub fn confirm_yolo(&mut self) {
+        self.show_yolo_confirm = false;
+        self.set_yolo(true);
+    }
+
+    pub fn set_yolo_off(&mut self) {
+        self.set_yolo(false);
+    }
+
+    fn set_yolo(&mut self, yolo: bool) {
+        let policy = self.selected_policy();
+        self.write_policy(policy.mode, &policy.scope, yolo);
+    }
+
+    pub fn set_policy_mode(&mut self, mode: PolicyMode) {
+        let policy = self.selected_policy();
+        if policy.mode == mode {
+            return;
+        }
+        self.write_policy(mode, &policy.scope, policy.yolo);
+    }
+
+    fn write_policy(&mut self, mode: PolicyMode, scope: &str, yolo: bool) {
+        let Some(agent_id) = self.selected_agent().map(|a| a.id.clone()) else {
+            return;
+        };
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        if session.ladder_rejected() && !session.ladder_accepted() {
+            self.ladder_status = Some(crate::ladder::LADDER_UNAVAILABLE.into());
+            return;
+        }
+        match session.policy_set(&agent_id, mode.as_wire(), scope, yolo) {
+            Ok(ok) => {
+                self.policies.insert(agent_id, AgentPolicy::from(ok));
+                self.ladder_status = None;
+            }
+            Err(err) => {
+                self.surface_ladder_error(err);
+            }
+        }
+    }
+
+    fn load_policy_for(&mut self, agent_id: &str) {
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        if session.ladder_rejected() && !session.ladder_accepted() {
+            self.ladder_status = Some(crate::ladder::LADDER_UNAVAILABLE.into());
+            return;
+        }
+        match session.policy_get(agent_id) {
+            Ok(ok) => {
+                self.policies
+                    .insert(agent_id.to_string(), AgentPolicy::from(ok));
+                self.ladder_status = None;
+            }
+            Err(err) => {
+                self.surface_ladder_error(err);
+            }
+        }
+    }
+
+    fn surface_ladder_error(&mut self, err: ConnectError) {
+        let label = err.as_label();
+        if err.is_unsupported_method() {
+            self.ladder_status = Some(crate::ladder::LADDER_UNAVAILABLE.into());
+        } else {
+            self.ladder_status = Some(label.clone());
+        }
+        self.toast = Some(label);
+    }
+
+    pub fn respond_approval(&mut self, decision: &str) {
+        let Some(approval) = self.selected_approval().cloned() else {
+            return;
+        };
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        match session.approval_respond(&approval.approval_id, decision) {
+            Ok(ok) => {
+                self.pending_approvals.remove(&approval.agent_id);
+                if !ok.applied {
+                    self.toast = Some("решение уже не применяется".into());
+                }
+                if decision == "allow-always" {
+                    if let Some(policy) = self.policies.get_mut(&approval.agent_id) {
+                        policy.mode = PolicyMode::AllowAlways;
+                    }
+                }
+            }
+            Err(err) => {
+                self.surface_ladder_error(err);
+            }
         }
     }
 }
@@ -1887,5 +2166,475 @@ mod tests {
             !methods.contains(&"agent.cancel".to_string()),
             "{methods:?}"
         );
+    }
+
+    fn start_e1_mock() -> SliceMock {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(Mutex::new(Vec::new()));
+        let hits_t = hits.clone();
+        thread::spawn(move || {
+            for stream in listener.incoming().take(64) {
+                let Ok(mut stream) = stream else { break };
+                let (headers, body) = read_http_request(&mut stream);
+                let (method, params) = if headers.starts_with("GET /health") {
+                    ("GET /health".to_string(), json!({}))
+                } else {
+                    let parsed: Value = serde_json::from_slice(&body).unwrap_or(json!({}));
+                    (
+                        parsed
+                            .get("method")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("other")
+                            .to_string(),
+                        parsed.get("params").cloned().unwrap_or(json!({})),
+                    )
+                };
+                hits_t.lock().unwrap().push(RpcHit {
+                    method: method.clone(),
+                    params: params.clone(),
+                });
+                let body = match method.as_str() {
+                    "GET /health" => json!({"ok": true, "hostId": "host-a"}).to_string(),
+                    "handshake" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "hostId": "host-a",
+                            "hostVersion": "0.1.0",
+                            "sessionToken": "tok-1",
+                            "accepted": {},
+                            "rejected": {
+                                "policy.get": {"reason": "unsupported"},
+                                "policy.set": {"reason": "unsupported"},
+                                "approval.respond": {"reason": "unsupported"}
+                            }
+                        }
+                    })
+                    .to_string(),
+                    "host.ping" => json!({
+                        "id": "echo",
+                        "ok": { "hostId": "host-a", "now": "2026-08-17T12:00:00Z" }
+                    })
+                    .to_string(),
+                    "host.doctor" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "hostId": "host-a",
+                            "providers": [
+                                {"id": "byoa.foo", "available": true, "detail": "/bin/foo"},
+                                {"id": "cli.claude", "available": false, "detail": "missing"}
+                            ]
+                        }
+                    })
+                    .to_string(),
+                    "agent.list" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "items": [
+                                sample_agent("ag-1", "task-1", "idle"),
+                                {
+                                    "id": "ag-2",
+                                    "taskId": "task-1",
+                                    "hostId": "host-a",
+                                    "parentId": null,
+                                    "interface": "chat",
+                                    "provider": "byoa.foo",
+                                    "status": "idle",
+                                    "runLocation": "local",
+                                    "createdAt": "2026-08-17T12:00:00Z"
+                                }
+                            ]
+                        }
+                    })
+                    .to_string(),
+                    "agent.get" => {
+                        let id = params.get("id").and_then(|v| v.as_str()).unwrap_or("ag-1");
+                        let provider = match id {
+                            "ag-2" => "byoa.foo",
+                            "ag-new" => "cli.claude",
+                            _ => "cli.generic",
+                        };
+                        json!({
+                            "id": "echo",
+                            "ok": {
+                                "id": id,
+                                "taskId": "task-1",
+                                "hostId": "host-a",
+                                "parentId": null,
+                                "interface": "chat",
+                                "provider": provider,
+                                "status": "idle",
+                                "runLocation": "local",
+                                "createdAt": "2026-08-17T12:00:00Z"
+                            }
+                        })
+                        .to_string()
+                    }
+                    "agent.get_context" => {
+                        let id = params
+                            .get("agentId")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("ag-1");
+                        let content = if id == "ag-2" {
+                            "from-ag-2"
+                        } else {
+                            "from-ag-1"
+                        };
+                        json!({
+                            "id": "echo",
+                            "ok": {
+                                "messages": [sample_message(&format!("ctx-{id}"), id, "assistant", content)]
+                            }
+                        })
+                        .to_string()
+                    }
+                    "agent.create" => {
+                        let task_id = params
+                            .get("taskId")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("task-1");
+                        let provider = params
+                            .get("provider")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        json!({
+                            "id": "echo",
+                            "ok": {
+                                "id": "ag-new",
+                                "taskId": task_id,
+                                "hostId": "host-a",
+                                "parentId": null,
+                                "interface": "chat",
+                                "provider": provider,
+                                "status": "idle",
+                                "runLocation": "local",
+                                "createdAt": "2026-08-17T12:00:00Z"
+                            }
+                        })
+                        .to_string()
+                    }
+                    "policy.get" | "policy.set" | "approval.respond" => json!({
+                        "id": "echo",
+                        "error": { "code": "unsupported_method", "message": "no 1.1" }
+                    })
+                    .to_string(),
+                    "worktree.get" => json!({
+                        "id": "echo",
+                        "error": { "code": "not_found", "message": "no worktree" }
+                    })
+                    .to_string(),
+                    "git.status" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "branch": "main",
+                            "dirty": false,
+                            "truncated": false,
+                            "entries": []
+                        }
+                    })
+                    .to_string(),
+                    "git.diff" => json!({
+                        "id": "echo",
+                        "ok": { "truncated": false, "files": [] }
+                    })
+                    .to_string(),
+                    "files.tree" => json!({
+                        "id": "echo",
+                        "ok": { "items": [], "truncated": false }
+                    })
+                    .to_string(),
+                    _ => json!({
+                        "id": "echo",
+                        "error": { "code": "unsupported_method", "message": "no" }
+                    })
+                    .to_string(),
+                };
+                write_http_json(&mut stream, &body);
+            }
+        });
+        SliceMock {
+            origin: format!("http://{addr}"),
+            hits,
+        }
+    }
+
+    fn start_ladder_ok_mock() -> SliceMock {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(Mutex::new(Vec::new()));
+        let hits_t = hits.clone();
+        thread::spawn(move || {
+            for stream in listener.incoming().take(32) {
+                let Ok(mut stream) = stream else { break };
+                let (headers, body) = read_http_request(&mut stream);
+                let (method, params) = if headers.starts_with("GET /health") {
+                    ("GET /health".to_string(), json!({}))
+                } else {
+                    let parsed: Value = serde_json::from_slice(&body).unwrap_or(json!({}));
+                    (
+                        parsed
+                            .get("method")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("other")
+                            .to_string(),
+                        parsed.get("params").cloned().unwrap_or(json!({})),
+                    )
+                };
+                hits_t.lock().unwrap().push(RpcHit {
+                    method: method.clone(),
+                    params: params.clone(),
+                });
+                let body = match method.as_str() {
+                    "GET /health" => json!({"ok": true, "hostId": "host-a"}).to_string(),
+                    "handshake" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "hostId": "host-a",
+                            "hostVersion": "0.1.0",
+                            "sessionToken": "tok-1",
+                            "accepted": {
+                                "policy.get": {"major": 1, "minor": 1},
+                                "policy.set": {"major": 1, "minor": 1},
+                                "approval.respond": {"major": 1, "minor": 1}
+                            },
+                            "rejected": {}
+                        }
+                    })
+                    .to_string(),
+                    "host.ping" => json!({
+                        "id": "echo",
+                        "ok": { "hostId": "host-a", "now": "2026-08-17T12:00:00Z" }
+                    })
+                    .to_string(),
+                    "policy.get" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "mode": "ask",
+                            "scope": "agent",
+                            "yolo": false,
+                            "source": "default"
+                        }
+                    })
+                    .to_string(),
+                    "policy.set" => {
+                        let yolo = params
+                            .get("yolo")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+                        let mode = params.get("mode").and_then(|v| v.as_str()).unwrap_or("ask");
+                        json!({
+                            "id": "echo",
+                            "ok": {
+                                "mode": mode,
+                                "scope": "agent",
+                                "yolo": yolo,
+                                "source": "agent"
+                            }
+                        })
+                        .to_string()
+                    }
+                    "approval.respond" => json!({
+                        "id": "echo",
+                        "ok": { "applied": true }
+                    })
+                    .to_string(),
+                    _ => json!({
+                        "id": "echo",
+                        "error": { "code": "unsupported_method", "message": "no" }
+                    })
+                    .to_string(),
+                };
+                write_http_json(&mut stream, &body);
+            }
+        });
+        SliceMock {
+            origin: format!("http://{addr}"),
+            hits,
+        }
+    }
+
+    #[test]
+    fn picker_create_sends_doctor_selected_provider() {
+        let mock = start_e1_mock();
+        let session = connect(&pid(&mock.origin)).expect("online");
+        let mut state = online_state(session);
+        state.agents.clear();
+        state.selected_agent_id = None;
+        state.refresh_doctor();
+        assert_eq!(
+            state
+                .providers
+                .iter()
+                .map(|p| p.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["byoa.foo", "cli.claude"]
+        );
+        state.set_picker_provider("cli.claude".into());
+        assert_eq!(state.picker_provider.as_deref(), Some("cli.claude"));
+        assert!(state.can_create_agent());
+        state.create_agent();
+        assert_eq!(
+            state.selected_agent().map(|a| a.provider.as_str()),
+            Some("cli.claude")
+        );
+        let create = mock
+            .hits
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|h| h.method == "agent.create")
+            .cloned()
+            .expect("agent.create");
+        assert_eq!(create.params["provider"], "cli.claude");
+        assert_eq!(create.params["taskId"], "task-1");
+    }
+
+    #[test]
+    fn select_agent_swaps_context() {
+        let mock = start_e1_mock();
+        let session = connect(&pid(&mock.origin)).expect("online");
+        let mut state = online_state(session);
+        state.reload_canvas("task-1");
+        assert_eq!(state.messages[0].content, "from-ag-1");
+        state.select_agent("ag-2".into());
+        assert_eq!(state.selected_agent_id.as_deref(), Some("ag-2"));
+        assert_eq!(state.messages.len(), 1);
+        assert_eq!(state.messages[0].content, "from-ag-2");
+        assert_eq!(
+            state
+                .selected_agent_by_task
+                .get("task-1")
+                .map(String::as_str),
+            Some("ag-2")
+        );
+        let _ = mock;
+    }
+
+    #[test]
+    fn yolo_requires_explicit_confirm() {
+        let mut state = AppState::new();
+        state.pending_discover = false;
+        state.demo = false;
+        state.selected_task_id = Some("task-1".into());
+        state.selected_agent_id = Some("ag-1".into());
+        state.agents.push(AgentStub {
+            id: "ag-1".into(),
+            task_id: "task-1".into(),
+            provider: "byoa.foo".into(),
+            status: AgentStatus::Idle,
+        });
+        assert!(!state.yolo_on());
+        state.request_yolo_on();
+        assert!(state.show_yolo_confirm);
+        assert!(!state.yolo_on());
+        state.cancel_yolo_confirm();
+        assert!(!state.show_yolo_confirm);
+        assert!(!state.yolo_on());
+        assert_eq!(crate::ladder::YOLO_CONFIRM_TITLE, "Включить Yolo?");
+    }
+
+    #[test]
+    fn yolo_confirm_and_approval_card_talk_to_host() {
+        let mock = start_ladder_ok_mock();
+        let session = connect(&pid(&mock.origin)).expect("online");
+        let mut state = online_state(session);
+        state.load_policy_for("ag-1");
+        assert_eq!(state.selected_policy().mode, crate::ladder::PolicyMode::Ask);
+        assert!(!state.yolo_on());
+        state.request_yolo_on();
+        state.confirm_yolo();
+        assert!(state.yolo_on());
+        assert!(!state.show_yolo_confirm);
+        state.pending_approvals.insert(
+            "ag-1".into(),
+            crate::ladder::PendingApproval {
+                approval_id: "ap-9".into(),
+                agent_id: "ag-1".into(),
+                task_id: "task-1".into(),
+                kind: "exec".into(),
+                summary: "spawn byoa.foo".into(),
+            },
+        );
+        state.respond_approval("allow-once");
+        assert!(state.selected_approval().is_none());
+        let hits = mock.hits.lock().unwrap().clone();
+        let set = hits.iter().find(|h| h.method == "policy.set").expect("set");
+        assert_eq!(set.params["yolo"], true);
+        let resp = hits
+            .iter()
+            .find(|h| h.method == "approval.respond")
+            .expect("respond");
+        assert_eq!(resp.params["approvalId"], "ap-9");
+        assert_eq!(resp.params["decision"], "allow-once");
+    }
+
+    #[test]
+    fn old_host_policy_does_not_panic() {
+        let mock = start_e1_mock();
+        let session = connect(&pid(&mock.origin)).expect("online");
+        assert!(session.ladder_rejected());
+        let mut state = online_state(session);
+        state.load_policy_for("ag-1");
+        assert_eq!(
+            state.ladder_status.as_deref(),
+            Some(crate::ladder::LADDER_UNAVAILABLE)
+        );
+        assert!(state.toast.is_none());
+        state.set_policy_mode(crate::ladder::PolicyMode::Deny);
+        assert!(state.toast.is_none());
+        let methods: Vec<_> = mock
+            .hits
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|h| h.method.clone())
+            .collect();
+        assert!(!methods.contains(&"policy.get".to_string()), "{methods:?}");
+        assert!(!methods.contains(&"policy.set".to_string()), "{methods:?}");
+    }
+
+    #[test]
+    fn task_tabs_remember_selected_agent() {
+        let mut state = AppState::new();
+        state.pending_discover = false;
+        state.demo = true;
+        state.selected_task_id = Some("task-1".into());
+        state.selected_agent_id = Some("ag-1".into());
+        state.tasks.push(TaskStub {
+            id: "task-1".into(),
+            title: "One".into(),
+            status: TaskStatus::Open,
+            updated_at: "t".into(),
+        });
+        state.tasks.push(TaskStub {
+            id: "task-2".into(),
+            title: "Two".into(),
+            status: TaskStatus::Open,
+            updated_at: "t".into(),
+        });
+        state.agents.push(AgentStub {
+            id: "ag-1".into(),
+            task_id: "task-1".into(),
+            provider: "byoa.foo".into(),
+            status: AgentStatus::Idle,
+        });
+        state.agents.push(AgentStub {
+            id: "ag-9".into(),
+            task_id: "task-2".into(),
+            provider: "cli.claude".into(),
+            status: AgentStatus::Idle,
+        });
+        state.open_task("task-1".into());
+        state.select_agent("ag-1".into());
+        state.open_task("task-2".into());
+        assert_eq!(
+            state.open_task_ids,
+            vec!["task-1".to_string(), "task-2".to_string()]
+        );
+        state.selected_agent_id = Some("ag-9".into());
+        state.remember_selected_agent();
+        state.switch_task_tab("task-1".into());
+        assert_eq!(state.selected_task_id.as_deref(), Some("task-1"));
+        assert_eq!(state.selected_agent_id.as_deref(), Some("ag-1"));
     }
 }
