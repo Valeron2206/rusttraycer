@@ -1737,7 +1737,7 @@ pub struct ArtifactExportOk {
     pub markdown: String,
     #[serde(default)]
     pub filename: String,
-    /// Base64 PDF when format=pdf (protocol 1.9). Empty for md.
+    /// Raw `%PDF` or base64 PDF when format=pdf (protocol 1.9). Empty for md.
     #[serde(default)]
     pub bytes: String,
 }

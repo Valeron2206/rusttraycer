@@ -46,11 +46,18 @@ pub const STATUS_VALUES: [&str; 3] = ["todo", "in_progress", "done"];
 pub const EXPORT_FORMAT: &str = "md";
 pub const EXPORT_FORMAT_PDF: &str = "pdf";
 
-/// Decode a 1.9 PDF payload. Prefer `bytes` (base64); else markdown as base64 or raw UTF-8.
-pub fn decode_export_pdf(bytes_b64: &str, markdown: &str) -> Result<Vec<u8>, String> {
-    let b64 = bytes_b64.trim();
-    if !b64.is_empty() {
-        return crate::terminal::decode_b64(b64).ok_or_else(|| EXPORT_PDF_BAD_BYTES.to_string());
+/// Decode a 1.9 PDF payload. Prefer `bytes` (raw `%PDF` or base64); else markdown as base64 or raw UTF-8.
+pub fn decode_export_pdf(bytes: &str, markdown: &str) -> Result<Vec<u8>, String> {
+    if bytes.starts_with("%PDF") {
+        return Ok(bytes.as_bytes().to_vec());
+    }
+    let payload = bytes.trim();
+    if payload.starts_with("%PDF") {
+        return Ok(payload.as_bytes().to_vec());
+    }
+    if !payload.is_empty() {
+        return crate::terminal::decode_b64(payload)
+            .ok_or_else(|| EXPORT_PDF_BAD_BYTES.to_string());
     }
     let md = markdown.trim();
     if md.is_empty() {
@@ -415,6 +422,27 @@ mod tests {
         assert_eq!(
             export_suggested_filename("art-1", "spec.pdf", "pdf"),
             "spec.pdf"
+        );
+    }
+
+    #[test]
+    fn decode_export_pdf_accepts_raw_percent_pdf_or_base64() {
+        let raw = "%PDF-1.4\n1 0 obj\n<<>>\nendobj\n%%EOF\n";
+        let got = decode_export_pdf(raw, "ignored").unwrap();
+        assert!(got.starts_with(b"%PDF"), "raw payload must stay literal");
+        assert_eq!(got, raw.as_bytes());
+
+        let tiny = b"%PDF-1.4 tiny";
+        let b64 = crate::terminal::encode_b64(tiny);
+        assert_eq!(decode_export_pdf(&b64, "").unwrap(), tiny);
+
+        assert_eq!(
+            decode_export_pdf("not-valid-b64!!!", "").unwrap_err(),
+            EXPORT_PDF_BAD_BYTES
+        );
+        assert_eq!(
+            decode_export_pdf("!!!!", "").unwrap_err(),
+            EXPORT_PDF_BAD_BYTES
         );
     }
 }
