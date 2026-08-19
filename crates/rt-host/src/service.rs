@@ -1695,6 +1695,243 @@ impl HostService {
         }
         Ok(serde_json::json!({}))
     }
+
+    pub fn artifact_create(
+        &self,
+        params: &rt_protocol::ArtifactCreateParams,
+    ) -> Result<rt_storage::Artifact> {
+        let assignee = params
+            .assignee
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let parent = params
+            .parent_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let source = params
+            .source_message_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let art = self
+            .store
+            .artifact_create(rt_storage::ArtifactCreateInput {
+                task_id: &params.task_id,
+                parent_id: parent,
+                kind: &params.kind,
+                title: &params.title,
+                body: &params.body,
+                assignee,
+                source_message_id: source,
+            })?;
+        let _ = self
+            .events
+            .send(WsEvent::artifact_updated(&art.id, &art.task_id));
+        Ok(art)
+    }
+
+    pub fn artifact_get(&self, artifact_id: &str) -> Result<rt_storage::Artifact> {
+        self.store
+            .artifact_get(artifact_id)?
+            .ok_or_else(|| HostError::NotFound(format!("artifact {artifact_id}")))
+    }
+
+    pub fn artifact_list(
+        &self,
+        task_id: &str,
+        kind: Option<&str>,
+    ) -> Result<rt_protocol::ArtifactListOk> {
+        if self.store.task_get(task_id)?.is_none() {
+            return Err(HostError::NotFound(format!("task {task_id}")));
+        }
+        let (items, truncated) = self.store.artifact_list(task_id, kind)?;
+        let items = items.into_iter().map(storage_artifact_to_wire).collect();
+        Ok(rt_protocol::ArtifactListOk { items, truncated })
+    }
+
+    pub fn artifact_update(&self, params: &serde_json::Value) -> Result<rt_storage::Artifact> {
+        let artifact_id = params
+            .get("artifactId")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| HostError::InvalidParams("artifactId is required".into()))?;
+        let title = match params.get("title") {
+            None => None,
+            Some(v) => Some(
+                v.as_str()
+                    .ok_or_else(|| HostError::InvalidParams("title must be a string".into()))?,
+            ),
+        };
+        let body = match params.get("body") {
+            None => None,
+            Some(v) => Some(
+                v.as_str()
+                    .ok_or_else(|| HostError::InvalidParams("body must be a string".into()))?,
+            ),
+        };
+        let status = match params.get("status") {
+            None => None,
+            Some(serde_json::Value::Null) => {
+                return Err(HostError::InvalidParams("status cannot be null".into()));
+            }
+            Some(v) => Some(
+                v.as_str()
+                    .ok_or_else(|| HostError::InvalidParams("status must be a string".into()))?,
+            ),
+        };
+        let assignee = match params.get("assignee") {
+            None => None,
+            Some(serde_json::Value::Null) => Some(None),
+            Some(v) => {
+                let s = v
+                    .as_str()
+                    .ok_or_else(|| HostError::InvalidParams("assignee must be a string".into()))?;
+                Some(if s.is_empty() { None } else { Some(s) })
+            }
+        };
+        let parent_id = match params.get("parentId") {
+            None => None,
+            Some(serde_json::Value::Null) => Some(None),
+            Some(v) => {
+                let s = v
+                    .as_str()
+                    .ok_or_else(|| HostError::InvalidParams("parentId must be a string".into()))?;
+                Some(Some(s))
+            }
+        };
+        let art =
+            self.store
+                .artifact_update(artifact_id, title, body, status, assignee, parent_id)?;
+        let _ = self
+            .events
+            .send(WsEvent::artifact_updated(&art.id, &art.task_id));
+        Ok(art)
+    }
+
+    pub fn artifact_delete(&self, artifact_id: &str) -> Result<rt_protocol::ArtifactDeleteOk> {
+        let art = self.artifact_get(artifact_id)?;
+        let deleted = self.store.artifact_delete_tree(artifact_id)?;
+        for id in &deleted {
+            let _ = self
+                .events
+                .send(WsEvent::artifact_deleted(id, &art.task_id));
+        }
+        Ok(rt_protocol::ArtifactDeleteOk { deleted })
+    }
+
+    pub fn artifact_export(
+        &self,
+        artifact_id: &str,
+        format: &str,
+    ) -> Result<rt_protocol::ArtifactExportOk> {
+        match format {
+            "md" => {}
+            "pdf" => {
+                return Err(HostError::InvalidParams(
+                    "pdf export is not implemented".into(),
+                ));
+            }
+            other => {
+                return Err(HostError::InvalidParams(format!(
+                    "format must be md|pdf, got {other}"
+                )));
+            }
+        }
+        let art = self.artifact_get(artifact_id)?;
+        Ok(rt_protocol::ArtifactExportOk {
+            format: "md".into(),
+            markdown: format!("{}\n\n{}", art.title, art.body),
+            filename: format!("{}.md", art.id),
+        })
+    }
+
+    pub fn comment_create(
+        &self,
+        params: &rt_protocol::CommentCreateParams,
+    ) -> Result<rt_storage::CommentThread> {
+        let thread = if let Some(tid) = params
+            .thread_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            self.store.comment_add(tid, &params.body)?
+        } else {
+            let start = params.anchor_start.ok_or_else(|| {
+                HostError::InvalidParams("anchorStart is required for a new thread".into())
+            })?;
+            let end = params.anchor_end.ok_or_else(|| {
+                HostError::InvalidParams("anchorEnd is required for a new thread".into())
+            })?;
+            self.store
+                .comment_thread_create(&params.artifact_id, start, end, &params.body)?
+        };
+        if let Some(art) = self.store.artifact_get(&thread.artifact_id)? {
+            let _ = self
+                .events
+                .send(WsEvent::artifact_updated(&art.id, &art.task_id));
+        }
+        Ok(thread)
+    }
+
+    pub fn comment_list(&self, artifact_id: &str) -> Result<rt_protocol::CommentListOk> {
+        let threads = self.store.comment_list(artifact_id)?;
+        let threads = threads.into_iter().map(storage_thread_to_wire).collect();
+        Ok(rt_protocol::CommentListOk { threads })
+    }
+
+    pub fn comment_resolve(&self, thread_id: &str) -> Result<rt_storage::CommentThread> {
+        let thread = self.store.comment_resolve(thread_id)?;
+        if let Some(art) = self.store.artifact_get(&thread.artifact_id)? {
+            let _ = self
+                .events
+                .send(WsEvent::artifact_updated(&art.id, &art.task_id));
+        }
+        Ok(thread)
+    }
+
+    pub fn clear_transcript(&self, agent_id: &str) -> Result<rt_protocol::ClearTranscriptOk> {
+        let cleared = self.store.clear_transcript(agent_id)?;
+        Ok(rt_protocol::ClearTranscriptOk { cleared })
+    }
+}
+
+fn storage_artifact_to_wire(a: rt_storage::Artifact) -> rt_protocol::Artifact {
+    rt_protocol::Artifact {
+        id: a.id,
+        task_id: a.task_id,
+        parent_id: a.parent_id,
+        kind: a.kind,
+        title: a.title,
+        body: a.body,
+        status: a.status,
+        assignee: a.assignee,
+        source_message_id: a.source_message_id,
+        created_at: a.created_at,
+        updated_at: a.updated_at,
+    }
+}
+
+fn storage_thread_to_wire(t: rt_storage::CommentThread) -> rt_protocol::CommentThread {
+    rt_protocol::CommentThread {
+        id: t.id,
+        artifact_id: t.artifact_id,
+        anchor_start: t.anchor_start,
+        anchor_end: t.anchor_end,
+        resolved: t.resolved,
+        comments: t
+            .comments
+            .into_iter()
+            .map(|c| rt_protocol::Comment {
+                id: c.id,
+                body: c.body,
+                created_at: c.created_at,
+            })
+            .collect(),
+        created_at: t.created_at,
+        updated_at: t.updated_at,
+    }
 }
 
 fn session_resumed_flag(agent: &Agent, backends: &HashMap<String, Arc<dyn AgentBackend>>) -> bool {

@@ -77,6 +77,16 @@ pub const METHOD_PTY_OPEN: &str = "pty.open";
 pub const METHOD_PTY_WRITE: &str = "pty.write";
 pub const METHOD_PTY_RESIZE: &str = "pty.resize";
 pub const METHOD_PTY_CLOSE: &str = "pty.close";
+pub const METHOD_ARTIFACT_CREATE: &str = "artifact.create";
+pub const METHOD_ARTIFACT_GET: &str = "artifact.get";
+pub const METHOD_ARTIFACT_LIST: &str = "artifact.list";
+pub const METHOD_ARTIFACT_UPDATE: &str = "artifact.update";
+pub const METHOD_ARTIFACT_DELETE: &str = "artifact.delete";
+pub const METHOD_ARTIFACT_EXPORT: &str = "artifact.export";
+pub const METHOD_COMMENT_CREATE: &str = "comment.create";
+pub const METHOD_COMMENT_LIST: &str = "comment.list";
+pub const METHOD_COMMENT_RESOLVE: &str = "comment.resolve";
+pub const METHOD_AGENT_CLEAR_TRANSCRIPT: &str = "agent.clear_transcript";
 
 /// Tradable methods (handshake itself is not included).
 pub const TRADABLE_METHODS: &[&str] = &[
@@ -120,6 +130,16 @@ pub const TRADABLE_METHODS: &[&str] = &[
     METHOD_PTY_WRITE,
     METHOD_PTY_RESIZE,
     METHOD_PTY_CLOSE,
+    METHOD_ARTIFACT_CREATE,
+    METHOD_ARTIFACT_GET,
+    METHOD_ARTIFACT_LIST,
+    METHOD_ARTIFACT_UPDATE,
+    METHOD_ARTIFACT_DELETE,
+    METHOD_ARTIFACT_EXPORT,
+    METHOD_COMMENT_CREATE,
+    METHOD_COMMENT_LIST,
+    METHOD_COMMENT_RESOLVE,
+    METHOD_AGENT_CLEAR_TRANSCRIPT,
 ];
 
 pub fn host_method_version() -> MethodVersion {
@@ -130,8 +150,9 @@ pub fn host_method_version() -> MethodVersion {
 }
 
 /// Per-method negotiated version. Policy/approval methods are 1.1; write/git
-/// mutate methods are 1.2; `agent.create` and shell/pty methods are 1.3; all
-/// other tradable methods stay 1.0 (`HOST_METHOD_MINOR` is not bumped).
+/// mutate methods are 1.2; `agent.create` and shell/pty methods are 1.3;
+/// artifact/comment/`agent.clear_transcript` methods are 1.4; all other
+/// tradable methods stay 1.0 (`HOST_METHOD_MINOR` is not bumped).
 /// Unknown names return `None`.
 pub fn method_version(name: &str) -> Option<MethodVersion> {
     if !TRADABLE_METHODS.iter().any(|m| *m == name) {
@@ -149,6 +170,16 @@ pub fn method_version(name: &str) -> Option<MethodVersion> {
         | METHOD_PTY_OPEN | METHOD_PTY_WRITE | METHOD_PTY_RESIZE | METHOD_PTY_CLOSE => {
             Some(MethodVersion { major: 1, minor: 3 })
         }
+        METHOD_ARTIFACT_CREATE
+        | METHOD_ARTIFACT_GET
+        | METHOD_ARTIFACT_LIST
+        | METHOD_ARTIFACT_UPDATE
+        | METHOD_ARTIFACT_DELETE
+        | METHOD_ARTIFACT_EXPORT
+        | METHOD_COMMENT_CREATE
+        | METHOD_COMMENT_LIST
+        | METHOD_COMMENT_RESOLVE
+        | METHOD_AGENT_CLEAR_TRANSCRIPT => Some(MethodVersion { major: 1, minor: 4 }),
         _ => Some(host_method_version()),
     }
 }
@@ -523,6 +554,150 @@ pub struct HarnessCaps {
     pub api_key_env: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Artifact {
+    pub id: String,
+    pub task_id: String,
+    pub parent_id: Option<String>,
+    pub kind: String,
+    pub title: String,
+    pub body: String,
+    pub status: Option<String>,
+    pub assignee: Option<String>,
+    pub source_message_id: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactListOk {
+    pub items: Vec<Artifact>,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactDeleteOk {
+    pub deleted: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactExportOk {
+    pub format: String,
+    pub markdown: String,
+    pub filename: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Comment {
+    pub id: String,
+    pub body: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommentThread {
+    pub id: String,
+    pub artifact_id: String,
+    pub anchor_start: i64,
+    pub anchor_end: i64,
+    pub resolved: bool,
+    pub comments: Vec<Comment>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommentListOk {
+    pub threads: Vec<CommentThread>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClearTranscriptOk {
+    pub cleared: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactCreateParams {
+    pub task_id: String,
+    #[serde(default)]
+    pub parent_id: Option<String>,
+    pub kind: String,
+    pub title: String,
+    #[serde(default)]
+    pub body: String,
+    #[serde(default)]
+    pub assignee: Option<String>,
+    #[serde(default)]
+    pub source_message_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactGetParams {
+    pub artifact_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactListParams {
+    pub task_id: String,
+    #[serde(default)]
+    pub kind: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactDeleteParams {
+    pub artifact_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactExportParams {
+    pub artifact_id: String,
+    pub format: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommentCreateParams {
+    pub artifact_id: String,
+    #[serde(default)]
+    pub thread_id: Option<String>,
+    #[serde(default)]
+    pub anchor_start: Option<i64>,
+    #[serde(default)]
+    pub anchor_end: Option<i64>,
+    pub body: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommentListParams {
+    pub artifact_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommentResolveParams {
+    pub thread_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClearTranscriptParams {
+    pub agent_id: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -654,7 +829,7 @@ mod tests {
         assert_eq!(error_codes::PATCH_FAILED, "patch_failed");
         assert_eq!(error_codes::NOT_PTY, "not_pty");
         assert_eq!(error_codes::PTY_DEAD, "pty_dead");
-        assert_eq!(TRADABLE_METHODS.len(), 40);
+        assert_eq!(TRADABLE_METHODS.len(), 50);
         assert!(TRADABLE_METHODS.contains(&METHOD_POLICY_GET));
         assert!(TRADABLE_METHODS.contains(&METHOD_POLICY_SET));
         assert!(TRADABLE_METHODS.contains(&METHOD_APPROVAL_RESPOND));
@@ -674,6 +849,22 @@ mod tests {
         assert_eq!(
             method_version(METHOD_HOST_PING),
             Some(MethodVersion { major: 1, minor: 0 })
+        );
+        assert_eq!(
+            method_version(METHOD_ARTIFACT_CREATE),
+            Some(MethodVersion { major: 1, minor: 4 })
+        );
+        assert_eq!(
+            method_version(METHOD_ARTIFACT_EXPORT),
+            Some(MethodVersion { major: 1, minor: 4 })
+        );
+        assert_eq!(
+            method_version(METHOD_COMMENT_LIST),
+            Some(MethodVersion { major: 1, minor: 4 })
+        );
+        assert_eq!(
+            method_version(METHOD_AGENT_CLEAR_TRANSCRIPT),
+            Some(MethodVersion { major: 1, minor: 4 })
         );
         assert_eq!(
             method_version(METHOD_FILES_WRITE),
@@ -905,7 +1096,7 @@ mod tests {
         accepted.insert("host.ping".into(), MethodVersion { major: 1, minor: 0 });
         let mut rejected = BTreeMap::new();
         rejected.insert(
-            "artifact.create".into(),
+            "leftover.foo".into(),
             RejectedMethod {
                 reason: "unsupported".into(),
             },
@@ -922,7 +1113,7 @@ mod tests {
         assert_eq!(v["hostVersion"], "0.1.0");
         assert_eq!(v["sessionToken"], "tok");
         assert_eq!(v["accepted"]["host.ping"]["major"], 1);
-        assert_eq!(v["rejected"]["artifact.create"]["reason"], "unsupported");
+        assert_eq!(v["rejected"]["leftover.foo"]["reason"], "unsupported");
         let sh2: ServerHello = serde_json::from_value(v).unwrap();
         assert_eq!(sh2.session_token, "tok");
     }
@@ -1141,5 +1332,111 @@ mod tests {
             method_version(METHOD_FILES_WRITE),
             Some(MethodVersion { major: 1, minor: 2 })
         );
+        assert_eq!(
+            method_version(METHOD_ARTIFACT_CREATE),
+            Some(MethodVersion { major: 1, minor: 4 })
+        );
+        assert_eq!(
+            method_version(METHOD_ARTIFACT_GET),
+            Some(MethodVersion { major: 1, minor: 4 })
+        );
+        assert_eq!(
+            method_version(METHOD_COMMENT_CREATE),
+            Some(MethodVersion { major: 1, minor: 4 })
+        );
+        assert_eq!(
+            method_version(METHOD_AGENT_CLEAR_TRANSCRIPT),
+            Some(MethodVersion { major: 1, minor: 4 })
+        );
+        assert!(TRADABLE_METHODS.contains(&METHOD_ARTIFACT_CREATE));
+        assert!(TRADABLE_METHODS.contains(&METHOD_AGENT_CLEAR_TRANSCRIPT));
+    }
+
+    #[test]
+    fn e5_artifact_comment_types_camel_case() {
+        let art = Artifact {
+            id: "a1".into(),
+            task_id: "t1".into(),
+            parent_id: None,
+            kind: "spec".into(),
+            title: "Auth".into(),
+            body: "# Auth\n".into(),
+            status: None,
+            assignee: None,
+            source_message_id: None,
+            created_at: "c".into(),
+            updated_at: "u".into(),
+        };
+        let v = serde_json::to_value(&art).unwrap();
+        assert_eq!(v["taskId"], "t1");
+        assert_eq!(v["parentId"], serde_json::Value::Null);
+        assert_eq!(v["sourceMessageId"], serde_json::Value::Null);
+        assert_eq!(v["createdAt"], "c");
+        assert_eq!(v["updatedAt"], "u");
+        assert!(v.get("task_id").is_none());
+        let art2: Artifact = serde_json::from_value(v).unwrap();
+        assert_eq!(art2.title, "Auth");
+
+        let list = ArtifactListOk {
+            items: vec![art2],
+            truncated: false,
+        };
+        let v = serde_json::to_value(&list).unwrap();
+        assert_eq!(v["truncated"], false);
+        assert_eq!(v["items"][0]["id"], "a1");
+
+        let del = ArtifactDeleteOk {
+            deleted: vec!["a1".into(), "a2".into()],
+        };
+        let v = serde_json::to_value(&del).unwrap();
+        assert_eq!(v["deleted"][0], "a1");
+
+        let exp = ArtifactExportOk {
+            format: "md".into(),
+            markdown: "Auth\n\n# Auth\n".into(),
+            filename: "a1.md".into(),
+        };
+        let v = serde_json::to_value(&exp).unwrap();
+        assert_eq!(v["format"], "md");
+        assert_eq!(v["filename"], "a1.md");
+        assert!(v.get("file_name").is_none());
+
+        let c = Comment {
+            id: "c1".into(),
+            body: "nit".into(),
+            created_at: "c".into(),
+        };
+        let v = serde_json::to_value(&c).unwrap();
+        assert_eq!(v["createdAt"], "c");
+        assert!(v.get("created_at").is_none());
+
+        let th = CommentThread {
+            id: "th1".into(),
+            artifact_id: "a1".into(),
+            anchor_start: 0,
+            anchor_end: 12,
+            resolved: false,
+            comments: vec![c],
+            created_at: "c".into(),
+            updated_at: "u".into(),
+        };
+        let v = serde_json::to_value(&th).unwrap();
+        assert_eq!(v["artifactId"], "a1");
+        assert_eq!(v["anchorStart"], 0);
+        assert_eq!(v["anchorEnd"], 12);
+        assert_eq!(v["resolved"], false);
+        assert_eq!(v["comments"][0]["body"], "nit");
+        assert!(v.get("artifact_id").is_none());
+
+        let cleared = ClearTranscriptOk { cleared: 12 };
+        let v = serde_json::to_value(&cleared).unwrap();
+        assert_eq!(v["cleared"], 12);
+
+        let create: ArtifactCreateParams =
+            serde_json::from_str(r#"{"taskId":"t1","kind":"ticket","title":"Add login"}"#).unwrap();
+        assert_eq!(create.task_id, "t1");
+        assert_eq!(create.kind, "ticket");
+        assert!(create.body.is_empty());
+        assert!(create.parent_id.is_none());
     }
 }

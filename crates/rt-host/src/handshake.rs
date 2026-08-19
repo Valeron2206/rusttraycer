@@ -1,4 +1,4 @@
-//! Per-method {major,minor} negotiation. Existing methods stay 1.0; policy.* is 1.1; write/git mutate is 1.2; agent.create + shell/pty are 1.3.
+//! Per-method {major,minor} negotiation. Existing methods stay 1.0; policy.* is 1.1; write/git mutate is 1.2; agent.create + shell/pty are 1.3; artifacts/comments/clear_transcript are 1.4.
 
 use std::collections::BTreeMap;
 
@@ -115,15 +115,43 @@ mod tests {
     }
 
     #[test]
-    fn unknown_method_rejected_unsupported() {
+    fn leftover_unknown_method_rejected_unsupported() {
+        let mut client = BTreeMap::new();
+        client.insert("leftover.foo".into(), MethodVersion { major: 1, minor: 0 });
+        let (acc, rej) = negotiate(&client);
+        assert!(acc.is_empty());
+        assert_eq!(rej["leftover.foo"].reason, "unsupported");
+    }
+
+    #[test]
+    fn artifact_create_accepted_at_1_4() {
         let mut client = BTreeMap::new();
         client.insert(
             "artifact.create".into(),
-            MethodVersion { major: 1, minor: 0 },
+            MethodVersion { major: 1, minor: 4 },
         );
+        client.insert(
+            "comment.create".into(),
+            MethodVersion { major: 1, minor: 4 },
+        );
+        client.insert(
+            "agent.clear_transcript".into(),
+            MethodVersion { major: 1, minor: 4 },
+        );
+        client.insert("host.ping".into(), MethodVersion { major: 1, minor: 0 });
         let (acc, rej) = negotiate(&client);
-        assert!(acc.is_empty());
-        assert_eq!(rej["artifact.create"].reason, "unsupported");
+        assert!(rej.is_empty(), "{rej:?}");
+        assert_eq!(acc["artifact.create"], MethodVersion { major: 1, minor: 4 });
+        assert_eq!(acc["comment.create"], MethodVersion { major: 1, minor: 4 });
+        assert_eq!(
+            acc["agent.clear_transcript"],
+            MethodVersion { major: 1, minor: 4 }
+        );
+        assert_eq!(acc["host.ping"], MethodVersion { major: 1, minor: 0 });
+        assert_eq!(
+            host_methods()["artifact.create"],
+            MethodVersion { major: 1, minor: 4 }
+        );
     }
 
     #[test]

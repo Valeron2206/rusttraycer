@@ -451,6 +451,56 @@ async fn dispatch_method(
                 .ok_or_else(|| HostError::InvalidParams("shellId is required".into()))?;
             svc.shell_close(shell_id)
         }
+        "artifact.create" => {
+            let p: rt_protocol::ArtifactCreateParams = serde_json::from_value(params)
+                .map_err(|e| HostError::InvalidParams(e.to_string()))?;
+            Ok(serde_json::to_value(svc.artifact_create(&p)?)?)
+        }
+        "artifact.get" => {
+            let p: rt_protocol::ArtifactGetParams = serde_json::from_value(params)
+                .map_err(|e| HostError::InvalidParams(e.to_string()))?;
+            Ok(serde_json::to_value(svc.artifact_get(&p.artifact_id)?)?)
+        }
+        "artifact.list" => {
+            let p: rt_protocol::ArtifactListParams = serde_json::from_value(params)
+                .map_err(|e| HostError::InvalidParams(e.to_string()))?;
+            Ok(serde_json::to_value(
+                svc.artifact_list(&p.task_id, p.kind.as_deref())?,
+            )?)
+        }
+        "artifact.update" => Ok(serde_json::to_value(svc.artifact_update(&params)?)?),
+        "artifact.delete" => {
+            let p: rt_protocol::ArtifactDeleteParams = serde_json::from_value(params)
+                .map_err(|e| HostError::InvalidParams(e.to_string()))?;
+            Ok(serde_json::to_value(svc.artifact_delete(&p.artifact_id)?)?)
+        }
+        "artifact.export" => {
+            let p: rt_protocol::ArtifactExportParams = serde_json::from_value(params)
+                .map_err(|e| HostError::InvalidParams(e.to_string()))?;
+            Ok(serde_json::to_value(
+                svc.artifact_export(&p.artifact_id, &p.format)?,
+            )?)
+        }
+        "comment.create" => {
+            let p: rt_protocol::CommentCreateParams = serde_json::from_value(params)
+                .map_err(|e| HostError::InvalidParams(e.to_string()))?;
+            Ok(serde_json::to_value(svc.comment_create(&p)?)?)
+        }
+        "comment.list" => {
+            let p: rt_protocol::CommentListParams = serde_json::from_value(params)
+                .map_err(|e| HostError::InvalidParams(e.to_string()))?;
+            Ok(serde_json::to_value(svc.comment_list(&p.artifact_id)?)?)
+        }
+        "comment.resolve" => {
+            let p: rt_protocol::CommentResolveParams = serde_json::from_value(params)
+                .map_err(|e| HostError::InvalidParams(e.to_string()))?;
+            Ok(serde_json::to_value(svc.comment_resolve(&p.thread_id)?)?)
+        }
+        "agent.clear_transcript" => {
+            let p: rt_protocol::ClearTranscriptParams = serde_json::from_value(params)
+                .map_err(|e| HostError::InvalidParams(e.to_string()))?;
+            Ok(serde_json::to_value(svc.clear_transcript(&p.agent_id)?)?)
+        }
         other => Err(HostError::UnsupportedMethod(other.to_string())),
     };
     match &result {
@@ -523,6 +573,20 @@ pub enum WsEvent {
         pty_id: String,
         code: i32,
     },
+    #[serde(rename = "artifact.updated")]
+    ArtifactUpdated {
+        #[serde(rename = "artifactId")]
+        artifact_id: String,
+        #[serde(rename = "taskId")]
+        task_id: String,
+    },
+    #[serde(rename = "artifact.deleted")]
+    ArtifactDeleted {
+        #[serde(rename = "artifactId")]
+        artifact_id: String,
+        #[serde(rename = "taskId")]
+        task_id: String,
+    },
 }
 
 impl WsEvent {
@@ -587,6 +651,20 @@ impl WsEvent {
         }
     }
 
+    pub fn artifact_updated(artifact_id: &str, task_id: &str) -> Self {
+        Self::ArtifactUpdated {
+            artifact_id: artifact_id.to_string(),
+            task_id: task_id.to_string(),
+        }
+    }
+
+    pub fn artifact_deleted(artifact_id: &str, task_id: &str) -> Self {
+        Self::ArtifactDeleted {
+            artifact_id: artifact_id.to_string(),
+            task_id: task_id.to_string(),
+        }
+    }
+
     pub fn task_id(&self) -> Option<&str> {
         match self {
             Self::AgentMessage { task_id, .. }
@@ -594,7 +672,9 @@ impl WsEvent {
             | Self::TaskUpdated { task_id }
             | Self::AgentApproval { task_id, .. }
             | Self::PtyData { task_id, .. }
-            | Self::PtyExit { task_id, .. } => Some(task_id.as_str()),
+            | Self::PtyExit { task_id, .. }
+            | Self::ArtifactUpdated { task_id, .. }
+            | Self::ArtifactDeleted { task_id, .. } => Some(task_id.as_str()),
             Self::HostGoingAway { .. } => None,
         }
     }
@@ -1051,7 +1131,7 @@ mod tests {
         let app = router(svc.clone());
         let (st, body) = post(app, Some(&token), "artifact.create", json!({})).await;
         assert_eq!(st, StatusCode::OK);
-        assert_eq!(body["error"]["code"], "unsupported_method");
+        assert_eq!(body["error"]["code"], "version_mismatch");
 
         let app = router(svc.clone());
         let (st, body) = post(app, Some(&token), "host.doctor", json!({})).await;

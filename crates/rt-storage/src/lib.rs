@@ -11,6 +11,7 @@ const MIGRATION_0001: &str = include_str!("../migrations/0001_init.sql");
 const MIGRATION_0002: &str = include_str!("../migrations/0002_worktrees.sql");
 const MIGRATION_0003: &str = include_str!("../migrations/0003_policies.sql");
 const MIGRATION_0004: &str = include_str!("../migrations/0004_terminal.sql");
+const MIGRATION_0005: &str = include_str!("../migrations/0005_artifacts.sql");
 
 /// RFC3339 UTC timestamp (millis, Z suffix).
 pub fn now_rfc3339() -> String {
@@ -287,6 +288,57 @@ pub struct PolicyRow {
     pub updated_at: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Artifact {
+    pub id: String,
+    pub task_id: String,
+    pub parent_id: Option<String>,
+    pub kind: String,
+    pub title: String,
+    pub body: String,
+    pub status: Option<String>,
+    pub assignee: Option<String>,
+    pub source_message_id: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Comment {
+    pub id: String,
+    pub body: String,
+    pub created_at: String,
+}
+
+pub struct ArtifactCreateInput<'a> {
+    pub task_id: &'a str,
+    pub parent_id: Option<&'a str>,
+    pub kind: &'a str,
+    pub title: &'a str,
+    pub body: &'a str,
+    pub assignee: Option<&'a str>,
+    pub source_message_id: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommentThread {
+    pub id: String,
+    pub artifact_id: String,
+    pub anchor_start: i64,
+    pub anchor_end: i64,
+    pub resolved: bool,
+    pub comments: Vec<Comment>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+const ARTIFACT_LIST_CAP: usize = 500;
+const MAX_ARTIFACT_TITLE: usize = 200;
+const MAX_ARTIFACT_BODY: usize = 1_048_576;
+
 /// Single-writer SQLite store. Cheap to clone (`Arc<Mutex<Connection>>`).
 #[derive(Clone)]
 pub struct Store {
@@ -363,24 +415,32 @@ impl Store {
                 conn.execute_batch(MIGRATION_0002)?;
                 conn.execute_batch(MIGRATION_0003)?;
                 conn.execute_batch(MIGRATION_0004)?;
+                conn.execute_batch(MIGRATION_0005)?;
                 Ok(())
             }
             Some("2") => {
                 conn.execute_batch(MIGRATION_0003)?;
                 conn.execute_batch(MIGRATION_0004)?;
+                conn.execute_batch(MIGRATION_0005)?;
                 Ok(())
             }
             Some("3") => {
                 conn.execute_batch(MIGRATION_0004)?;
+                conn.execute_batch(MIGRATION_0005)?;
                 Ok(())
             }
-            Some("4") => Ok(()),
+            Some("4") => {
+                conn.execute_batch(MIGRATION_0005)?;
+                Ok(())
+            }
+            Some("5") => Ok(()),
             Some(other) => Err(StorageError::UnsupportedSchema(other.to_string())),
             None => {
                 conn.execute_batch(MIGRATION_0001)?;
                 conn.execute_batch(MIGRATION_0002)?;
                 conn.execute_batch(MIGRATION_0003)?;
                 conn.execute_batch(MIGRATION_0004)?;
+                conn.execute_batch(MIGRATION_0005)?;
                 Ok(())
             }
         }
@@ -1037,6 +1097,498 @@ impl Store {
         conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
         Ok(())
     }
+
+    pub fn artifact_create(&self, input: ArtifactCreateInput<'_>) -> Result<Artifact> {
+        validate_title_len(input.title)?;
+        validate_body_len(input.body)?;
+        let status = match input.kind {
+            "spec" | "review" => {
+                if input.assignee.is_some() {
+                    return Err(StorageError::InvalidParams(
+                        "spec/review cannot have assignee".into(),
+                    ));
+                }
+                None
+            }
+            "ticket" | "story" => Some("todo"),
+            other => {
+                return Err(StorageError::InvalidParams(format!(
+                    "kind must be spec|ticket|story|review, got {other}"
+                )));
+            }
+        };
+        validate_kind_fields(input.kind, status, input.assignee)?;
+        if self.task_get(input.task_id)?.is_none() {
+            return Err(StorageError::NotFound);
+        }
+        if let Some(pid) = input.parent_id {
+            self.assert_parent_ok(input.task_id, None, pid)?;
+        }
+        if let Some(mid) = input.source_message_id {
+            if mid.is_empty() {
+                return Err(StorageError::InvalidParams(
+                    "sourceMessageId must be non-empty when set".into(),
+                ));
+            }
+        }
+        let id = new_id();
+        let now = now_rfc3339();
+        {
+            let conn = self.lock()?;
+            conn.execute(
+                "INSERT INTO artifacts                  (id, task_id, parent_id, kind, title, body, status, assignee, source_message_id, created_at, updated_at)                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                params![
+                    id,
+                    input.task_id,
+                    input.parent_id,
+                    input.kind,
+                    input.title,
+                    input.body,
+                    status,
+                    input.assignee,
+                    input.source_message_id,
+                    now,
+                    now
+                ],
+            )?;
+        }
+        self.artifact_get(&id)?
+            .ok_or_else(|| StorageError::InvalidParams("artifact insert vanished".into()))
+    }
+
+    pub fn artifact_get(&self, id: &str) -> Result<Option<Artifact>> {
+        let conn = self.lock()?;
+        conn.query_row(
+            "SELECT id, task_id, parent_id, kind, title, body, status, assignee, source_message_id, created_at, updated_at \
+             FROM artifacts WHERE id = ?1",
+            [id],
+            map_artifact,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    pub fn artifact_list(
+        &self,
+        task_id: &str,
+        kind: Option<&str>,
+    ) -> Result<(Vec<Artifact>, bool)> {
+        if let Some(k) = kind {
+            if !matches!(k, "spec" | "ticket" | "story" | "review") {
+                return Err(StorageError::InvalidParams(format!(
+                    "kind must be spec|ticket|story|review, got {k}"
+                )));
+            }
+        }
+        let conn = self.lock()?;
+        let sql = if kind.is_some() {
+            "SELECT id, task_id, parent_id, kind, title, body, status, assignee, source_message_id, created_at, updated_at \
+             FROM artifacts WHERE task_id = ?1 AND kind = ?2 \
+             ORDER BY created_at ASC, id ASC LIMIT ?3"
+        } else {
+            "SELECT id, task_id, parent_id, kind, title, body, status, assignee, source_message_id, created_at, updated_at \
+             FROM artifacts WHERE task_id = ?1 \
+             ORDER BY created_at ASC, id ASC LIMIT ?2"
+        };
+        let cap = (ARTIFACT_LIST_CAP + 1) as i64;
+        let mut stmt = conn.prepare(sql)?;
+        let rows = if let Some(k) = kind {
+            stmt.query_map(params![task_id, k, cap], map_artifact)?
+        } else {
+            stmt.query_map(params![task_id, cap], map_artifact)?
+        };
+        let mut items = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+        let truncated = items.len() > ARTIFACT_LIST_CAP;
+        if truncated {
+            items.truncate(ARTIFACT_LIST_CAP);
+        }
+        Ok((items, truncated))
+    }
+
+    pub fn artifact_update(
+        &self,
+        artifact_id: &str,
+        title: Option<&str>,
+        body: Option<&str>,
+        status: Option<&str>,
+        assignee: Option<Option<&str>>,
+        parent_id: Option<Option<&str>>,
+    ) -> Result<Artifact> {
+        let current = self
+            .artifact_get(artifact_id)?
+            .ok_or(StorageError::NotFound)?;
+        if let Some(t) = title {
+            validate_title_len(t)?;
+        }
+        if let Some(b) = body {
+            validate_body_len(b)?;
+        }
+        let new_title = title.unwrap_or(&current.title);
+        let new_body = body.unwrap_or(&current.body);
+        let new_status = match status {
+            Some(s) => Some(s),
+            None => current.status.as_deref(),
+        };
+        let new_assignee = match assignee {
+            Some(a) => a,
+            None => current.assignee.as_deref(),
+        };
+        validate_kind_fields(&current.kind, new_status, new_assignee)?;
+        let new_parent = match parent_id {
+            Some(p) => p,
+            None => current.parent_id.as_deref(),
+        };
+        if let Some(pid) = new_parent {
+            self.assert_parent_ok(&current.task_id, Some(artifact_id), pid)?;
+        }
+        let now = now_rfc3339();
+        {
+            let conn = self.lock()?;
+            let n = conn.execute(
+                "UPDATE artifacts SET title = ?1, body = ?2, status = ?3, assignee = ?4, parent_id = ?5, updated_at = ?6 \
+                 WHERE id = ?7",
+                params![
+                    new_title,
+                    new_body,
+                    new_status,
+                    new_assignee,
+                    new_parent,
+                    now,
+                    artifact_id
+                ],
+            )?;
+            if n == 0 {
+                return Err(StorageError::NotFound);
+            }
+        }
+        self.artifact_get(artifact_id)?
+            .ok_or(StorageError::NotFound)
+    }
+
+    pub fn artifact_delete_tree(&self, artifact_id: &str) -> Result<Vec<String>> {
+        if self.artifact_get(artifact_id)?.is_none() {
+            return Err(StorageError::NotFound);
+        }
+        let mut ids = Vec::new();
+        self.collect_artifact_descendants(artifact_id, &mut ids)?;
+        // children first so parent_id FK stays satisfied
+        ids.reverse();
+        {
+            let conn = self.lock()?;
+            for id in &ids {
+                conn.execute(
+                    "DELETE FROM comments WHERE thread_id IN \
+                     (SELECT id FROM comment_threads WHERE artifact_id = ?1)",
+                    [id],
+                )?;
+                conn.execute("DELETE FROM comment_threads WHERE artifact_id = ?1", [id])?;
+                conn.execute("DELETE FROM artifacts WHERE id = ?1", [id])?;
+            }
+        }
+        Ok(ids)
+    }
+
+    pub fn comment_thread_create(
+        &self,
+        artifact_id: &str,
+        anchor_start: i64,
+        anchor_end: i64,
+        body: &str,
+    ) -> Result<CommentThread> {
+        validate_body_len(body)?;
+        if body.is_empty() {
+            return Err(StorageError::InvalidParams(
+                "comment body is required".into(),
+            ));
+        }
+        let art = self
+            .artifact_get(artifact_id)?
+            .ok_or(StorageError::NotFound)?;
+        validate_anchor(&art.body, anchor_start, anchor_end)?;
+        let id = new_id();
+        let now = now_rfc3339();
+        let cid = new_id();
+        {
+            let conn = self.lock()?;
+            conn.execute(
+                "INSERT INTO comment_threads \
+                 (id, artifact_id, anchor_start, anchor_end, resolved, created_at, updated_at) \
+                 VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6)",
+                params![id, artifact_id, anchor_start, anchor_end, now, now],
+            )?;
+            conn.execute(
+                "INSERT INTO comments (id, thread_id, body, created_at) VALUES (?1, ?2, ?3, ?4)",
+                params![cid, id, body, now],
+            )?;
+        }
+        self.comment_thread_get(&id)?
+            .ok_or_else(|| StorageError::InvalidParams("comment thread insert vanished".into()))
+    }
+
+    pub fn comment_add(&self, thread_id: &str, body: &str) -> Result<CommentThread> {
+        validate_body_len(body)?;
+        if body.is_empty() {
+            return Err(StorageError::InvalidParams(
+                "comment body is required".into(),
+            ));
+        }
+        if self.comment_thread_get(thread_id)?.is_none() {
+            return Err(StorageError::NotFound);
+        }
+        let cid = new_id();
+        let now = now_rfc3339();
+        {
+            let conn = self.lock()?;
+            conn.execute(
+                "INSERT INTO comments (id, thread_id, body, created_at) VALUES (?1, ?2, ?3, ?4)",
+                params![cid, thread_id, body, now],
+            )?;
+            conn.execute(
+                "UPDATE comment_threads SET updated_at = ?1 WHERE id = ?2",
+                params![now, thread_id],
+            )?;
+        }
+        self.comment_thread_get(thread_id)?
+            .ok_or(StorageError::NotFound)
+    }
+
+    pub fn comment_list(&self, artifact_id: &str) -> Result<Vec<CommentThread>> {
+        if self.artifact_get(artifact_id)?.is_none() {
+            return Err(StorageError::NotFound);
+        }
+        let ids: Vec<String> = {
+            let conn = self.lock()?;
+            let mut stmt = conn.prepare(
+                "SELECT id FROM comment_threads WHERE artifact_id = ?1 \
+                 ORDER BY created_at ASC, id ASC",
+            )?;
+            let rows = stmt.query_map([artifact_id], |r| r.get(0))?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        let mut out = Vec::new();
+        for id in ids {
+            if let Some(th) = self.comment_thread_get(&id)? {
+                out.push(th);
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn comment_resolve(&self, thread_id: &str) -> Result<CommentThread> {
+        if self.comment_thread_get(thread_id)?.is_none() {
+            return Err(StorageError::NotFound);
+        }
+        let now = now_rfc3339();
+        {
+            let conn = self.lock()?;
+            conn.execute(
+                "UPDATE comment_threads SET resolved = 1, updated_at = ?1 WHERE id = ?2",
+                params![now, thread_id],
+            )?;
+        }
+        self.comment_thread_get(thread_id)?
+            .ok_or(StorageError::NotFound)
+    }
+
+    pub fn comment_thread_get(&self, thread_id: &str) -> Result<Option<CommentThread>> {
+        let conn = self.lock()?;
+        let row = conn
+            .query_row(
+                "SELECT id, artifact_id, anchor_start, anchor_end, resolved, created_at, updated_at \
+                 FROM comment_threads WHERE id = ?1",
+                [thread_id],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, i64>(2)?,
+                        r.get::<_, i64>(3)?,
+                        r.get::<_, i64>(4)?,
+                        r.get::<_, String>(5)?,
+                        r.get::<_, String>(6)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((id, artifact_id, anchor_start, anchor_end, resolved, created_at, updated_at)) =
+            row
+        else {
+            return Ok(None);
+        };
+        let mut stmt = conn.prepare(
+            "SELECT id, body, created_at FROM comments WHERE thread_id = ?1 \
+             ORDER BY created_at ASC, id ASC",
+        )?;
+        let comments = stmt
+            .query_map([&id], |r| {
+                Ok(Comment {
+                    id: r.get(0)?,
+                    body: r.get(1)?,
+                    created_at: r.get(2)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(Some(CommentThread {
+            id,
+            artifact_id,
+            anchor_start,
+            anchor_end,
+            resolved: resolved != 0,
+            comments,
+            created_at,
+            updated_at,
+        }))
+    }
+
+    pub fn clear_transcript(&self, agent_id: &str) -> Result<usize> {
+        if self.agent_get(agent_id)?.is_none() {
+            return Err(StorageError::NotFound);
+        }
+        let conn = self.lock()?;
+        conn.execute(
+            "UPDATE artifacts SET source_message_id = NULL \
+             WHERE source_message_id IN (SELECT id FROM messages WHERE agent_id = ?1)",
+            [agent_id],
+        )?;
+        let n = conn.execute("DELETE FROM messages WHERE agent_id = ?1", [agent_id])?;
+        Ok(n)
+    }
+
+    fn collect_artifact_descendants(&self, root: &str, out: &mut Vec<String>) -> Result<()> {
+        out.push(root.to_string());
+        let children: Vec<String> = {
+            let conn = self.lock()?;
+            let mut stmt = conn.prepare(
+                "SELECT id FROM artifacts WHERE parent_id = ?1 ORDER BY created_at ASC, id ASC",
+            )?;
+            let rows = stmt.query_map([root], |r| r.get(0))?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        for child in children {
+            self.collect_artifact_descendants(&child, out)?;
+        }
+        Ok(())
+    }
+
+    fn assert_parent_ok(
+        &self,
+        task_id: &str,
+        self_id: Option<&str>,
+        parent_id: &str,
+    ) -> Result<()> {
+        if parent_id.is_empty() {
+            return Err(StorageError::InvalidParams("parentId is empty".into()));
+        }
+        if self_id == Some(parent_id) {
+            return Err(StorageError::InvalidParams(
+                "parentId cannot be the artifact itself".into(),
+            ));
+        }
+        let parent = self
+            .artifact_get(parent_id)?
+            .ok_or_else(|| StorageError::InvalidParams("parentId not found".into()))?;
+        if parent.task_id != task_id {
+            return Err(StorageError::InvalidParams(
+                "parentId must belong to the same task".into(),
+            ));
+        }
+        if let Some(sid) = self_id {
+            let mut walk = parent.parent_id.clone();
+            let mut guard = 0usize;
+            while let Some(cur) = walk {
+                if cur == sid {
+                    return Err(StorageError::InvalidParams(
+                        "parentId would create a cycle".into(),
+                    ));
+                }
+                guard += 1;
+                if guard > 10_000 {
+                    return Err(StorageError::InvalidParams(
+                        "parentId ancestor walk exceeded limit".into(),
+                    ));
+                }
+                walk = self.artifact_get(&cur)?.and_then(|a| a.parent_id);
+            }
+        }
+        Ok(())
+    }
+}
+
+fn validate_title_len(title: &str) -> Result<()> {
+    let n = title.chars().count();
+    if !(1..=MAX_ARTIFACT_TITLE).contains(&n) {
+        return Err(StorageError::InvalidParams(
+            "title must be 1..200 characters".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_body_len(body: &str) -> Result<()> {
+    if body.len() > MAX_ARTIFACT_BODY {
+        return Err(StorageError::InvalidParams(
+            "body must be at most 1 MiB".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_kind_fields(kind: &str, status: Option<&str>, assignee: Option<&str>) -> Result<()> {
+    match kind {
+        "spec" | "review" => {
+            if status.is_some() || assignee.is_some() {
+                return Err(StorageError::InvalidParams(
+                    "spec/review cannot have status or assignee".into(),
+                ));
+            }
+        }
+        "ticket" | "story" => match status {
+            Some("todo") | Some("in_progress") | Some("done") => {}
+            Some(other) => {
+                return Err(StorageError::InvalidParams(format!(
+                    "status must be todo|in_progress|done, got {other}"
+                )));
+            }
+            None => {
+                return Err(StorageError::InvalidParams(
+                    "ticket/story require status".into(),
+                ));
+            }
+        },
+        other => {
+            return Err(StorageError::InvalidParams(format!(
+                "kind must be spec|ticket|story|review, got {other}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_anchor(body: &str, start: i64, end: i64) -> Result<()> {
+    let n = i64::try_from(body.chars().count())
+        .map_err(|_| StorageError::InvalidParams("body is too large for anchors".into()))?;
+    if start < 0 || end <= start || end > n {
+        return Err(StorageError::InvalidParams(
+            "anchorStart/anchorEnd must be UTF-8 codepoint offsets with end > start".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn map_artifact(r: &rusqlite::Row<'_>) -> rusqlite::Result<Artifact> {
+    Ok(Artifact {
+        id: r.get(0)?,
+        task_id: r.get(1)?,
+        parent_id: r.get(2)?,
+        kind: r.get(3)?,
+        title: r.get(4)?,
+        body: r.get(5)?,
+        status: r.get(6)?,
+        assignee: r.get(7)?,
+        source_message_id: r.get(8)?,
+        created_at: r.get(9)?,
+        updated_at: r.get(10)?,
+    })
 }
 
 fn map_workspace(r: &rusqlite::Row<'_>) -> rusqlite::Result<Workspace> {
@@ -1269,7 +1821,7 @@ mod tests {
         {
             let conn = store.lock().unwrap();
             conn.execute(
-                "UPDATE schema_meta SET value = '5' WHERE key = 'schema'",
+                "UPDATE schema_meta SET value = '6' WHERE key = 'schema'",
                 [],
             )
             .unwrap();
@@ -1278,7 +1830,7 @@ mod tests {
         let err = Store::open(&db).unwrap_err();
         assert_eq!(err.code(), "internal");
         match &err {
-            StorageError::UnsupportedSchema(v) => assert_eq!(v, "5"),
+            StorageError::UnsupportedSchema(v) => assert_eq!(v, "6"),
             other => panic!("expected UnsupportedSchema, got {other:?}"),
         }
     }
@@ -1347,7 +1899,7 @@ mod tests {
     }
 
     #[test]
-    fn fresh_db_is_schema_four() {
+    fn fresh_db_is_schema_five() {
         let (_tmp, store) = open_store();
         let conn = rusqlite::Connection::open(store.path()).unwrap();
         let schema: String = conn
@@ -1357,7 +1909,15 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(schema, "4");
+        assert_eq!(schema, "5");
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'artifacts'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1);
         let n: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'worktrees'",
@@ -1409,7 +1969,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(schema, "4");
+        assert_eq!(schema, "5");
         let n: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'worktrees'",
@@ -1741,7 +2301,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(schema, "4");
+        assert_eq!(schema, "5");
         let n: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'policies'",
@@ -1953,7 +2513,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(schema, "4");
+        assert_eq!(schema, "5");
         let n: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('shells', 'pty_sessions')",
@@ -2012,5 +2572,247 @@ mod tests {
             [&task.id, &host_id],
         );
         assert!(bad_iface.is_err(), "interface=shell must fail CHECK");
+    }
+
+    #[test]
+    fn migration_0005_matches_contract() {
+        assert!(MIGRATION_0005.contains("CREATE TABLE artifacts"));
+        assert!(MIGRATION_0005.contains("CREATE TABLE comment_threads"));
+        assert!(MIGRATION_0005.contains("CREATE TABLE comments"));
+        assert!(MIGRATION_0005.contains("source_message_id TEXT"));
+        assert!(!MIGRATION_0005.contains("ON DELETE CASCADE"));
+        assert!(!MIGRATION_0005.contains("REFERENCES messages"));
+        assert!(MIGRATION_0005
+            .contains("INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('schema', '5')"));
+        assert!(!MIGRATION_0005.contains("CREATE TABLE shells"));
+        assert!(!MIGRATION_0005.contains("a2a."));
+    }
+
+    #[test]
+    fn migrate_from_four_applies_0005() {
+        let dir = tempdir().unwrap();
+        let db = dir.path().join("host.db");
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute_batch(MIGRATION_0001).unwrap();
+            conn.execute_batch(MIGRATION_0002).unwrap();
+            conn.execute_batch(MIGRATION_0003).unwrap();
+            conn.execute_batch(MIGRATION_0004).unwrap();
+            let schema: String = conn
+                .query_row(
+                    "SELECT value FROM schema_meta WHERE key = 'schema'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(schema, "4");
+        }
+        let store = Store::open(&db).unwrap();
+        let conn = rusqlite::Connection::open(store.path()).unwrap();
+        let schema: String = conn
+            .query_row(
+                "SELECT value FROM schema_meta WHERE key = 'schema'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(schema, "5");
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'artifacts'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn artifact_kinds_cycle_and_clear_transcript() {
+        let (_tmp, store) = open_store();
+        let host_id = new_id();
+        store.host_insert_if_absent(&host_id, "h").unwrap();
+        let ws = store.workspace_add("/p", "p").unwrap();
+        let task = store.task_create("t", &ws.id).unwrap();
+        let other = store.task_create("o", &ws.id).unwrap();
+        let agent = store
+            .agent_create(&task.id, &host_id, "cli.generic")
+            .unwrap();
+        let msg = store
+            .message_append(&agent.id, MessageRole::User, "hi")
+            .unwrap();
+
+        let spec = store
+            .artifact_create(ArtifactCreateInput {
+                task_id: &task.id,
+                parent_id: None,
+                kind: "spec",
+                title: "Auth",
+                body: "# Auth\n",
+                assignee: None,
+                source_message_id: None,
+            })
+            .unwrap();
+        assert_eq!(spec.kind, "spec");
+        assert!(spec.status.is_none());
+        let ticket = store
+            .artifact_create(ArtifactCreateInput {
+                task_id: &task.id,
+                parent_id: Some(&spec.id),
+                kind: "ticket",
+                title: "Add login",
+                body: "",
+                assignee: Some("alice"),
+                source_message_id: Some(&msg.id),
+            })
+            .unwrap();
+        assert_eq!(ticket.status.as_deref(), Some("todo"));
+        assert_eq!(ticket.assignee.as_deref(), Some("alice"));
+        assert_eq!(ticket.source_message_id.as_deref(), Some(msg.id.as_str()));
+
+        let story = store
+            .artifact_create(ArtifactCreateInput {
+                task_id: &task.id,
+                parent_id: None,
+                kind: "story",
+                title: "Story",
+                body: "s",
+                assignee: None,
+                source_message_id: None,
+            })
+            .unwrap();
+        assert_eq!(story.status.as_deref(), Some("todo"));
+        let review = store
+            .artifact_create(ArtifactCreateInput {
+                task_id: &task.id,
+                parent_id: None,
+                kind: "review",
+                title: "Rev",
+                body: "r",
+                assignee: None,
+                source_message_id: None,
+            })
+            .unwrap();
+        assert_eq!(review.kind, "review");
+
+        let (items, truncated) = store.artifact_list(&task.id, None).unwrap();
+        assert_eq!(items.len(), 4);
+        assert!(!truncated);
+        let (tickets, _) = store.artifact_list(&task.id, Some("ticket")).unwrap();
+        assert_eq!(tickets.len(), 1);
+
+        assert_eq!(
+            store
+                .artifact_create(ArtifactCreateInput {
+                    task_id: &task.id,
+                    parent_id: None,
+                    kind: "spec",
+                    title: "X",
+                    body: "",
+                    assignee: Some("bob"),
+                    source_message_id: None
+                })
+                .unwrap_err()
+                .code(),
+            "invalid_params"
+        );
+        assert_eq!(
+            store
+                .artifact_update(&spec.id, None, None, Some("todo"), None, None)
+                .unwrap_err()
+                .code(),
+            "invalid_params"
+        );
+
+        let updated = store
+            .artifact_update(&ticket.id, None, None, Some("in_progress"), None, None)
+            .unwrap();
+        assert_eq!(updated.status.as_deref(), Some("in_progress"));
+
+        assert_eq!(
+            store
+                .artifact_update(&ticket.id, None, None, None, None, Some(Some(&ticket.id)))
+                .unwrap_err()
+                .code(),
+            "invalid_params"
+        );
+        assert_eq!(
+            store
+                .artifact_update(&spec.id, None, None, None, None, Some(Some(&ticket.id)))
+                .unwrap_err()
+                .code(),
+            "invalid_params"
+        );
+        let foreign = store
+            .artifact_create(ArtifactCreateInput {
+                task_id: &other.id,
+                parent_id: None,
+                kind: "spec",
+                title: "O",
+                body: "",
+                assignee: None,
+                source_message_id: None,
+            })
+            .unwrap();
+        assert_eq!(
+            store
+                .artifact_update(&ticket.id, None, None, None, None, Some(Some(&foreign.id)))
+                .unwrap_err()
+                .code(),
+            "invalid_params"
+        );
+
+        let n = store.clear_transcript(&agent.id).unwrap();
+        assert_eq!(n, 1);
+        assert!(store.message_list(&agent.id).unwrap().is_empty());
+        let after = store.artifact_get(&ticket.id).unwrap().unwrap();
+        assert_eq!(after.body, "");
+        assert!(after.source_message_id.is_none());
+        assert_eq!(store.clear_transcript(&agent.id).unwrap(), 0);
+
+        let deleted = store.artifact_delete_tree(&spec.id).unwrap();
+        assert!(deleted.contains(&spec.id));
+        assert!(deleted.contains(&ticket.id));
+        assert!(store.artifact_get(&ticket.id).unwrap().is_none());
+        assert!(store.agent_get(&agent.id).unwrap().is_some());
+    }
+
+    #[test]
+    fn comment_thread_and_resolve() {
+        let (_tmp, store) = open_store();
+        store.host_insert_if_absent(&new_id(), "h").unwrap();
+        let ws = store.workspace_add("/p", "p").unwrap();
+        let task = store.task_create("t", &ws.id).unwrap();
+        let art = store
+            .artifact_create(ArtifactCreateInput {
+                task_id: &task.id,
+                parent_id: None,
+                kind: "spec",
+                title: "Auth",
+                body: "hello world",
+                assignee: None,
+                source_message_id: None,
+            })
+            .unwrap();
+        let th = store.comment_thread_create(&art.id, 0, 5, "nit").unwrap();
+        assert_eq!(th.anchor_start, 0);
+        assert_eq!(th.anchor_end, 5);
+        assert!(!th.resolved);
+        assert_eq!(th.comments.len(), 1);
+        let th = store.comment_add(&th.id, "reply").unwrap();
+        assert_eq!(th.comments.len(), 2);
+        let th = store.comment_resolve(&th.id).unwrap();
+        assert!(th.resolved);
+        let again = store.comment_resolve(&th.id).unwrap();
+        assert!(again.resolved);
+        let listed = store.comment_list(&art.id).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(
+            store
+                .comment_thread_create(&art.id, 5, 5, "bad")
+                .unwrap_err()
+                .code(),
+            "invalid_params"
+        );
     }
 }
