@@ -214,7 +214,11 @@ impl From<Agent> for AgentView {
     }
 }
 
-fn harness_caps_wire(caps: rt_runtime::HarnessCaps) -> HarnessCapsWire {
+fn provider_supports_steer(provider: &str) -> bool {
+    matches!(provider, "cli.claude" | "cli.codex")
+}
+
+fn harness_caps_wire(provider: &str, caps: rt_runtime::HarnessCaps) -> HarnessCapsWire {
     HarnessCapsWire {
         one_shot: caps.one_shot,
         long_lived: caps.long_lived,
@@ -223,6 +227,7 @@ fn harness_caps_wire(caps: rt_runtime::HarnessCaps) -> HarnessCapsWire {
         session_resume: caps.session_resume,
         a2a_inbox: caps.a2a_inbox,
         pty: caps.pty,
+        steer: provider_supports_steer(provider),
         needs_api_key: caps.needs_api_key,
         api_key_env: caps.api_key_env.map(str::to_string),
     }
@@ -433,7 +438,7 @@ impl HostService {
                     id: backend.id().to_string(),
                     available: avail.available,
                     detail: avail.detail,
-                    caps: harness_caps_wire(backend.caps()),
+                    caps: harness_caps_wire(backend.id(), backend.caps()),
                 }
             })
             .collect();

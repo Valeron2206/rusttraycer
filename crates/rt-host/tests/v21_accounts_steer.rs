@@ -675,3 +675,33 @@ fn migrations_0001_to_0010_byte_identical_to_ce84e59() {
         );
     }
 }
+
+#[tokio::test]
+async fn doctor_advertises_steer_caps() {
+    let dir = tempfile::tempdir().unwrap();
+    let (addr, tx, join, _) = rt_host::spawn_test_host(dir.path(), Some(backends_slow()))
+        .await
+        .unwrap();
+    let base = format!("http://{addr}");
+    let client = reqwest::Client::new();
+    let (token, _) = handshake(&client, &base, client_1_9_methods()).await;
+    let doc = rpc(&client, &base, Some(&token), "host.doctor", json!({})).await;
+    let items = doc["ok"]["providers"].as_array().expect("providers");
+    let mut saw_generic = false;
+    let mut saw_claude = false;
+    for p in items {
+        let id = p["id"].as_str().unwrap();
+        let steer = p["caps"]["steer"].as_bool().unwrap_or(false);
+        if id == "cli.generic" {
+            saw_generic = true;
+            assert!(!steer, "generic must not advertise steer: {p}");
+        }
+        if id == "cli.claude" {
+            saw_claude = true;
+            assert!(steer, "claude must advertise steer: {p}");
+        }
+    }
+    assert!(saw_generic && saw_claude, "doctor={doc}");
+    let _ = tx.send(());
+    let _ = join.await;
+}

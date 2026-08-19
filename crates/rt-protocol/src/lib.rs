@@ -1226,7 +1226,6 @@ pub struct AgentSteerOk {
 
 #[cfg(test)]
 mod tests {
-
     use super::*;
 
     #[test]
@@ -1591,6 +1590,7 @@ mod tests {
             session_resume: false,
             a2a_inbox: false,
             pty: false,
+            steer: false,
             needs_api_key: false,
             api_key_env: None,
         };
@@ -1600,6 +1600,7 @@ mod tests {
         assert_eq!(cv["streamTokens"], true);
         assert_eq!(cv["sessionResume"], false);
         assert_eq!(cv["a2aInbox"], false);
+        assert_eq!(cv["steer"], false);
         assert_eq!(cv["needsApiKey"], false);
         assert!(cv["apiKeyEnv"].is_null());
         assert!(cv.get("one_shot").is_none());
