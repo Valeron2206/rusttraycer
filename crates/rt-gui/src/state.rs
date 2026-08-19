@@ -30,13 +30,16 @@ use crate::search_ux::{self, SearchItem, GC_UNAVAILABLE, SEARCH_DEBOUNCE_MS, SEA
 use crate::stash::{self, StashItem, STASH_UNAVAILABLE};
 use crate::sync_ux::{
     self, EXPORT_BUTTON, EXPORT_SAVED, IMPORT_BUTTON, NEED_TASK as SYNC_NEED_TASK,
-    NEED_WORKSPACE as SYNC_NEED_WORKSPACE, SYNC_UNAVAILABLE,
+    NEED_WORKSPACE as SYNC_NEED_WORKSPACE, PULL_NEED_WORKSPACE, SYNC_PEER_UNAVAILABLE,
+    SYNC_UNAVAILABLE,
 };
 use crate::terminal::{
     self, AgentInterface, AgentView, ShellStub, DEFAULT_COLS, DEFAULT_ROWS, NEED_TASK,
     NEED_WORKSPACE, TERMINAL_UNAVAILABLE,
 };
-use crate::workspace_ux::{self, GUIDE_TOO_LONG, ROLE_CODER, WORKSPACE_UNAVAILABLE};
+use crate::workspace_ux::{
+    self, GUIDE_TOO_LONG, PRESETS_UNAVAILABLE, ROLE_CODER, WORKSPACE_UNAVAILABLE,
+};
 use crate::ws::{self, ApplyOutcome, WsBridge, WsIncoming};
 
 enum RpcIncoming {
@@ -384,6 +387,13 @@ pub struct AppState {
     pub workspace_status: Option<String>,
     pub sync_status: Option<String>,
     pub show_sync_import_confirm: bool,
+    pub sync_peer_url: String,
+    pub show_sync_pull_confirm: bool,
+    pub preset_name_draft: String,
+    pub preset_role_draft: String,
+    pub preset_title_hint_draft: String,
+    pub preset_prompt_draft: String,
+    pub show_preset_delete_confirm: bool,
     pub search_q: String,
     pub search_items: Vec<SearchItem>,
     pub search_status: Option<String>,
@@ -534,6 +544,13 @@ impl AppState {
             workspace_status: None,
             sync_status: None,
             show_sync_import_confirm: false,
+            sync_peer_url: String::new(),
+            show_sync_pull_confirm: false,
+            preset_name_draft: String::new(),
+            preset_role_draft: ROLE_CODER.into(),
+            preset_title_hint_draft: String::new(),
+            preset_prompt_draft: String::new(),
+            show_preset_delete_confirm: false,
             search_q: String::new(),
             search_items: Vec::new(),
             search_status: None,
@@ -2100,7 +2117,7 @@ impl AppState {
         let preset = self
             .new_task_preset
             .clone()
-            .filter(|p| workspace_ux::valid_preset(p));
+            .filter(|p| workspace_ux::listed_preset(p, &self.presets));
         if preset.is_some() && !self.workspace_host_ok() {
             self.surface_workspace_unavailable();
         }
@@ -3918,6 +3935,106 @@ impl AppState {
         }
     }
 
+    pub fn sync_peer_host_ok(&self) -> bool {
+        self.session
+            .as_ref()
+            .map(|s| s.sync_peer_accepted() && !s.sync_peer_rejected())
+            .unwrap_or(false)
+    }
+
+    fn surface_sync_peer_unavailable(&mut self) {
+        self.toast = Some(SYNC_PEER_UNAVAILABLE.into());
+        self.show_sync_pull_confirm = false;
+    }
+
+    fn surface_sync_peer_error(&mut self, err: ConnectError) {
+        if err.is_sync_peer_unsupported() {
+            self.surface_sync_peer_unavailable();
+        } else {
+            self.toast = Some(err.as_label());
+        }
+    }
+
+    pub fn request_sync_push(&mut self) {
+        if !self.sync_peer_host_ok() {
+            self.surface_sync_peer_unavailable();
+            return;
+        }
+        if sync_ux::push_params(&self.sync_peer_url).is_none() {
+            return;
+        }
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        match session.sync_push(&self.sync_peer_url) {
+            Ok(ok) => self.toast = Some(sync_ux::format_push_result(&ok)),
+            Err(err) => self.surface_sync_peer_error(err),
+        }
+    }
+
+    pub fn request_sync_pull(&mut self) {
+        if !self.sync_peer_host_ok() {
+            self.surface_sync_peer_unavailable();
+            return;
+        }
+        if sync_ux::push_params(&self.sync_peer_url).is_none() {
+            return;
+        }
+        if self
+            .workspace_id
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or("")
+            .is_empty()
+        {
+            self.toast = Some(PULL_NEED_WORKSPACE.into());
+            return;
+        }
+        self.show_sync_pull_confirm = true;
+    }
+
+    pub fn cancel_sync_pull(&mut self) {
+        self.show_sync_pull_confirm = false;
+    }
+
+    pub fn confirm_sync_pull(&mut self) {
+        if !self.show_sync_pull_confirm {
+            return;
+        }
+        self.show_sync_pull_confirm = false;
+        self.run_sync_pull();
+    }
+
+    fn run_sync_pull(&mut self) {
+        if !self.sync_peer_host_ok() {
+            self.surface_sync_peer_unavailable();
+            return;
+        }
+        let workspace_id = self
+            .workspace_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        let Some(workspace_id) = workspace_id else {
+            self.toast = Some(PULL_NEED_WORKSPACE.into());
+            return;
+        };
+        if sync_ux::pull_params(&self.sync_peer_url, &workspace_id).is_none() {
+            return;
+        }
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        match session.sync_pull(&self.sync_peer_url, &workspace_id) {
+            Ok(ok) => {
+                self.refresh_tasks_catalog();
+                self.toast = Some(sync_ux::format_pull_result(&ok, &session.host_id));
+            }
+            Err(err) => self.surface_sync_peer_error(err),
+        }
+    }
+
     pub fn search_host_ok(&self) -> bool {
         self.session
             .as_ref()
@@ -4250,19 +4367,48 @@ impl AppState {
 
     pub fn set_new_task_preset(&mut self, preset: Option<String>) {
         match preset {
-            Some(name) if workspace_ux::valid_preset(&name) => {
-                let role = self
-                    .presets
-                    .iter()
-                    .find(|item| item.id == name)
+            Some(name) if workspace_ux::listed_preset(&name, &self.presets) => {
+                let listed = self.presets.iter().find(|item| item.id == name).cloned();
+                let role = listed
+                    .as_ref()
                     .map(|item| item.default_role.clone())
                     .filter(|role| workspace_ux::valid_role(role))
                     .unwrap_or_else(|| workspace_ux::default_role_for_preset(&name).to_string());
                 self.new_task_preset = Some(name);
-                self.picker_role = role;
+                self.picker_role = role.clone();
+                self.fill_preset_editor(listed.as_ref());
             }
             _ => self.new_task_preset = None,
         }
+    }
+
+    fn fill_preset_editor(&mut self, item: Option<&PresetItem>) {
+        match item {
+            Some(item) => {
+                self.preset_name_draft = workspace_ux::preset_display_name(item).to_string();
+                if workspace_ux::valid_role(&item.default_role) {
+                    self.preset_role_draft = item.default_role.clone();
+                }
+                self.preset_title_hint_draft = item.title_hint.clone();
+                self.preset_prompt_draft = item.prompt.clone();
+            }
+            None => {
+                self.preset_name_draft.clear();
+                self.preset_title_hint_draft.clear();
+                self.preset_prompt_draft.clear();
+            }
+        }
+    }
+
+    pub fn selected_user_preset_id(&self) -> Option<&str> {
+        let id = self.new_task_preset.as_deref()?;
+        if workspace_ux::is_builtin_preset(id) {
+            return None;
+        }
+        self.presets
+            .iter()
+            .find(|item| item.id == id)
+            .map(|item| item.id.as_str())
     }
 
     pub fn set_picker_role(&mut self, role: String) {
@@ -4354,6 +4500,140 @@ impl AppState {
                     self.surface_workspace_error(err);
                 }
             }
+        }
+    }
+
+    pub fn preset_crud_host_ok(&self) -> bool {
+        self.session
+            .as_ref()
+            .map(|s| s.preset_crud_accepted() && !s.preset_crud_rejected())
+            .unwrap_or(false)
+    }
+
+    fn surface_preset_crud_unavailable(&mut self) {
+        self.toast = Some(PRESETS_UNAVAILABLE.into());
+        self.show_preset_delete_confirm = false;
+    }
+
+    fn surface_preset_crud_error(&mut self, err: ConnectError) {
+        if err.is_preset_crud_unsupported() {
+            self.surface_preset_crud_unavailable();
+        } else {
+            self.toast = Some(err.as_label());
+        }
+    }
+
+    pub fn create_user_preset(&mut self) {
+        if !self.preset_crud_host_ok() {
+            self.surface_preset_crud_unavailable();
+            return;
+        }
+        if workspace_ux::preset_create_params(
+            &self.preset_name_draft,
+            &self.preset_role_draft,
+            &self.preset_title_hint_draft,
+            &self.preset_prompt_draft,
+        )
+        .is_none()
+        {
+            return;
+        }
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        match session.preset_create(
+            &self.preset_name_draft,
+            &self.preset_role_draft,
+            &self.preset_title_hint_draft,
+            &self.preset_prompt_draft,
+        ) {
+            Ok(item) => {
+                let id = item.id.clone();
+                self.load_presets();
+                if !id.is_empty() {
+                    self.set_new_task_preset(Some(id));
+                }
+            }
+            Err(err) => self.surface_preset_crud_error(err),
+        }
+    }
+
+    pub fn save_user_preset(&mut self) {
+        if !self.preset_crud_host_ok() {
+            self.surface_preset_crud_unavailable();
+            return;
+        }
+        let Some(id) = self.selected_user_preset_id().map(str::to_string) else {
+            return;
+        };
+        if workspace_ux::preset_update_params(
+            &id,
+            &self.preset_name_draft,
+            &self.preset_role_draft,
+            &self.preset_title_hint_draft,
+            &self.preset_prompt_draft,
+        )
+        .is_none()
+        {
+            return;
+        }
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        match session.preset_update(
+            &id,
+            &self.preset_name_draft,
+            &self.preset_role_draft,
+            &self.preset_title_hint_draft,
+            &self.preset_prompt_draft,
+        ) {
+            Ok(_) => self.load_presets(),
+            Err(err) => self.surface_preset_crud_error(err),
+        }
+    }
+
+    pub fn request_delete_user_preset(&mut self) {
+        if !self.preset_crud_host_ok() {
+            self.surface_preset_crud_unavailable();
+            return;
+        }
+        let Some(id) = self.selected_user_preset_id() else {
+            return;
+        };
+        if workspace_ux::preset_delete_params(id).is_none() {
+            return;
+        }
+        self.show_preset_delete_confirm = true;
+    }
+
+    pub fn cancel_delete_user_preset(&mut self) {
+        self.show_preset_delete_confirm = false;
+    }
+
+    pub fn confirm_delete_user_preset(&mut self) {
+        if !self.show_preset_delete_confirm {
+            return;
+        }
+        self.show_preset_delete_confirm = false;
+        if !self.preset_crud_host_ok() {
+            self.surface_preset_crud_unavailable();
+            return;
+        }
+        let Some(id) = self.selected_user_preset_id().map(str::to_string) else {
+            return;
+        };
+        if workspace_ux::preset_delete_params(&id).is_none() {
+            return;
+        }
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        match session.preset_delete(&id) {
+            Ok(()) => {
+                self.new_task_preset = None;
+                self.load_presets();
+            }
+            Err(err) => self.surface_preset_crud_error(err),
         }
     }
 
@@ -9796,5 +10076,396 @@ mod tests {
         assert_eq!(ids(&state), ["c", "b", "a"]);
         state.drop_agent_on_tile("c", "c");
         assert_eq!(ids(&state), ["c", "b", "a"]);
+    }
+
+    fn start_sync_peer_state_mock() -> SliceMock {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(Mutex::new(Vec::new()));
+        let hits_t = hits.clone();
+        thread::spawn(move || {
+            for stream in listener.incoming().take(64) {
+                let Ok(mut stream) = stream else { break };
+                let (headers, body) = read_http_request(&mut stream);
+                let parsed: Value = serde_json::from_slice(&body).unwrap_or(json!({}));
+                let method = if headers.starts_with("GET /health") {
+                    "GET /health".to_string()
+                } else {
+                    parsed
+                        .get("method")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("other")
+                        .to_string()
+                };
+                let params = parsed.get("params").cloned().unwrap_or(json!({}));
+                hits_t.lock().unwrap().push(RpcHit {
+                    method: method.clone(),
+                    params: params.clone(),
+                });
+                let mut accepted = serde_json::Map::new();
+                for name in crate::rpc::SYNC_METHODS {
+                    accepted.insert(name.to_string(), json!({"major": 1, "minor": 8}));
+                }
+                for name in crate::rpc::SYNC_PEER_METHODS {
+                    accepted.insert(name.to_string(), json!({"major": 1, "minor": 9}));
+                }
+                let body = match method.as_str() {
+                    "GET /health" => json!({"ok": true, "hostId": "host-a"}).to_string(),
+                    "handshake" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "hostId": "host-a",
+                            "hostVersion": "0.1.0",
+                            "sessionToken": "tok-1",
+                            "accepted": accepted,
+                            "rejected": {}
+                        }
+                    })
+                    .to_string(),
+                    "host.ping" => json!({
+                        "id": "echo",
+                        "ok": { "hostId": "host-a", "now": "2026-08-19T12:00:00Z" }
+                    })
+                    .to_string(),
+                    "sync.push" => json!({
+                        "id": "echo",
+                        "ok": { "ok": true }
+                    })
+                    .to_string(),
+                    "sync.pull" => {
+                        if params.get("conflict").is_some() {
+                            json!({
+                                "id": "echo",
+                                "error": { "code": "conflict", "message": "id exists" }
+                            })
+                            .to_string()
+                        } else {
+                            json!({
+                                "id": "echo",
+                                "ok": { "tasks": 1, "agents": 2 }
+                            })
+                            .to_string()
+                        }
+                    }
+                    "sync.export" => json!({
+                        "id": "echo",
+                        "ok": { "archive": sample_sync_archive() }
+                    })
+                    .to_string(),
+                    "workspace.list" => json!({
+                        "id": "echo",
+                        "ok": { "items": [] }
+                    })
+                    .to_string(),
+                    "task.list" => json!({
+                        "id": "echo",
+                        "ok": { "items": [] }
+                    })
+                    .to_string(),
+                    _ => json!({
+                        "id": "echo",
+                        "error": { "code": "unsupported_method", "message": "no" }
+                    })
+                    .to_string(),
+                };
+                write_http_json(&mut stream, &body);
+            }
+        });
+        SliceMock {
+            origin: format!("http://{addr}"),
+            hits,
+        }
+    }
+
+    fn start_preset_crud_state_mock() -> SliceMock {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(Mutex::new(Vec::new()));
+        let hits_t = hits.clone();
+        thread::spawn(move || {
+            for stream in listener.incoming().take(64) {
+                let Ok(mut stream) = stream else { break };
+                let (headers, body) = read_http_request(&mut stream);
+                let parsed: Value = serde_json::from_slice(&body).unwrap_or(json!({}));
+                let method = if headers.starts_with("GET /health") {
+                    "GET /health".to_string()
+                } else {
+                    parsed
+                        .get("method")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("other")
+                        .to_string()
+                };
+                let params = parsed.get("params").cloned().unwrap_or(json!({}));
+                hits_t.lock().unwrap().push(RpcHit {
+                    method: method.clone(),
+                    params: params.clone(),
+                });
+                let mut accepted = serde_json::Map::new();
+                for name in crate::rpc::WORKSPACE_METHODS {
+                    accepted.insert(name.to_string(), json!({"major": 1, "minor": 7}));
+                }
+                for name in crate::rpc::PRESET_CRUD_METHODS {
+                    accepted.insert(name.to_string(), json!({"major": 1, "minor": 9}));
+                }
+                let body = match method.as_str() {
+                    "GET /health" => json!({"ok": true, "hostId": "host-a"}).to_string(),
+                    "handshake" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "hostId": "host-a",
+                            "hostVersion": "0.1.0",
+                            "sessionToken": "tok-1",
+                            "accepted": accepted,
+                            "rejected": {}
+                        }
+                    })
+                    .to_string(),
+                    "host.ping" => json!({
+                        "id": "echo",
+                        "ok": { "hostId": "host-a", "now": "2026-08-19T12:00:00Z" }
+                    })
+                    .to_string(),
+                    "preset.list" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "items": [
+                                { "id": "planning", "title": "Planning", "defaultRole": "planner" },
+                                { "id": "review", "title": "Review", "defaultRole": "reviewer" },
+                                { "id": "debug", "title": "Debug", "defaultRole": "debugger" },
+                                { "id": "document", "title": "Document", "defaultRole": "documenter" },
+                                {
+                                    "id": "p-1",
+                                    "name": "Mine",
+                                    "defaultRole": "coder",
+                                    "titleHint": "hint",
+                                    "prompt": "do"
+                                }
+                            ]
+                        }
+                    })
+                    .to_string(),
+                    "preset.create" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "id": "p-new",
+                            "name": params.get("name").cloned().unwrap_or(json!("")),
+                            "defaultRole": params.get("defaultRole").cloned().unwrap_or(json!("coder")),
+                            "titleHint": params.get("titleHint").cloned().unwrap_or(json!("")),
+                            "prompt": params.get("prompt").cloned().unwrap_or(json!(""))
+                        }
+                    })
+                    .to_string(),
+                    "preset.update" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "id": params.get("id").cloned().unwrap_or(json!("")),
+                            "name": params.get("name").cloned().unwrap_or(json!("")),
+                            "defaultRole": params.get("defaultRole").cloned().unwrap_or(json!("coder"))
+                        }
+                    })
+                    .to_string(),
+                    "preset.delete" => json!({
+                        "id": "echo",
+                        "ok": { "id": params.get("id").cloned().unwrap_or(json!("")) }
+                    })
+                    .to_string(),
+                    "workspace.list" => json!({
+                        "id": "echo",
+                        "ok": { "items": [] }
+                    })
+                    .to_string(),
+                    "task.list" => json!({
+                        "id": "echo",
+                        "ok": { "items": [] }
+                    })
+                    .to_string(),
+                    _ => json!({
+                        "id": "echo",
+                        "error": { "code": "unsupported_method", "message": "no" }
+                    })
+                    .to_string(),
+                };
+                write_http_json(&mut stream, &body);
+            }
+        });
+        SliceMock {
+            origin: format!("http://{addr}"),
+            hits,
+        }
+    }
+
+    #[test]
+    fn sync_push_sends_peer_url_only_no_secret() {
+        let mock = start_sync_peer_state_mock();
+        let session = connect(&pid(&mock.origin)).expect("online");
+        let mut state = online_state(session);
+        state.sync_peer_url = "  http://127.0.0.1:7420  ".into();
+        state.request_sync_push();
+        let hits = mock.hits.lock().unwrap().clone();
+        let push = hits
+            .iter()
+            .find(|h| h.method == "sync.push")
+            .expect("sync.push");
+        assert_eq!(push.params, json!({ "peerUrl": "http://127.0.0.1:7420" }));
+        assert!(push.params.get("secret").is_none());
+        assert!(push.params.get("token").is_none());
+        assert!(push.params.get("password").is_none());
+    }
+
+    #[test]
+    fn sync_pull_sends_peer_and_workspace_after_confirm() {
+        let mock = start_sync_peer_state_mock();
+        let session = connect(&pid(&mock.origin)).expect("online");
+        let mut state = online_state(session);
+        state.sync_peer_url = "http://127.0.0.1:9".into();
+        state.request_sync_pull();
+        assert!(state.show_sync_pull_confirm);
+        let mid = mock
+            .hits
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|h| h.method == "sync.pull")
+            .count();
+        assert_eq!(mid, 0);
+        state.cancel_sync_pull();
+        assert!(!state.show_sync_pull_confirm);
+        state.request_sync_pull();
+        state.confirm_sync_pull();
+        assert!(!state.show_sync_pull_confirm);
+        let hits = mock.hits.lock().unwrap().clone();
+        let pull = hits
+            .iter()
+            .find(|h| h.method == "sync.pull")
+            .expect("sync.pull");
+        assert_eq!(
+            pull.params,
+            json!({ "peerUrl": "http://127.0.0.1:9", "workspaceId": "ws-1" })
+        );
+        assert!(pull.params.get("secret").is_none());
+    }
+
+    #[test]
+    fn sync_push_pull_skip_rpc_when_url_or_workspace_missing() {
+        let mock = start_sync_peer_state_mock();
+        let session = connect(&pid(&mock.origin)).expect("online");
+        let mut state = online_state(session);
+        state.sync_peer_url.clear();
+        state.request_sync_push();
+        state.request_sync_pull();
+        state.sync_peer_url = "http://127.0.0.1:9".into();
+        state.workspace_id = None;
+        state.request_sync_pull();
+        assert_eq!(state.toast.as_deref(), Some(PULL_NEED_WORKSPACE));
+        assert_eq!(PULL_NEED_WORKSPACE, "нет workspace");
+        assert!(!state.show_sync_pull_confirm);
+        let hits = mock.hits.lock().unwrap().clone();
+        assert!(!hits.iter().any(|h| h.method == "sync.push"));
+        assert!(!hits.iter().any(|h| h.method == "sync.pull"));
+    }
+
+    #[test]
+    fn old_host_1_8_peer_toasts_but_export_still_ok() {
+        let mock = start_sync_state_mock();
+        let session = connect(&pid(&mock.origin)).expect("online");
+        let mut state = online_state(session);
+        assert!(state.sync_host_ok());
+        assert!(!state.sync_peer_host_ok());
+        state.sync_peer_url = "http://127.0.0.1:9".into();
+        state.request_sync_push();
+        assert_eq!(state.toast.as_deref(), Some(SYNC_PEER_UNAVAILABLE));
+        assert_eq!(SYNC_PEER_UNAVAILABLE, "синк peer недоступен: host без 1.9");
+        state.request_sync_pull();
+        assert_eq!(state.toast.as_deref(), Some(SYNC_PEER_UNAVAILABLE));
+        assert!(!state.show_sync_pull_confirm);
+        let exported = state.export_sync().expect("export still works");
+        assert!(exported.1.contains("rusttraycer.export"));
+        let hits = mock.hits.lock().unwrap().clone();
+        assert!(hits.iter().any(|h| h.method == "sync.export"));
+        assert!(!hits.iter().any(|h| h.method == "sync.push"));
+        assert!(!hits.iter().any(|h| h.method == "sync.pull"));
+    }
+
+    #[test]
+    fn preset_crud_shapes_and_builtin_not_deleted() {
+        let mock = start_preset_crud_state_mock();
+        let session = connect(&pid(&mock.origin)).expect("online");
+        let mut state = online_state(session);
+        state.load_presets();
+        assert!(state.presets.iter().any(|p| p.id == "planning"));
+        assert!(state.presets.iter().any(|p| p.id == "p-1"));
+        state.preset_name_draft = "Mine".into();
+        state.preset_role_draft = "planner".into();
+        state.preset_title_hint_draft = "hint".into();
+        state.preset_prompt_draft = "do".into();
+        state.create_user_preset();
+        state.set_new_task_preset(Some("p-1".into()));
+        state.preset_name_draft = "Mine2".into();
+        state.preset_role_draft = "reviewer".into();
+        state.preset_title_hint_draft.clear();
+        state.preset_prompt_draft.clear();
+        state.save_user_preset();
+        state.request_delete_user_preset();
+        assert!(state.show_preset_delete_confirm);
+        let mid = mock
+            .hits
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|h| h.method == "preset.delete")
+            .count();
+        assert_eq!(mid, 0);
+        state.confirm_delete_user_preset();
+        state.set_new_task_preset(Some("planning".into()));
+        state.request_delete_user_preset();
+        state.confirm_delete_user_preset();
+        let hits = mock.hits.lock().unwrap().clone();
+        let create = hits
+            .iter()
+            .find(|h| h.method == "preset.create")
+            .expect("create");
+        assert_eq!(create.params["name"], "Mine");
+        assert_eq!(create.params["defaultRole"], "planner");
+        assert_eq!(create.params["titleHint"], "hint");
+        assert_eq!(create.params["prompt"], "do");
+        let update = hits
+            .iter()
+            .find(|h| h.method == "preset.update")
+            .expect("update");
+        assert_eq!(update.params["id"], "p-1");
+        assert_eq!(update.params["name"], "Mine2");
+        let deletes: Vec<_> = hits
+            .iter()
+            .filter(|h| h.method == "preset.delete")
+            .map(|h| h.params.clone())
+            .collect();
+        assert_eq!(deletes, vec![json!({ "id": "p-1" })]);
+        assert!(hits.iter().any(|h| h.method == "preset.list"));
+    }
+
+    #[test]
+    fn preset_list_1_7_works_without_1_9_crud() {
+        let mock = start_workspace_state_mock();
+        let session = connect(&pid(&mock.origin)).expect("online");
+        let mut state = online_state(session);
+        assert!(state.workspace_host_ok());
+        assert!(!state.preset_crud_host_ok());
+        state.load_presets();
+        assert_eq!(state.presets.len(), 4);
+        assert_eq!(state.presets[0].id, "planning");
+        state.preset_name_draft = "Mine".into();
+        state.preset_role_draft = "coder".into();
+        state.create_user_preset();
+        assert_eq!(state.toast.as_deref(), Some(PRESETS_UNAVAILABLE));
+        assert_eq!(PRESETS_UNAVAILABLE, "пресеты недоступны: host без 1.9");
+        state.set_new_task_preset(Some("planning".into()));
+        state.request_delete_user_preset();
+        assert_eq!(state.toast.as_deref(), Some(PRESETS_UNAVAILABLE));
+        let hits = mock.hits.lock().unwrap().clone();
+        assert!(hits.iter().any(|h| h.method == "preset.list"));
+        assert!(!hits.iter().any(|h| h.method == "preset.create"));
+        assert!(!hits.iter().any(|h| h.method == "preset.update"));
+        assert!(!hits.iter().any(|h| h.method == "preset.delete"));
     }
 }
