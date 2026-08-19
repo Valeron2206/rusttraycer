@@ -35,6 +35,8 @@ pub enum StorageError {
     InvalidParams(String),
     #[error("unsupported schema version: {0}")]
     UnsupportedSchema(String),
+    #[error("conflict: {0}")]
+    Conflict(String),
     #[error("database: {0}")]
     Database(#[from] rusqlite::Error),
     #[error("io: {0}")]
@@ -47,6 +49,7 @@ impl StorageError {
             Self::NotFound => "not_found",
             Self::WorkspacePathInvalid(_) => "workspace_path_invalid",
             Self::InvalidParams(_) => "invalid_params",
+            Self::Conflict(_) => "conflict",
             Self::UnsupportedSchema(_) | Self::Database(_) | Self::Io(_) => "internal",
         }
     }
@@ -402,6 +405,96 @@ pub struct CommentThread {
     pub comments: Vec<Comment>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ImportTask {
+    pub id: String,
+    pub title: String,
+    pub status: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub preset: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ImportAgent {
+    pub id: String,
+    pub task_id: String,
+    pub parent_id: Option<String>,
+    pub interface: String,
+    pub provider: String,
+    pub created_at: String,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub fast: bool,
+    pub role: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ImportMessage {
+    pub id: String,
+    pub agent_id: String,
+    pub role: String,
+    pub content: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ImportArtifact {
+    pub id: String,
+    pub task_id: String,
+    pub parent_id: Option<String>,
+    pub kind: String,
+    pub title: String,
+    pub body: String,
+    pub status: Option<String>,
+    pub assignee: Option<String>,
+    pub source_message_id: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ImportCommentThread {
+    pub id: String,
+    pub artifact_id: String,
+    pub anchor_start: i64,
+    pub anchor_end: i64,
+    pub resolved: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ImportComment {
+    pub id: String,
+    pub thread_id: String,
+    pub body: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ImportBundle {
+    pub dest_host_id: String,
+    pub dest_workspace_id: String,
+    pub tasks: Vec<ImportTask>,
+    pub agents: Vec<ImportAgent>,
+    pub messages: Vec<ImportMessage>,
+    pub artifacts: Vec<ImportArtifact>,
+    pub comment_threads: Vec<ImportCommentThread>,
+    pub comments: Vec<ImportComment>,
+    pub profiles: Vec<ModelProfile>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ImportResult {
+    pub tasks: usize,
+    pub agents: usize,
+    pub messages: usize,
+    pub artifacts: usize,
+    pub profiles_imported: usize,
+    pub profiles_skipped: usize,
 }
 
 const ARTIFACT_LIST_CAP: usize = 500;
@@ -2023,6 +2116,17 @@ impl Store {
         Ok(n)
     }
 
+    /// Insert a clone archive in one transaction. Same entity ids. Dest
+    /// `host.id` is never written. Collision on any id → `Conflict` and
+    /// rollback. Occupied profile names are skipped.
+    pub fn import_bundle(&self, bundle: &ImportBundle) -> Result<ImportResult> {
+        let mut conn = self.lock()?;
+        let tx = conn.transaction()?;
+        let counts = import_bundle_tx(&tx, bundle)?;
+        tx.commit()?;
+        Ok(counts)
+    }
+
     fn collect_artifact_descendants(&self, root: &str, out: &mut Vec<String>) -> Result<()> {
         out.push(root.to_string());
         let children: Vec<String> = {
@@ -2226,6 +2330,288 @@ fn map_loop_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<LoopRow> {
         prompt: r.get(10)?,
         created_at: r.get(11)?,
         updated_at: r.get(12)?,
+    })
+}
+
+fn id_exists(tx: &rusqlite::Transaction<'_>, sql: &str, id: &str) -> Result<bool> {
+    let found: Option<i64> = tx.query_row(sql, [id], |r| r.get(0)).optional()?;
+    Ok(found.is_some())
+}
+
+fn conflict_if_exists(
+    tx: &rusqlite::Transaction<'_>,
+    sql: &str,
+    id: &str,
+    kind: &str,
+) -> Result<()> {
+    if id_exists(tx, sql, id)? {
+        return Err(StorageError::Conflict(format!(
+            "{kind} {id} already exists"
+        )));
+    }
+    Ok(())
+}
+
+fn remember_id(seen: &mut std::collections::HashSet<String>, id: &str) -> Result<()> {
+    if !seen.insert(id.to_string()) {
+        return Err(StorageError::InvalidParams(format!(
+            "duplicate id in archive: {id}"
+        )));
+    }
+    Ok(())
+}
+
+fn import_bundle_tx(tx: &rusqlite::Transaction<'_>, bundle: &ImportBundle) -> Result<ImportResult> {
+    let ws_ok: Option<String> = tx
+        .query_row(
+            "SELECT id FROM workspaces WHERE id = ?1 AND host_id = ?2",
+            params![bundle.dest_workspace_id, bundle.dest_host_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if ws_ok.is_none() {
+        return Err(StorageError::NotFound);
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    let mut task_ids = std::collections::HashSet::new();
+    for t in &bundle.tasks {
+        remember_id(&mut seen, &t.id)?;
+        TaskStatus::parse(&t.status)?;
+        conflict_if_exists(tx, "SELECT 1 FROM tasks WHERE id = ?1", &t.id, "task")?;
+        task_ids.insert(t.id.clone());
+    }
+    let mut agent_ids = std::collections::HashSet::new();
+    for a in &bundle.agents {
+        remember_id(&mut seen, &a.id)?;
+        if a.interface != "chat" && a.interface != "terminal" {
+            return Err(StorageError::InvalidParams(format!(
+                "interface must be chat|terminal, got {}",
+                a.interface
+            )));
+        }
+        if !task_ids.contains(&a.task_id) {
+            return Err(StorageError::InvalidParams(format!(
+                "agent {} references unknown task {}",
+                a.id, a.task_id
+            )));
+        }
+        conflict_if_exists(tx, "SELECT 1 FROM agents WHERE id = ?1", &a.id, "agent")?;
+        agent_ids.insert(a.id.clone());
+    }
+    let mut message_ids = std::collections::HashSet::new();
+    for m in &bundle.messages {
+        remember_id(&mut seen, &m.id)?;
+        MessageRole::parse(&m.role)?;
+        if !agent_ids.contains(&m.agent_id) {
+            return Err(StorageError::InvalidParams(format!(
+                "message {} references unknown agent {}",
+                m.id, m.agent_id
+            )));
+        }
+        conflict_if_exists(tx, "SELECT 1 FROM messages WHERE id = ?1", &m.id, "message")?;
+        message_ids.insert(m.id.clone());
+    }
+    let mut artifact_ids = std::collections::HashSet::new();
+    for art in &bundle.artifacts {
+        remember_id(&mut seen, &art.id)?;
+        if !task_ids.contains(&art.task_id) {
+            return Err(StorageError::InvalidParams(format!(
+                "artifact {} references unknown task {}",
+                art.id, art.task_id
+            )));
+        }
+        conflict_if_exists(
+            tx,
+            "SELECT 1 FROM artifacts WHERE id = ?1",
+            &art.id,
+            "artifact",
+        )?;
+        artifact_ids.insert(art.id.clone());
+    }
+    let mut thread_ids = std::collections::HashSet::new();
+    for th in &bundle.comment_threads {
+        remember_id(&mut seen, &th.id)?;
+        if !artifact_ids.contains(&th.artifact_id) {
+            return Err(StorageError::InvalidParams(format!(
+                "comment thread {} references unknown artifact {}",
+                th.id, th.artifact_id
+            )));
+        }
+        conflict_if_exists(
+            tx,
+            "SELECT 1 FROM comment_threads WHERE id = ?1",
+            &th.id,
+            "comment thread",
+        )?;
+        thread_ids.insert(th.id.clone());
+    }
+    for c in &bundle.comments {
+        remember_id(&mut seen, &c.id)?;
+        if !thread_ids.contains(&c.thread_id) {
+            return Err(StorageError::InvalidParams(format!(
+                "comment {} references unknown thread {}",
+                c.id, c.thread_id
+            )));
+        }
+        conflict_if_exists(tx, "SELECT 1 FROM comments WHERE id = ?1", &c.id, "comment")?;
+    }
+    for p in &bundle.profiles {
+        remember_id(&mut seen, &p.id)?;
+        conflict_if_exists(
+            tx,
+            "SELECT 1 FROM model_profiles WHERE id = ?1",
+            &p.id,
+            "profile",
+        )?;
+    }
+
+    for t in &bundle.tasks {
+        tx.execute(
+            "INSERT INTO tasks (id, title, status, created_at, updated_at, preset) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![t.id, t.title, t.status, t.created_at, t.updated_at, t.preset],
+        )?;
+        tx.execute(
+            "INSERT INTO task_workspaces (task_id, workspace_id) VALUES (?1, ?2)",
+            params![t.id, bundle.dest_workspace_id],
+        )?;
+    }
+
+    for a in &bundle.agents {
+        let role = if a.role.is_empty() {
+            "coder"
+        } else {
+            a.role.as_str()
+        };
+        tx.execute(
+            "INSERT INTO agents (id, task_id, host_id, parent_id, interface, provider, status, run_location, created_at, provider_session_id, model, effort, fast, role) VALUES (?1, ?2, ?3, NULL, ?4, ?5, 'idle', 'local', ?6, NULL, ?7, ?8, ?9, ?10)",
+            params![
+                a.id,
+                a.task_id,
+                bundle.dest_host_id,
+                a.interface,
+                a.provider,
+                a.created_at,
+                a.model,
+                a.effort,
+                if a.fast { 1 } else { 0 },
+                role
+            ],
+        )?;
+    }
+    for a in &bundle.agents {
+        if let Some(pid) = a
+            .parent_id
+            .as_deref()
+            .filter(|pid| agent_ids.contains(*pid))
+        {
+            tx.execute(
+                "UPDATE agents SET parent_id = ?1 WHERE id = ?2",
+                params![pid, a.id],
+            )?;
+        }
+    }
+
+    for m in &bundle.messages {
+        tx.execute(
+            "INSERT INTO messages (id, agent_id, role, content, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![m.id, m.agent_id, m.role, m.content, m.created_at],
+        )?;
+    }
+
+    for art in &bundle.artifacts {
+        let source = art
+            .source_message_id
+            .as_deref()
+            .filter(|mid| message_ids.contains(*mid));
+        tx.execute(
+            "INSERT INTO artifacts (id, task_id, parent_id, kind, title, body, status, assignee, source_message_id, created_at, updated_at) VALUES (?1, ?2, NULL, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                art.id,
+                art.task_id,
+                art.kind,
+                art.title,
+                art.body,
+                art.status,
+                art.assignee,
+                source,
+                art.created_at,
+                art.updated_at
+            ],
+        )?;
+    }
+    for art in &bundle.artifacts {
+        if let Some(pid) = art
+            .parent_id
+            .as_deref()
+            .filter(|pid| artifact_ids.contains(*pid))
+        {
+            tx.execute(
+                "UPDATE artifacts SET parent_id = ?1 WHERE id = ?2",
+                params![pid, art.id],
+            )?;
+        }
+    }
+
+    for th in &bundle.comment_threads {
+        tx.execute(
+            "INSERT INTO comment_threads (id, artifact_id, anchor_start, anchor_end, resolved, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                th.id,
+                th.artifact_id,
+                th.anchor_start,
+                th.anchor_end,
+                if th.resolved { 1 } else { 0 },
+                th.created_at,
+                th.updated_at
+            ],
+        )?;
+    }
+
+    for c in &bundle.comments {
+        tx.execute(
+            "INSERT INTO comments (id, thread_id, body, created_at) VALUES (?1, ?2, ?3, ?4)",
+            params![c.id, c.thread_id, c.body, c.created_at],
+        )?;
+    }
+
+    let mut profiles_imported = 0usize;
+    let mut profiles_skipped = 0usize;
+    for p in &bundle.profiles {
+        let name_taken: Option<String> = tx
+            .query_row(
+                "SELECT id FROM model_profiles WHERE name = ?1",
+                [&p.name],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if name_taken.is_some() {
+            profiles_skipped += 1;
+            continue;
+        }
+        tx.execute(
+            "INSERT INTO model_profiles (id, name, provider, model, effort, fast, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                p.id,
+                p.name,
+                p.provider,
+                p.model,
+                p.effort,
+                if p.fast { 1 } else { 0 },
+                p.created_at,
+                p.updated_at
+            ],
+        )?;
+        profiles_imported += 1;
+    }
+
+    Ok(ImportResult {
+        tasks: bundle.tasks.len(),
+        agents: bundle.agents.len(),
+        messages: bundle.messages.len(),
+        artifacts: bundle.artifacts.len(),
+        profiles_imported,
+        profiles_skipped,
     })
 }
 
