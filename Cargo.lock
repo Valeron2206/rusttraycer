@@ -3179,7 +3179,7 @@ dependencies = [
 
 [[package]]
 name = "rt-cli"
-version = "2.1.0"
+version = "2.1.1"
 dependencies = [
  "clap",
  "ctrlc",
@@ -3195,7 +3195,7 @@ dependencies = [
 
 [[package]]
 name = "rt-gui"
-version = "2.1.0"
+version = "2.1.1"
 dependencies = [
  "eframe",
  "egui",
@@ -3210,7 +3210,7 @@ dependencies = [
 
 [[package]]
 name = "rt-host"
-version = "2.1.0"
+version = "2.1.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -3240,7 +3240,7 @@ dependencies = [
 
 [[package]]
 name = "rt-protocol"
-version = "2.1.0"
+version = "2.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -3249,7 +3249,7 @@ dependencies = [
 
 [[package]]
 name = "rt-runtime"
-version = "2.1.0"
+version = "2.1.1"
 dependencies = [
  "async-stream",
  "futures",
@@ -3264,7 +3264,7 @@ dependencies = [
 
 [[package]]
 name = "rt-storage"
-version = "2.1.0"
+version = "2.1.1"
 dependencies = [
  "chrono",
  "rusqlite",

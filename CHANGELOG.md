@@ -5,9 +5,22 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.1] — 2026-08-19
+
+Docs and license only. Protocol 1.9. Tag `v2.1.0` stays at `e151919`.
+
+### Fixed
+
+- README claimed PTY / mux / A2A / sync were stubs and pointed install at `v1.0.0`. It now matches the v2.1 matrix.
+
+### Docs
+
+- Dual license MIT OR Apache-2.0 (`LICENSE-MIT`, `LICENSE-APACHE`).
+- Workspace crate version 2.1.1.
+
 ## [2.1.0] — 2026-08-19
 
-Complete DoD. Protocol 1.9. Storage 0009 + 0010. Zero `missing`/`partial` in the parity matrix. Tag is Chief's after APPROVE 0097+0098.
+Complete DoD. Protocol 1.9. Storage 0009 + 0010. Zero `missing`/`partial` in the parity matrix. Tag `v2.1.0` at `e151919`.
 
 ### Added
 
@@ -72,6 +85,8 @@ First production release. Linux x86_64 only ([ADR-001](docs/adr/0001-target-plat
 - `GET /metrics`. GUI picker / N agents in the canvas (host already allows both).
 
 [1.0.0]: https://github.com/Valeron2206/rusttraycer/releases/tag/v1.0.0
+
+[2.1.1]: https://github.com/Valeron2206/rusttraycer/releases/tag/v2.1.1
 
 [2.1.0]: https://github.com/Valeron2206/rusttraycer/releases/tag/v2.1.0
 
