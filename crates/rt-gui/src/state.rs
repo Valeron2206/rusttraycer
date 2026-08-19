@@ -15,8 +15,10 @@ use crate::ladder::{
     self, AgentPolicy, PaneKind, PendingApproval, PolicyMode, SplitLayout, PICKER_EMPTY,
     PICKER_HINT,
 };
+use crate::model_ux::{self, ModelParams, ModelPrefs, MODEL_UNAVAILABLE, PROFILE_NAME_BAD};
 use crate::rpc::{
-    CancelOk, ConnectError, DoctorOk, DoctorProvider, GitDiffOk, GitStatusOk, Worktree,
+    AgentModelView, CancelOk, ConnectError, DoctorOk, DoctorProvider, GitDiffOk, GitStatusOk,
+    PrefsItem, ProfileOk, Worktree,
 };
 use crate::terminal::{
     self, AgentInterface, AgentView, ShellStub, DEFAULT_COLS, DEFAULT_ROWS, NEED_TASK,
@@ -344,6 +346,16 @@ pub struct AppState {
     pub loop_prompt: String,
     pub loop_state: Option<LoopView>,
     pub a2a_status: Option<String>,
+    pub picker_model: String,
+    pub picker_effort: String,
+    pub picker_fast: bool,
+    pub model_prefs: ModelPrefs,
+    pub agent_params: HashMap<String, ModelParams>,
+    pub profiles: Vec<ProfileOk>,
+    pub selected_profile_id: Option<String>,
+    pub profile_name_draft: String,
+    pub host_prefs: Vec<PrefsItem>,
+    pub model_status: Option<String>,
     pending_cancel: Option<String>,
     rpc_tx: Sender<RpcIncoming>,
     rpc_rx: Receiver<RpcIncoming>,
@@ -451,11 +463,22 @@ impl AppState {
             loop_prompt: String::new(),
             loop_state: None,
             a2a_status: None,
+            picker_model: String::new(),
+            picker_effort: String::new(),
+            picker_fast: false,
+            model_prefs: ModelPrefs::default(),
+            agent_params: HashMap::new(),
+            profiles: Vec::new(),
+            selected_profile_id: None,
+            profile_name_draft: String::new(),
+            host_prefs: Vec::new(),
+            model_status: None,
             pending_cancel: None,
             rpc_tx,
             rpc_rx,
         };
 
+        state.apply_local_model_prefs(model_ux::load_model_prefs());
         if demo {
             state.seed_demo();
         }
@@ -613,6 +636,7 @@ impl AppState {
                         self.refresh_terminal_capability();
                         self.refresh_artifacts_capability();
                         self.refresh_a2a_capability();
+                        self.refresh_model_capability();
                         self.refresh_tasks_catalog();
                         if self.screen == Screen::Canvas {
                             self.refresh_canvas_after_reconnect();
@@ -1228,7 +1252,17 @@ impl AppState {
             return;
         }
         let interface = self.picker_interface.as_wire();
-        let created = if interface == "chat" {
+        let params = self.picker_params();
+        let created = if self.model_ux_host_ok() {
+            session.agent_create_with_model(
+                &task_id,
+                &provider,
+                interface,
+                params.model.as_deref(),
+                params.effort.as_deref(),
+                Some(params.fast),
+            )
+        } else if interface == "chat" {
             session.agent_create(&task_id, &provider)
         } else {
             session.agent_create_with_interface(&task_id, &provider, interface)
@@ -1239,6 +1273,8 @@ impl AppState {
                 if interface == "terminal" && !stub.is_terminal() {
                     self.surface_terminal_error_label(TERMINAL_UNAVAILABLE);
                 }
+                self.agent_params.insert(stub.id.clone(), params);
+                self.remember_model_choice();
                 self.selected_agent_id = Some(stub.id.clone());
                 self.remember_selected_agent();
                 self.agents.push(stub);
@@ -1261,10 +1297,11 @@ impl AppState {
 
     pub fn set_picker_provider(&mut self, id: String) {
         if self.providers.iter().any(|p| p.id == id) {
-            self.picker_provider = Some(id);
+            self.picker_provider = Some(id.clone());
             if !self.picker_allows_terminal() && self.picker_interface == AgentInterface::Terminal {
                 self.picker_interface = AgentInterface::Chat;
             }
+            self.apply_remembered_for_provider(&id);
         }
     }
 
@@ -3066,6 +3103,352 @@ impl AppState {
     #[cfg(test)]
     pub fn test_apply_ws_event(&mut self, event: crate::ws::WsEvent) {
         self.apply_ws_event(event);
+    }
+
+    pub fn model_ux_host_ok(&self) -> bool {
+        self.session
+            .as_ref()
+            .map(|s| s.model_ux_accepted() && !s.model_ux_rejected())
+            .unwrap_or(false)
+    }
+
+    fn refresh_model_capability(&mut self) {
+        match &self.session {
+            Some(s) if s.model_ux_accepted() && !s.model_ux_rejected() => {
+                if self.model_status.as_deref() == Some(MODEL_UNAVAILABLE) {
+                    self.model_status = None;
+                }
+                self.refresh_profiles();
+                self.refresh_host_prefs();
+            }
+            Some(_) | None => {
+                if self.can_rpc() {
+                    self.model_status = Some(MODEL_UNAVAILABLE.into());
+                }
+            }
+        }
+    }
+
+    fn surface_model_unavailable(&mut self) {
+        self.model_status = Some(MODEL_UNAVAILABLE.into());
+        self.toast = Some(MODEL_UNAVAILABLE.into());
+    }
+
+    fn surface_model_error(&mut self, err: ConnectError) {
+        if err.is_model_ux_unsupported() {
+            self.surface_model_unavailable();
+            return;
+        }
+        let label = if err.is_agent_busy() {
+            TOAST_AGENT_BUSY.to_string()
+        } else {
+            err.as_label()
+        };
+        self.model_status = Some(label.clone());
+        self.toast = Some(label);
+    }
+
+    pub fn picker_params(&self) -> ModelParams {
+        ModelParams::from_drafts(&self.picker_model, &self.picker_effort, self.picker_fast)
+    }
+
+    pub fn apply_local_model_prefs(&mut self, prefs: ModelPrefs) {
+        self.model_prefs = prefs;
+        self.picker_model = self.model_prefs.last.model_draft();
+        self.picker_effort = self.model_prefs.last.effort_draft();
+        self.picker_fast = self.model_prefs.last.fast;
+    }
+
+    fn apply_remembered_for_provider(&mut self, provider: &str) {
+        let params = model_ux::params_for_provider(&self.model_prefs, provider).clone();
+        if let Some(item) = self.host_prefs.iter().find(|p| p.provider == provider) {
+            self.picker_model = item.model.clone().unwrap_or_else(|| params.model_draft());
+            self.picker_effort = item.effort.clone().unwrap_or_else(|| params.effort_draft());
+            self.picker_fast = item.fast;
+            return;
+        }
+        self.picker_model = params.model_draft();
+        self.picker_effort = params.effort_draft();
+        self.picker_fast = params.fast;
+    }
+
+    pub fn remember_model_choice(&mut self) {
+        let params = self.picker_params();
+        model_ux::remember_params(
+            &mut self.model_prefs,
+            self.picker_provider.as_deref(),
+            params,
+        );
+        model_ux::save_model_prefs(&self.model_prefs);
+    }
+
+    pub fn selected_agent_params(&self) -> Option<&ModelParams> {
+        let id = self.selected_agent()?.id.as_str();
+        self.agent_params.get(id)
+    }
+
+    pub fn can_switch_agent(&self) -> bool {
+        self.can_rpc()
+            && self.model_ux_host_ok()
+            && self.selected_agent().is_some()
+            && self.picker_provider.is_some()
+            && !self.selected_agent_is_running()
+    }
+
+    pub fn switch_selected_agent(&mut self) {
+        if !self.model_ux_host_ok() {
+            self.surface_model_unavailable();
+            return;
+        }
+        if self.selected_agent_is_running() {
+            self.toast = Some(TOAST_AGENT_BUSY.into());
+            return;
+        }
+        let Some(agent_id) = self.selected_agent().map(|a| a.id.clone()) else {
+            return;
+        };
+        let Some(provider) = self.picker_provider.clone() else {
+            self.toast = Some(PICKER_HINT.into());
+            return;
+        };
+        if !self.providers.iter().any(|p| p.id == provider) {
+            self.toast = Some(PICKER_EMPTY.into());
+            return;
+        }
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        let params = self.picker_params();
+        match session.agent_switch(
+            &agent_id,
+            Some(&provider),
+            params.model.as_deref(),
+            params.effort.as_deref(),
+            Some(params.fast),
+            None,
+        ) {
+            Ok(view) => self.apply_switched_agent(&agent_id, view, params),
+            Err(err) => self.surface_model_error(err),
+        }
+    }
+
+    pub fn can_create_profile(&self) -> bool {
+        self.can_rpc()
+            && self.model_ux_host_ok()
+            && self.picker_provider.is_some()
+            && model_ux::valid_profile_name(&self.profile_name_draft)
+    }
+
+    pub fn create_profile_from_picker(&mut self) {
+        if !self.model_ux_host_ok() {
+            self.surface_model_unavailable();
+            return;
+        }
+        if !model_ux::valid_profile_name(&self.profile_name_draft) {
+            self.toast = Some(PROFILE_NAME_BAD.into());
+            return;
+        }
+        let Some(provider) = self.picker_provider.clone() else {
+            self.toast = Some(PICKER_HINT.into());
+            return;
+        };
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        let name = self.profile_name_draft.trim().to_string();
+        let params = self.picker_params();
+        match session.profile_create(
+            &name,
+            &provider,
+            params.model.as_deref(),
+            params.effort.as_deref(),
+            Some(params.fast),
+        ) {
+            Ok(profile) => {
+                self.selected_profile_id = Some(profile.id.clone());
+                if !self.profiles.iter().any(|p| p.id == profile.id) {
+                    self.profiles.push(profile);
+                }
+                self.remember_model_choice();
+                self.refresh_profiles();
+            }
+            Err(err) => self.surface_model_error(err),
+        }
+    }
+
+    fn apply_profile_to_picker(&mut self, profile: &ProfileOk) {
+        self.picker_model = profile.model.clone().unwrap_or_default();
+        self.picker_effort = profile.effort.clone().unwrap_or_default();
+        self.picker_fast = profile.fast;
+        if self.providers.iter().any(|p| p.id == profile.provider) {
+            self.picker_provider = Some(profile.provider.clone());
+        }
+    }
+
+    pub fn select_profile(&mut self, id: Option<String>) {
+        if let Some(ref pid) = id {
+            if let Some(profile) = self.profiles.iter().find(|p| &p.id == pid).cloned() {
+                self.apply_profile_to_picker(&profile);
+            } else if self.model_ux_host_ok() {
+                if let Some(session) = self.session.clone() {
+                    match session.profile_get(pid) {
+                        Ok(profile) => {
+                            if !self.profiles.iter().any(|p| p.id == profile.id) {
+                                self.profiles.push(profile.clone());
+                            }
+                            self.apply_profile_to_picker(&profile);
+                        }
+                        Err(err) => self.surface_model_error(err),
+                    }
+                }
+            }
+        }
+        self.selected_profile_id = id;
+    }
+
+    pub fn can_apply_profile(&self) -> bool {
+        self.can_rpc()
+            && self.model_ux_host_ok()
+            && self.selected_agent().is_some()
+            && self.selected_profile_id.is_some()
+            && !self.selected_agent_is_running()
+    }
+
+    pub fn apply_selected_profile(&mut self) {
+        if !self.model_ux_host_ok() {
+            self.surface_model_unavailable();
+            return;
+        }
+        if self.selected_agent_is_running() {
+            self.toast = Some(TOAST_AGENT_BUSY.into());
+            return;
+        }
+        let Some(agent_id) = self.selected_agent().map(|a| a.id.clone()) else {
+            return;
+        };
+        let Some(profile_id) = self.selected_profile_id.clone() else {
+            self.toast = Some(model_ux::PROFILE_HINT.into());
+            return;
+        };
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        match session.agent_switch(&agent_id, None, None, None, None, Some(&profile_id)) {
+            Ok(view) => {
+                let params = self
+                    .profiles
+                    .iter()
+                    .find(|p| p.id == profile_id)
+                    .map(|p| ModelParams {
+                        model: p.model.clone(),
+                        effort: p.effort.clone(),
+                        fast: p.fast,
+                    })
+                    .unwrap_or_else(|| ModelParams {
+                        model: view.model.clone(),
+                        effort: view.effort.clone(),
+                        fast: view.fast,
+                    });
+                if self.providers.iter().any(|p| p.id == view.agent.provider) {
+                    self.picker_provider = Some(view.agent.provider.clone());
+                }
+                self.picker_model = params.model_draft();
+                self.picker_effort = params.effort_draft();
+                self.picker_fast = params.fast;
+                self.apply_switched_agent(&agent_id, view, params);
+            }
+            Err(err) => self.surface_model_error(err),
+        }
+    }
+
+    pub fn refresh_profiles(&mut self) {
+        if !self.model_ux_host_ok() {
+            return;
+        }
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        match session.profile_list() {
+            Ok(items) => {
+                self.profiles = items;
+                if let Some(id) = self.selected_profile_id.clone() {
+                    if !self.profiles.iter().any(|p| p.id == id) {
+                        self.selected_profile_id = None;
+                    }
+                }
+            }
+            Err(err) => self.surface_model_error(err),
+        }
+    }
+
+    fn refresh_host_prefs(&mut self) {
+        if !self.model_ux_host_ok() {
+            return;
+        }
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        match session.prefs_get() {
+            Ok(items) => {
+                self.host_prefs = items;
+                if let Some(provider) = self.picker_provider.clone() {
+                    self.apply_remembered_for_provider(&provider);
+                } else if self.picker_model.is_empty() {
+                    if let Some(item) = self.host_prefs.iter().find(|p| p.model.is_some()) {
+                        self.picker_model = item.model.clone().unwrap_or_default();
+                        self.picker_effort = item.effort.clone().unwrap_or_default();
+                        self.picker_fast = item.fast;
+                    }
+                }
+            }
+            Err(err) => {
+                if err.is_model_ux_unsupported() {
+                    self.surface_model_unavailable();
+                }
+            }
+        }
+    }
+
+    fn apply_switched_agent(&mut self, agent_id: &str, view: AgentModelView, params: ModelParams) {
+        let keep_id = self.selected_agent_id.clone();
+        if let Some(stub) = self.agents.iter_mut().find(|a| a.id == agent_id) {
+            *stub = AgentStub::from(view.agent.clone());
+        }
+        let stored = ModelParams {
+            model: view.model.clone().or(params.model),
+            effort: view.effort.clone().or(params.effort),
+            fast: view.fast || params.fast,
+        };
+        self.agent_params.insert(agent_id.to_string(), stored);
+        self.remember_model_choice();
+        self.refresh_after_switch(agent_id);
+        // Same agent: never drop the selection just because host echoed fields.
+        if self.selected_agent_id.is_none() {
+            self.selected_agent_id = keep_id;
+        }
+    }
+
+    fn refresh_after_switch(&mut self, agent_id: &str) {
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        if let Ok(agent) = session.agent_get(agent_id) {
+            if let Some(stub) = self.agents.iter_mut().find(|a| a.id == agent_id) {
+                *stub = AgentStub::from(agent);
+            }
+        }
+        match session.agent_get_context(agent_id) {
+            Ok(messages) => {
+                apply_get_context_replace(
+                    &mut self.messages,
+                    messages.into_iter().map(ChatMessage::from).collect(),
+                );
+                self.ingest_inbox_from_messages(agent_id);
+            }
+            Err(_) => {
+                // Keep the local transcript. Host owns it; GUI must not wipe.
+            }
+        }
     }
 }
 
@@ -5659,5 +6042,398 @@ mod tests {
         let _ = state.artifacts_host_ok();
         assert!(state.artifacts.is_empty());
         assert_eq!(state.agents.len(), 1);
+    }
+
+    fn model_accepted_map() -> serde_json::Map<String, Value> {
+        let mut accepted = serde_json::Map::new();
+        for name in crate::rpc::MODEL_METHODS {
+            accepted.insert(name.to_string(), json!({"major": 1, "minor": 6}));
+        }
+        for name in crate::rpc::A2A_METHODS {
+            accepted.insert(name.to_string(), json!({"major": 1, "minor": 5}));
+        }
+        accepted
+    }
+
+    fn session_without_1_6() -> crate::rpc::Session {
+        use std::collections::BTreeMap;
+        let mut rejected = BTreeMap::new();
+        for name in crate::rpc::MODEL_METHODS {
+            rejected.insert((*name).to_string(), "unsupported".into());
+        }
+        crate::rpc::Session {
+            host_id: "host-a".into(),
+            host_version: "0.1.0".into(),
+            session_token: "tok-1".into(),
+            rpc_url: "http://127.0.0.1:1".into(),
+            ws_url: None,
+            accepted: BTreeMap::new(),
+            rejected,
+        }
+    }
+
+    fn start_model_state_mock() -> SliceMock {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(Mutex::new(Vec::new()));
+        let hits_t = hits.clone();
+        thread::spawn(move || {
+            let mut profile_n = 0u32;
+            let mut last_provider = "cli.generic".to_string();
+            for stream in listener.incoming().take(48) {
+                let Ok(mut stream) = stream else { break };
+                let (headers, body) = read_http_request(&mut stream);
+                let parsed: Value = serde_json::from_slice(&body).unwrap_or(json!({}));
+                let method = if headers.starts_with("GET /health") {
+                    "GET /health".to_string()
+                } else {
+                    parsed
+                        .get("method")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("other")
+                        .to_string()
+                };
+                let params = parsed.get("params").cloned().unwrap_or(json!({}));
+                hits_t.lock().unwrap().push(RpcHit {
+                    method: method.clone(),
+                    params: params.clone(),
+                });
+                if let Some(p) = params.get("provider").and_then(|v| v.as_str()) {
+                    last_provider = p.to_string();
+                }
+                if method == "agent.switch" {
+                    if let Some(pid) = params.get("profileId").and_then(|v| v.as_str()) {
+                        if pid == "prof-1" {
+                            last_provider = "cli.codex".into();
+                        }
+                    }
+                }
+                let body = match method.as_str() {
+                    "GET /health" => json!({"ok": true, "hostId": "host-a"}).to_string(),
+                    "handshake" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "hostId": "host-a",
+                            "hostVersion": "0.1.0",
+                            "sessionToken": "tok-1",
+                            "accepted": model_accepted_map(),
+                            "rejected": {}
+                        }
+                    })
+                    .to_string(),
+                    "host.ping" => json!({
+                        "id": "echo",
+                        "ok": { "hostId": "host-a", "now": "2026-08-19T10:00:00Z" }
+                    })
+                    .to_string(),
+                    "host.doctor" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "providers": [
+                                {"id": "cli.generic", "available": true, "detail": ""},
+                                {"id": "cli.claude", "available": true, "detail": ""},
+                                {"id": "cli.codex", "available": true, "detail": ""}
+                            ]
+                        }
+                    })
+                    .to_string(),
+                    "agent.switch" | "agent.get" => {
+                        let id = params
+                            .get("agentId")
+                            .or_else(|| params.get("id"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("ag-1")
+                            .to_string();
+                        json!({
+                            "id": "echo",
+                            "ok": {
+                                "id": id,
+                                "taskId": "task-1",
+                                "hostId": "host-a",
+                                "parentId": null,
+                                "interface": "chat",
+                                "provider": last_provider,
+                                "status": "idle",
+                                "runLocation": "local",
+                                "createdAt": "2026-08-19T10:00:00Z",
+                                "model": "o3",
+                                "effort": "high",
+                                "fast": true
+                            }
+                        })
+                        .to_string()
+                    }
+                    "agent.get_context" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "messages": [
+                                sample_message("keep-1", "ag-1", "user", "turn one"),
+                                sample_message("keep-2", "ag-1", "assistant", "turn two")
+                            ]
+                        }
+                    })
+                    .to_string(),
+                    "profile.create" => {
+                        profile_n += 1;
+                        json!({
+                            "id": "echo",
+                            "ok": {
+                                "id": format!("prof-{profile_n}"),
+                                "name": params.get("name").cloned().unwrap_or(json!("p")),
+                                "provider": params.get("provider").cloned().unwrap_or(json!("cli.codex")),
+                                "model": params.get("model").cloned().unwrap_or(Value::Null),
+                                "effort": params.get("effort").cloned().unwrap_or(Value::Null),
+                                "fast": params.get("fast").cloned().unwrap_or(json!(false))
+                            }
+                        })
+                        .to_string()
+                    }
+                    "profile.list" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "items": [{
+                                "id": "prof-1",
+                                "name": "codex high",
+                                "provider": "cli.codex",
+                                "model": "o3",
+                                "effort": "high",
+                                "fast": true
+                            }]
+                        }
+                    })
+                    .to_string(),
+                    "profile.get" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "id": "prof-1",
+                            "name": "codex high",
+                            "provider": "cli.codex",
+                            "model": "o3",
+                            "effort": "high",
+                            "fast": true
+                        }
+                    })
+                    .to_string(),
+                    "prefs.get" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "items": [{
+                                "provider": "cli.codex",
+                                "model": "o3",
+                                "effort": "high",
+                                "fast": true
+                            }]
+                        }
+                    })
+                    .to_string(),
+                    _ => json!({
+                        "id": "echo",
+                        "ok": { "items": [] }
+                    })
+                    .to_string(),
+                };
+                write_http_json(&mut stream, &body);
+            }
+        });
+        SliceMock {
+            origin: format!("http://{addr}"),
+            hits,
+        }
+    }
+
+    #[test]
+    fn switch_on_existing_agent_sends_method_and_keeps_messages() {
+        let mock = start_model_state_mock();
+        let session = connect(&pid(&mock.origin)).expect("online");
+        let mut state = online_state(session);
+        state.providers = vec![
+            DoctorProvider {
+                id: "cli.generic".into(),
+                available: true,
+                detail: String::new(),
+                caps: None,
+            },
+            DoctorProvider {
+                id: "cli.codex".into(),
+                available: true,
+                detail: String::new(),
+                caps: None,
+            },
+        ];
+        state.messages = vec![
+            ChatMessage {
+                id: "keep-1".into(),
+                role: "user".into(),
+                content: "turn one".into(),
+            },
+            ChatMessage {
+                id: "keep-2".into(),
+                role: "assistant".into(),
+                content: "turn two".into(),
+            },
+        ];
+        state.set_picker_provider("cli.codex".into());
+        state.picker_model = "o3".into();
+        state.picker_effort = "high".into();
+        state.picker_fast = true;
+        assert!(state.can_switch_agent());
+        state.switch_selected_agent();
+        assert_eq!(state.selected_agent_id.as_deref(), Some("ag-1"));
+        assert_eq!(
+            state.selected_agent().map(|a| a.provider.as_str()),
+            Some("cli.codex")
+        );
+        assert_eq!(state.messages.len(), 2);
+        assert_eq!(state.messages[0].id, "keep-1");
+        assert_eq!(state.messages[1].id, "keep-2");
+        let hits = mock.hits.lock().unwrap().clone();
+        let switch = hits
+            .iter()
+            .find(|h| h.method == "agent.switch")
+            .cloned()
+            .expect("agent.switch");
+        assert_eq!(switch.params["agentId"], "ag-1");
+        assert_eq!(switch.params["provider"], "cli.codex");
+        assert_eq!(switch.params["model"], "o3");
+        assert_eq!(switch.params["effort"], "high");
+        assert_eq!(switch.params["fast"], true);
+        assert!(hits.iter().any(|h| h.method == "agent.get"));
+        assert!(hits.iter().any(|h| h.method == "agent.get_context"));
+        assert!(!hits.iter().any(|h| h.method == "agent.create"));
+        assert!(!hits.iter().any(|h| h.method == "agent.clear_transcript"));
+    }
+
+    #[test]
+    fn profile_create_select_apply_rpc() {
+        let mock = start_model_state_mock();
+        let session = connect(&pid(&mock.origin)).expect("online");
+        let mut state = online_state(session);
+        state.providers = vec![DoctorProvider {
+            id: "cli.codex".into(),
+            available: true,
+            detail: String::new(),
+            caps: None,
+        }];
+        state.messages = vec![ChatMessage {
+            id: "keep-1".into(),
+            role: "user".into(),
+            content: "turn one".into(),
+        }];
+        state.set_picker_provider("cli.codex".into());
+        state.picker_model = "o3".into();
+        state.picker_effort = "high".into();
+        state.picker_fast = true;
+        state.profile_name_draft = "codex high".into();
+        assert!(state.can_create_profile());
+        state.create_profile_from_picker();
+        assert_eq!(state.selected_profile_id.as_deref(), Some("prof-1"));
+        state.select_profile(Some("prof-1".into()));
+        assert_eq!(state.picker_model, "o3");
+        assert!(state.can_apply_profile());
+        state.apply_selected_profile();
+        assert_eq!(state.selected_agent_id.as_deref(), Some("ag-1"));
+        assert_eq!(
+            state.selected_agent().map(|a| a.provider.as_str()),
+            Some("cli.codex")
+        );
+        assert!(!state.messages.is_empty());
+        let hits = mock.hits.lock().unwrap().clone();
+        let create = hits
+            .iter()
+            .find(|h| h.method == "profile.create")
+            .expect("profile.create");
+        assert_eq!(create.params["name"], "codex high");
+        assert_eq!(create.params["provider"], "cli.codex");
+        assert_eq!(create.params["model"], "o3");
+        assert!(hits.iter().any(|h| h.method == "profile.list"));
+        let apply = hits
+            .iter()
+            .find(|h| h.method == "agent.switch" && h.params.get("profileId").is_some())
+            .expect("apply switch");
+        assert_eq!(apply.params["agentId"], "ag-1");
+        assert_eq!(apply.params["profileId"], "prof-1");
+    }
+
+    #[test]
+    fn last_model_effort_fast_remembered() {
+        let prefs = ModelPrefs {
+            last: ModelParams {
+                model: Some("o3".into()),
+                effort: Some("high".into()),
+                fast: true,
+            },
+            ..Default::default()
+        };
+        let mut state = AppState::new();
+        state.apply_local_model_prefs(prefs);
+        assert_eq!(state.picker_model, "o3");
+        assert_eq!(state.picker_effort, "high");
+        assert!(state.picker_fast);
+        state.picker_model = "sonnet".into();
+        state.picker_effort = "medium".into();
+        state.picker_fast = false;
+        state.picker_provider = Some("cli.claude".into());
+        state.remember_model_choice();
+        assert_eq!(state.model_prefs.last.model.as_deref(), Some("sonnet"));
+        assert_eq!(state.model_prefs.last.effort.as_deref(), Some("medium"));
+        assert!(!state.model_prefs.last.fast);
+        let for_claude = model_ux::params_for_provider(&state.model_prefs, "cli.claude");
+        assert_eq!(for_claude.model.as_deref(), Some("sonnet"));
+        let mut next = AppState::new();
+        next.apply_local_model_prefs(state.model_prefs.clone());
+        assert_eq!(next.picker_model, "sonnet");
+        assert_eq!(next.picker_effort, "medium");
+        assert!(!next.picker_fast);
+    }
+
+    #[test]
+    fn old_host_model_ux_toasts_and_does_not_panic() {
+        let mut state = AppState::new();
+        state.pending_discover = false;
+        state.demo = false;
+        state.host_status = HostStatus::Online;
+        state.session = Some(session_without_1_6());
+        state.workspace_id = Some("ws-1".into());
+        state.selected_task_id = Some("task-1".into());
+        state.selected_agent_id = Some("ag-1".into());
+        state.agents.push(AgentStub {
+            id: "ag-1".into(),
+            task_id: "task-1".into(),
+            parent_id: None,
+            provider: "cli.generic".into(),
+            status: AgentStatus::Idle,
+            interface: "chat".into(),
+        });
+        state.providers.push(DoctorProvider {
+            id: "cli.codex".into(),
+            available: true,
+            detail: String::new(),
+            caps: None,
+        });
+        state.messages.push(ChatMessage {
+            id: "keep-1".into(),
+            role: "user".into(),
+            content: "stay".into(),
+        });
+        state.set_picker_provider("cli.codex".into());
+        state.switch_selected_agent();
+        assert_eq!(state.toast.as_deref(), Some(MODEL_UNAVAILABLE));
+        assert_eq!(state.model_status.as_deref(), Some(MODEL_UNAVAILABLE));
+        assert_eq!(MODEL_UNAVAILABLE, "модели недоступны: host без 1.6");
+        assert_eq!(state.messages.len(), 1);
+        assert_eq!(state.messages[0].id, "keep-1");
+        state.profile_name_draft = "x".into();
+        state.create_profile_from_picker();
+        assert_eq!(state.toast.as_deref(), Some(MODEL_UNAVAILABLE));
+        state.selected_profile_id = Some("prof-1".into());
+        state.apply_selected_profile();
+        assert_eq!(state.toast.as_deref(), Some(MODEL_UNAVAILABLE));
+        let _ = state.composer_enabled();
+        let _ = state.write_ready();
+        let _ = state.terminal_host_ok();
+        let _ = state.artifacts_host_ok();
+        let _ = state.a2a_host_ok();
+        assert_eq!(state.agents.len(), 1);
+        assert_eq!(state.selected_agent_id.as_deref(), Some("ag-1"));
     }
 }

@@ -92,6 +92,24 @@ pub const A2A_METHODS: &[&str] = &[
     METHOD_LOOP_STOP,
 ];
 
+pub const METHOD_AGENT_SWITCH: &str = "agent.switch";
+pub const METHOD_PROFILE_CREATE: &str = "profile.create";
+pub const METHOD_PROFILE_LIST: &str = "profile.list";
+pub const METHOD_PROFILE_GET: &str = "profile.get";
+pub const METHOD_PROFILE_UPDATE: &str = "profile.update";
+pub const METHOD_PROFILE_DELETE: &str = "profile.delete";
+pub const METHOD_PREFS_GET: &str = "prefs.get";
+
+pub const MODEL_METHODS: &[&str] = &[
+    METHOD_AGENT_SWITCH,
+    METHOD_PROFILE_CREATE,
+    METHOD_PROFILE_LIST,
+    METHOD_PROFILE_GET,
+    METHOD_PROFILE_UPDATE,
+    METHOD_PROFILE_DELETE,
+    METHOD_PREFS_GET,
+];
+
 #[derive(Debug, Clone)]
 pub struct Session {
     pub host_id: String,
@@ -156,6 +174,10 @@ impl ConnectError {
     }
 
     pub fn is_a2a_unsupported(&self) -> bool {
+        self.is_unsupported_method() || self.is_version_mismatch()
+    }
+
+    pub fn is_model_ux_unsupported(&self) -> bool {
         self.is_unsupported_method() || self.is_version_mismatch()
     }
 
@@ -268,6 +290,9 @@ fn hello_methods() -> Value {
     }
     for name in A2A_METHODS {
         map.insert(name.to_string(), json!({ "major": 1, "minor": 5 }));
+    }
+    for name in MODEL_METHODS {
+        map.insert(name.to_string(), json!({ "major": 1, "minor": 6 }));
     }
     Value::Object(map)
 }
@@ -1106,6 +1131,113 @@ impl Session {
     pub fn loop_stop(&self, loop_id: &str) -> Result<LoopOk, ConnectError> {
         parse_ok(self.call(METHOD_LOOP_STOP, json!({ "loopId": loop_id }))?)
     }
+
+    pub fn model_ux_accepted(&self) -> bool {
+        fn ok(map: &BTreeMap<String, rt_protocol::MethodVersion>, name: &str) -> bool {
+            map.get(name)
+                .map(|v| v.major == 1 && v.minor >= 6)
+                .unwrap_or(false)
+        }
+        MODEL_METHODS.iter().all(|name| ok(&self.accepted, name))
+    }
+
+    pub fn model_ux_rejected(&self) -> bool {
+        MODEL_METHODS
+            .iter()
+            .any(|name| self.rejected.contains_key(*name))
+    }
+
+    pub fn agent_create_with_model(
+        &self,
+        task_id: &str,
+        provider: &str,
+        interface: &str,
+        model: Option<&str>,
+        effort: Option<&str>,
+        fast: Option<bool>,
+    ) -> Result<rt_protocol::Agent, ConnectError> {
+        let mut params = json!({
+            "taskId": task_id,
+            "provider": provider,
+        });
+        if interface != "chat" {
+            params["interface"] = json!(interface);
+        }
+        if let Some(model) = model {
+            params["model"] = json!(model);
+        }
+        if let Some(effort) = effort {
+            params["effort"] = json!(effort);
+        }
+        if let Some(fast) = fast {
+            params["fast"] = json!(fast);
+        }
+        parse_ok(self.call(rt_protocol::METHOD_AGENT_CREATE, params)?)
+    }
+
+    pub fn agent_switch(
+        &self,
+        agent_id: &str,
+        provider: Option<&str>,
+        model: Option<&str>,
+        effort: Option<&str>,
+        fast: Option<bool>,
+        profile_id: Option<&str>,
+    ) -> Result<AgentModelView, ConnectError> {
+        let mut params = json!({ "agentId": agent_id });
+        if let Some(provider) = provider {
+            params["provider"] = json!(provider);
+        }
+        if let Some(model) = model {
+            params["model"] = json!(model);
+        }
+        if let Some(effort) = effort {
+            params["effort"] = json!(effort);
+        }
+        if let Some(fast) = fast {
+            params["fast"] = json!(fast);
+        }
+        if let Some(profile_id) = profile_id {
+            params["profileId"] = json!(profile_id);
+        }
+        parse_agent_model(self.call(METHOD_AGENT_SWITCH, params)?)
+    }
+
+    pub fn profile_create(
+        &self,
+        name: &str,
+        provider: &str,
+        model: Option<&str>,
+        effort: Option<&str>,
+        fast: Option<bool>,
+    ) -> Result<ProfileOk, ConnectError> {
+        let mut params = json!({
+            "name": name,
+            "provider": provider,
+        });
+        if let Some(model) = model {
+            params["model"] = json!(model);
+        }
+        if let Some(effort) = effort {
+            params["effort"] = json!(effort);
+        }
+        if let Some(fast) = fast {
+            params["fast"] = json!(fast);
+        }
+        parse_ok(self.call(METHOD_PROFILE_CREATE, params)?)
+    }
+
+    pub fn profile_list(&self) -> Result<Vec<ProfileOk>, ConnectError> {
+        parse_items(self.call(METHOD_PROFILE_LIST, json!({}))?)
+    }
+
+    pub fn profile_get(&self, profile_id: &str) -> Result<ProfileOk, ConnectError> {
+        parse_ok(self.call(METHOD_PROFILE_GET, json!({ "profileId": profile_id }))?)
+    }
+
+    pub fn prefs_get(&self) -> Result<Vec<PrefsItem>, ConnectError> {
+        parse_items(self.call(METHOD_PREFS_GET, json!({}))?)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1417,6 +1549,66 @@ impl LoopOk {
             self.max_iterations
         }
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct AgentModelView {
+    pub agent: rt_protocol::Agent,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub fast: bool,
+}
+
+fn opt_string(value: &Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+fn parse_agent_model(ok: Value) -> Result<AgentModelView, ConnectError> {
+    let model = opt_string(&ok, "model");
+    let effort = opt_string(&ok, "effort");
+    let fast = ok.get("fast").and_then(|v| v.as_bool()).unwrap_or(false);
+    let agent = parse_ok(ok)?;
+    Ok(AgentModelView {
+        agent,
+        model,
+        effort,
+        fast,
+    })
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileOk {
+    pub id: String,
+    pub name: String,
+    pub provider: String,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub effort: Option<String>,
+    #[serde(default)]
+    pub fast: bool,
+    #[serde(default)]
+    pub created_at: String,
+    #[serde(default)]
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PrefsItem {
+    pub provider: String,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub effort: Option<String>,
+    #[serde(default)]
+    pub fast: bool,
 }
 
 fn bool_from_wire<'de, D>(deserializer: D) -> Result<bool, D::Error>
@@ -3348,6 +3540,30 @@ mod tests {
         assert_eq!(hs.params["methods"]["agent.create"]["minor"], 0);
     }
 
+    #[test]
+    fn handshake_advertises_model_methods_1_6() {
+        let mock = start_catalog_mock("host-a", "tok-1");
+        let _session = connect(&pid("host-a", &mock.origin)).expect("online");
+        let hs = mock
+            .hits
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|h| h.method == "handshake")
+            .cloned()
+            .expect("handshake");
+        for name in MODEL_METHODS {
+            assert_eq!(hs.params["methods"][name]["major"], 1, "{name}");
+            assert_eq!(hs.params["methods"][name]["minor"], 6, "{name}");
+        }
+        assert_eq!(hs.params["methods"]["agent.switch"]["minor"], 6);
+        assert_eq!(hs.params["methods"]["profile.create"]["minor"], 6);
+        assert_eq!(hs.params["methods"]["profile.list"]["minor"], 6);
+        assert_eq!(hs.params["methods"]["prefs.get"]["minor"], 6);
+        assert_eq!(hs.params["methods"]["a2a.deliver"]["minor"], 5);
+        assert_eq!(hs.params["methods"]["agent.create"]["minor"], 0);
+    }
+
     fn start_artifacts_rpc_mock() -> CatalogMock {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
@@ -3613,5 +3829,229 @@ mod tests {
         assert_eq!(hit.params["interface"], "terminal");
         assert_eq!(hit.params["taskId"], "task-1");
         assert_eq!(hit.params["provider"], "cli.claude");
+    }
+
+    fn model_accepted_map() -> serde_json::Map<String, Value> {
+        let mut accepted = serde_json::Map::new();
+        for name in MODEL_METHODS {
+            accepted.insert(name.to_string(), json!({"major": 1, "minor": 6}));
+        }
+        accepted
+    }
+
+    fn sample_switched_agent(id: &str, provider: &str) -> Value {
+        json!({
+            "id": id,
+            "taskId": "task-1",
+            "hostId": "host-a",
+            "parentId": null,
+            "interface": "chat",
+            "provider": provider,
+            "status": "idle",
+            "runLocation": "local",
+            "createdAt": "2026-08-19T10:00:00Z",
+            "model": "o3",
+            "effort": "high",
+            "fast": true
+        })
+    }
+
+    fn start_model_rpc_mock() -> CatalogMock {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(Mutex::new(Vec::new()));
+        let hits_t = hits.clone();
+        thread::spawn(move || {
+            let mut profile_n = 0u32;
+            for stream in listener.incoming().take(24) {
+                let Ok(mut stream) = stream else { break };
+                let (headers, body) = read_http_request(&mut stream);
+                let has_session = headers.to_ascii_lowercase().contains("x-rt-session:");
+                let parsed: Value = serde_json::from_slice(&body).unwrap_or(json!({}));
+                let method = if headers.starts_with("GET /health") {
+                    "GET /health".to_string()
+                } else {
+                    parsed
+                        .get("method")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("other")
+                        .to_string()
+                };
+                let params = parsed.get("params").cloned().unwrap_or(json!({}));
+                hits_t.lock().unwrap().push(RpcHit {
+                    method: method.clone(),
+                    params: params.clone(),
+                    has_session,
+                });
+                let body = match method.as_str() {
+                    "GET /health" => json!({"ok": true, "hostId": "host-a"}).to_string(),
+                    "handshake" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "hostId": "host-a",
+                            "hostVersion": "0.1.0",
+                            "sessionToken": "tok-1",
+                            "accepted": model_accepted_map(),
+                            "rejected": {}
+                        }
+                    })
+                    .to_string(),
+                    "host.ping" => json!({
+                        "id": "echo",
+                        "ok": { "hostId": "host-a", "now": "2026-08-19T10:00:00Z" }
+                    })
+                    .to_string(),
+                    "agent.switch" => {
+                        let provider = params
+                            .get("provider")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("cli.codex");
+                        json!({
+                            "id": "echo",
+                            "ok": sample_switched_agent("ag-1", provider)
+                        })
+                        .to_string()
+                    }
+                    "profile.create" => {
+                        profile_n += 1;
+                        json!({
+                            "id": "echo",
+                            "ok": {
+                                "id": format!("prof-{profile_n}"),
+                                "name": params.get("name").cloned().unwrap_or(json!("p")),
+                                "provider": params.get("provider").cloned().unwrap_or(json!("cli.codex")),
+                                "model": params.get("model").cloned().unwrap_or(Value::Null),
+                                "effort": params.get("effort").cloned().unwrap_or(Value::Null),
+                                "fast": params.get("fast").cloned().unwrap_or(json!(false)),
+                                "createdAt": "2026-08-19T10:00:00Z",
+                                "updatedAt": "2026-08-19T10:00:00Z"
+                            }
+                        })
+                        .to_string()
+                    }
+                    "profile.list" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "items": [{
+                                "id": "prof-1",
+                                "name": "codex high",
+                                "provider": "cli.codex",
+                                "model": "o3",
+                                "effort": "high",
+                                "fast": false
+                            }]
+                        }
+                    })
+                    .to_string(),
+                    "profile.get" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "id": params.get("profileId").cloned().unwrap_or(json!("prof-1")),
+                            "name": "codex high",
+                            "provider": "cli.codex",
+                            "model": "o3",
+                            "effort": "high",
+                            "fast": false
+                        }
+                    })
+                    .to_string(),
+                    "prefs.get" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "items": [{
+                                "provider": "cli.codex",
+                                "model": "o3",
+                                "effort": "high",
+                                "fast": true
+                            }]
+                        }
+                    })
+                    .to_string(),
+                    _ => json!({
+                        "id": "echo",
+                        "error": { "code": "unsupported_method", "message": "no" }
+                    })
+                    .to_string(),
+                };
+                write_http_json(&mut stream, &body);
+            }
+        });
+        CatalogMock {
+            origin: format!("http://{addr}"),
+            hits,
+        }
+    }
+
+    #[test]
+    fn agent_switch_sends_method_and_params() {
+        let mock = start_model_rpc_mock();
+        let session = connect(&pid("host-a", &mock.origin)).expect("online");
+        assert!(session.model_ux_accepted());
+        let view = session
+            .agent_switch(
+                "ag-1",
+                Some("cli.codex"),
+                Some("o3"),
+                Some("high"),
+                Some(true),
+                None,
+            )
+            .expect("switch");
+        assert_eq!(view.agent.id, "ag-1");
+        assert_eq!(view.agent.provider, "cli.codex");
+        assert_eq!(view.model.as_deref(), Some("o3"));
+        assert_eq!(view.effort.as_deref(), Some("high"));
+        assert!(view.fast);
+        let hit = mock
+            .hits
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|h| h.method == "agent.switch")
+            .cloned()
+            .expect("agent.switch");
+        assert_eq!(hit.params["agentId"], "ag-1");
+        assert_eq!(hit.params["provider"], "cli.codex");
+        assert_eq!(hit.params["model"], "o3");
+        assert_eq!(hit.params["effort"], "high");
+        assert_eq!(hit.params["fast"], true);
+        assert!(hit.params.get("profileId").is_none());
+    }
+
+    #[test]
+    fn profile_create_list_get_and_prefs_rpc() {
+        let mock = start_model_rpc_mock();
+        let session = connect(&pid("host-a", &mock.origin)).expect("online");
+        let created = session
+            .profile_create(
+                "codex high",
+                "cli.codex",
+                Some("o3"),
+                Some("high"),
+                Some(false),
+            )
+            .expect("create");
+        assert_eq!(created.name, "codex high");
+        assert_eq!(created.provider, "cli.codex");
+        let items = session.profile_list().expect("list");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, "prof-1");
+        let got = session.profile_get("prof-1").expect("get");
+        assert_eq!(got.model.as_deref(), Some("o3"));
+        let prefs = session.prefs_get().expect("prefs");
+        assert_eq!(prefs[0].provider, "cli.codex");
+        assert_eq!(prefs[0].model.as_deref(), Some("o3"));
+        assert!(prefs[0].fast);
+        let hits = mock.hits.lock().unwrap().clone();
+        let create = hits
+            .iter()
+            .find(|h| h.method == "profile.create")
+            .expect("profile.create");
+        assert_eq!(create.params["name"], "codex high");
+        assert_eq!(create.params["provider"], "cli.codex");
+        assert_eq!(create.params["model"], "o3");
+        assert!(hits.iter().any(|h| h.method == "profile.list"));
+        assert!(hits.iter().any(|h| h.method == "profile.get"));
+        assert!(hits.iter().any(|h| h.method == "prefs.get"));
     }
 }

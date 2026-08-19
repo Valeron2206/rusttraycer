@@ -17,6 +17,11 @@ use crate::ladder::{
     PUSH_CONFIRM_OK, PUSH_CONFIRM_TITLE, REVERT_BUTTON, STAGE_BUTTON, UNSTAGE_BUTTON,
     YOLO_CONFIRM_BODY, YOLO_CONFIRM_OK, YOLO_CONFIRM_TITLE, YOLO_OFF, YOLO_ON_BUTTON,
 };
+use crate::model_ux::{
+    EFFORT_CHOICES, EFFORT_HINT, EFFORT_LABEL, FAST_LABEL, MODEL_HINT, MODEL_LABEL,
+    MODEL_UNAVAILABLE, PROFILES_LABEL, PROFILE_APPLY, PROFILE_EMPTY, PROFILE_HINT,
+    PROFILE_NAME_HINT, PROFILE_SAVE, SWITCH_BUTTON,
+};
 use crate::rpc::HarnessCapsView;
 use crate::state::{AppState, FileKind, FilePreview};
 use crate::terminal::{
@@ -48,11 +53,24 @@ pub fn show(ctx: &egui::Context, state: &mut AppState) {
                 ui.separator();
                 match state.selected_agent() {
                     Some(agent) => {
-                        ui.label(format!(
-                            "агент: {} · {}",
-                            agent.status.label_ru(),
-                            agent.provider
-                        ));
+                        let model = state
+                            .selected_agent_params()
+                            .and_then(|p| p.model.clone())
+                            .filter(|m| !m.is_empty());
+                        if let Some(model) = model {
+                            ui.label(format!(
+                                "агент: {} · {} · {}",
+                                agent.status.label_ru(),
+                                agent.provider,
+                                model
+                            ));
+                        } else {
+                            ui.label(format!(
+                                "агент: {} · {}",
+                                agent.status.label_ru(),
+                                agent.provider
+                            ));
+                        }
                     }
                     None => {
                         ui.weak("агент не создан");
@@ -304,6 +322,8 @@ fn show_agents(ui: &mut egui::Ui, state: &mut AppState) {
     ui.add_space(4.0);
     show_provider_picker(ui, state);
     ui.add_space(6.0);
+    show_model_ux(ui, state);
+    ui.add_space(6.0);
     show_interface_picker(ui, state);
     ui.add_space(8.0);
     show_policy_controls(ui, state);
@@ -545,6 +565,118 @@ fn show_loop(ui: &mut egui::Ui, state: &mut AppState) {
         ui.label(loop_state.counter_label());
         if let Some(reason) = &loop_state.reason {
             ui.weak(reason);
+        }
+    }
+}
+
+fn show_model_ux(ui: &mut egui::Ui, state: &mut AppState) {
+    let host_ok = state.model_ux_host_ok();
+    ui.add_enabled_ui(host_ok, |ui| {
+        ui.label(MODEL_LABEL);
+        ui.add(
+            egui::TextEdit::singleline(&mut state.picker_model)
+                .desired_width(ui.available_width())
+                .hint_text(MODEL_HINT),
+        );
+        ui.horizontal(|ui| {
+            ui.label(EFFORT_LABEL);
+            let mut effort = state.picker_effort.clone();
+            let effort_text = if effort.is_empty() {
+                EFFORT_HINT.to_string()
+            } else {
+                effort.clone()
+            };
+            egui::ComboBox::from_id_salt("model_effort")
+                .selected_text(effort_text)
+                .show_ui(ui, |ui| {
+                    for choice in EFFORT_CHOICES {
+                        let label = if choice.is_empty() { "—" } else { *choice };
+                        ui.selectable_value(&mut effort, (*choice).to_string(), label);
+                    }
+                });
+            state.picker_effort = effort;
+            ui.checkbox(&mut state.picker_fast, FAST_LABEL);
+        });
+        ui.add_enabled_ui(state.can_switch_agent(), |ui| {
+            if ui
+                .add_sized(
+                    [ui.available_width(), 28.0],
+                    egui::Button::new(SWITCH_BUTTON),
+                )
+                .clicked()
+            {
+                state.switch_selected_agent();
+            }
+        });
+        ui.add_space(6.0);
+        ui.label(PROFILES_LABEL);
+        let profiles: Vec<(String, String)> = state
+            .profiles
+            .iter()
+            .map(|p| (p.id.clone(), p.name.clone()))
+            .collect();
+        let current = state.selected_profile_id.clone();
+        let selected_text = current
+            .as_ref()
+            .and_then(|id| {
+                profiles
+                    .iter()
+                    .find(|(pid, _)| pid == id)
+                    .map(|(_, n)| n.clone())
+            })
+            .unwrap_or_else(|| {
+                if profiles.is_empty() {
+                    PROFILE_EMPTY.into()
+                } else {
+                    PROFILE_HINT.into()
+                }
+            });
+        let mut next = current.clone();
+        egui::ComboBox::from_id_salt("model_profile")
+            .selected_text(selected_text)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut next, None, PROFILE_HINT);
+                for (id, name) in &profiles {
+                    ui.selectable_value(&mut next, Some(id.clone()), name);
+                }
+            });
+        if next != current {
+            state.select_profile(next);
+        }
+        ui.add(
+            egui::TextEdit::singleline(&mut state.profile_name_draft)
+                .desired_width(ui.available_width())
+                .hint_text(PROFILE_NAME_HINT),
+        );
+        ui.add_enabled_ui(state.can_create_profile(), |ui| {
+            if ui
+                .add_sized(
+                    [ui.available_width(), 28.0],
+                    egui::Button::new(PROFILE_SAVE),
+                )
+                .clicked()
+            {
+                state.create_profile_from_picker();
+            }
+        });
+        ui.add_enabled_ui(state.can_apply_profile(), |ui| {
+            if ui
+                .add_sized(
+                    [ui.available_width(), 28.0],
+                    egui::Button::new(PROFILE_APPLY),
+                )
+                .clicked()
+            {
+                state.apply_selected_profile();
+            }
+        });
+    });
+    if state.can_rpc() && !host_ok {
+        ui.weak(MODEL_UNAVAILABLE);
+    }
+    if let Some(status) = state.model_status.clone() {
+        if status != MODEL_UNAVAILABLE {
+            ui.weak(status);
         }
     }
 }

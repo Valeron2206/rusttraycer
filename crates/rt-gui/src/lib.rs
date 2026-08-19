@@ -7,6 +7,7 @@ mod artifacts;
 mod chrome;
 mod discovery;
 mod ladder;
+mod model_ux;
 mod rpc;
 mod screens;
 mod state;
