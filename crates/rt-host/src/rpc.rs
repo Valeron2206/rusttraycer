@@ -87,7 +87,8 @@ async fn rpc_handler(
         tracing::info!(method = %req.method, code = e.code(), "rpc error");
         return (StatusCode::OK, rpc_err(req.id, &e));
     }
-    match dispatch(&state.service, &req.method, req.params).await {
+    let token = session_token(&headers);
+    match dispatch_method(&state.service, &req.method, req.params, token.as_deref()).await {
         Ok(ok) => {
             tracing::info!(method = %req.method, "rpc ok");
             (StatusCode::OK, rpc_ok(req.id, ok))
@@ -99,25 +100,23 @@ async fn rpc_handler(
     }
 }
 
+/// Test helper: dispatch with the ladder off (no session token).
+#[cfg(test)]
 async fn dispatch(svc: &HostService, method: &str, params: Value) -> Result<Value, HostError> {
-    tracing::debug!(method, "dispatch");
-    let result = dispatch_method(svc, method, params).await;
-    match &result {
-        Ok(_) => tracing::debug!(method, "rpc ok"),
-        Err(e) => tracing::info!(method, code = e.code(), "rpc error"),
-    }
-    result
+    dispatch_method(svc, method, params, None).await
 }
 
 async fn dispatch_method(
     svc: &HostService,
     method: &str,
     params: Value,
+    session_token: Option<&str>,
 ) -> Result<Value, HostError> {
+    tracing::debug!(method, "dispatch");
     if !params.is_object() {
         return Err(HostError::InvalidParams("params must be an object".into()));
     }
-    match method {
+    let result = match method {
         "handshake" => {
             let p: HandshakeParams = serde_json::from_value(params)?;
             Ok(serde_json::to_value(svc.handshake(p)?)?)
@@ -199,8 +198,34 @@ async fn dispatch_method(
                 .get("content")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| HostError::InvalidParams("content is required".into()))?;
-            let user = svc.send(agent_id, content)?;
-            Ok(json!({ "userMessage": user }))
+            let ladder = match session_token {
+                Some(t) => svc.session_accepts(t, rt_protocol::METHOD_POLICY_GET)? == Some(true),
+                None => false,
+            };
+            let sent = svc.send_gated(agent_id, content, ladder)?;
+            let mut ok = json!({ "userMessage": sent.user });
+            if let Some(id) = sent.approval_id {
+                ok["approvalId"] = json!(id);
+            }
+            Ok(ok)
+        }
+        "policy.get" => {
+            let p: rt_protocol::PolicyGetParams = serde_json::from_value(params)
+                .map_err(|e| HostError::InvalidParams(e.to_string()))?;
+            tracing::info!("policy.get");
+            Ok(serde_json::to_value(svc.policy_get(&p)?)?)
+        }
+        "policy.set" => {
+            let p: rt_protocol::PolicySetParams = serde_json::from_value(params)
+                .map_err(|e| HostError::InvalidParams(e.to_string()))?;
+            tracing::info!(yolo = p.yolo, "policy.set");
+            Ok(serde_json::to_value(svc.policy_set(&p)?)?)
+        }
+        "approval.respond" => {
+            let p: rt_protocol::ApprovalRespondParams = serde_json::from_value(params)
+                .map_err(|e| HostError::InvalidParams(e.to_string()))?;
+            tracing::info!(approval_id = %p.approval_id, "approval.respond");
+            Ok(serde_json::to_value(svc.approval_respond(&p)?)?)
         }
         "agent.get_context" => {
             let agent_id = params
@@ -284,7 +309,12 @@ async fn dispatch_method(
         "git.status" => Ok(serde_json::to_value(svc.git_status(&params)?)?),
         "git.diff" => Ok(serde_json::to_value(svc.git_diff(&params)?)?),
         other => Err(HostError::UnsupportedMethod(other.to_string())),
+    };
+    match &result {
+        Ok(_) => tracing::debug!(method, "rpc ok"),
+        Err(e) => tracing::info!(method, code = e.code(), "rpc error"),
     }
+    result
 }
 
 fn require_id(params: &Value) -> Result<&str, HostError> {
@@ -323,6 +353,17 @@ pub enum WsEvent {
         #[serde(rename = "hostId")]
         host_id: String,
     },
+    #[serde(rename = "agent.approval")]
+    AgentApproval {
+        #[serde(rename = "approvalId")]
+        approval_id: String,
+        #[serde(rename = "agentId")]
+        agent_id: String,
+        #[serde(rename = "taskId")]
+        task_id: String,
+        kind: String,
+        summary: String,
+    },
 }
 
 impl WsEvent {
@@ -354,11 +395,28 @@ impl WsEvent {
         }
     }
 
+    pub fn agent_approval(
+        approval_id: &str,
+        agent_id: &str,
+        task_id: &str,
+        kind: &str,
+        summary: &str,
+    ) -> Self {
+        Self::AgentApproval {
+            approval_id: approval_id.to_string(),
+            agent_id: agent_id.to_string(),
+            task_id: task_id.to_string(),
+            kind: kind.to_string(),
+            summary: summary.to_string(),
+        }
+    }
+
     pub fn task_id(&self) -> Option<&str> {
         match self {
             Self::AgentMessage { task_id, .. }
             | Self::AgentStatus { task_id, .. }
-            | Self::TaskUpdated { task_id } => Some(task_id.as_str()),
+            | Self::TaskUpdated { task_id }
+            | Self::AgentApproval { task_id, .. } => Some(task_id.as_str()),
             Self::HostGoingAway { .. } => None,
         }
     }
@@ -724,6 +782,16 @@ mod tests {
         let v = serde_json::to_value(&e).unwrap();
         assert_eq!(v["event"], "host.going_away");
         assert_eq!(v["hostId"], "h");
+        let e = WsEvent::agent_approval("ap1", "a", "t", "exec", "spawn cli.generic");
+        assert_eq!(e.task_id(), Some("t"));
+        let v = serde_json::to_value(&e).unwrap();
+        assert_eq!(v["event"], "agent.approval");
+        assert_eq!(v["approvalId"], "ap1");
+        assert_eq!(v["agentId"], "a");
+        assert_eq!(v["taskId"], "t");
+        assert_eq!(v["kind"], "exec");
+        assert_eq!(v["summary"], "spawn cli.generic");
+        assert!(v.get("type").is_none());
     }
 
     #[tokio::test]

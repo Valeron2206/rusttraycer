@@ -1,9 +1,10 @@
-//! Per-method {major,minor} negotiation. Host supports all MVP methods at 1.0.
+//! Per-method {major,minor} negotiation. Existing methods stay 1.0; policy.* is 1.1.
 
 use std::collections::BTreeMap;
 
 use rt_protocol::{
-    host_method_version, ClientHello, MethodVersion, RejectedMethod, ServerHello, TRADABLE_METHODS,
+    host_method_version, method_version, ClientHello, MethodVersion, RejectedMethod, ServerHello,
+    TRADABLE_METHODS,
 };
 
 pub const HOST_VERSION: &str = rt_protocol::CRATE_VERSION;
@@ -32,7 +33,7 @@ pub fn host_knows(name: &str) -> bool {
 pub fn host_methods() -> BTreeMap<String, MethodVersion> {
     TRADABLE_METHODS
         .iter()
-        .map(|m| ((*m).to_string(), host_method_version()))
+        .filter_map(|m| method_version(m).map(|v| ((*m).to_string(), v)))
         .collect()
 }
 
@@ -167,6 +168,32 @@ mod tests {
         assert!(acc.is_empty());
         assert_eq!(rej["handshake"].reason, "unsupported");
     }
+    #[test]
+    fn policy_methods_accepted_at_1_1() {
+        let mut client = BTreeMap::new();
+        client.insert("policy.get".into(), MethodVersion { major: 1, minor: 1 });
+        client.insert("policy.set".into(), MethodVersion { major: 1, minor: 1 });
+        client.insert(
+            "approval.respond".into(),
+            MethodVersion { major: 1, minor: 1 },
+        );
+        client.insert("leftover.foo".into(), MethodVersion { major: 1, minor: 0 });
+        let (acc, rej) = negotiate(&client);
+        assert_eq!(acc["policy.get"], MethodVersion { major: 1, minor: 1 });
+        assert_eq!(acc["policy.set"], MethodVersion { major: 1, minor: 1 });
+        assert_eq!(
+            acc["approval.respond"],
+            MethodVersion { major: 1, minor: 1 }
+        );
+        assert_eq!(rej["leftover.foo"].reason, "unsupported");
+
+        let mut older = BTreeMap::new();
+        older.insert("policy.get".into(), MethodVersion { major: 1, minor: 0 });
+        let (acc, rej) = negotiate(&older);
+        assert!(rej.is_empty(), "{rej:?}");
+        assert_eq!(acc["policy.get"], MethodVersion { major: 1, minor: 1 });
+    }
+
     #[test]
     fn helpers_expose_supported_methods() {
         let v = host_method_version_local();

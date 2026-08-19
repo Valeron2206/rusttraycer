@@ -5,7 +5,11 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use rt_protocol::CancelOk;
+use rt_protocol::{
+    ApprovalDecision, ApprovalRespondOk, ApprovalRespondParams, CancelOk,
+    HarnessCaps as HarnessCapsWire, PolicyGetParams, PolicyMode, PolicyScope, PolicySetParams,
+    PolicySource, PolicyView,
+};
 use rt_runtime::{AgentBackend, TurnRequest, WireMessage, WireRole};
 use rt_storage::{
     Agent, AgentStatus, HarnessId, Message, MessageRole, Store, Task, TaskFilter, TaskStatus,
@@ -28,6 +32,27 @@ struct Session {
     accepted: HashSet<String>,
 }
 
+#[derive(Clone, Debug)]
+struct PendingApproval {
+    approval_id: String,
+    agent_id: String,
+    task_id: String,
+    kind: String,
+    summary: String,
+}
+
+#[derive(Default)]
+struct LadderState {
+    pending_by_id: HashMap<String, PendingApproval>,
+    pending_by_agent: HashMap<String, String>,
+    applied: HashSet<String>,
+}
+
+pub struct SendOutcome {
+    pub user: rt_storage::Message,
+    pub approval_id: Option<String>,
+}
+
 #[derive(Clone)]
 pub struct HostService {
     pub store: Store,
@@ -36,6 +61,7 @@ pub struct HostService {
     turn_gate: Arc<Mutex<()>>,
     events: tokio::sync::broadcast::Sender<WsEvent>,
     sessions: Arc<Mutex<HashMap<String, Session>>>,
+    ladder: Arc<Mutex<LadderState>>,
     host_id: String,
     pub(crate) data_dir: std::path::PathBuf,
     db_path: std::path::PathBuf,
@@ -58,6 +84,7 @@ pub struct ProviderInfo {
     pub id: String,
     pub available: bool,
     pub detail: String,
+    pub caps: HarnessCapsWire,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -89,6 +116,7 @@ pub struct AgentView {
     pub run_location: String,
     pub created_at: String,
     pub last_message_at: Option<String>,
+    pub yolo: bool,
 }
 
 impl From<Agent> for AgentView {
@@ -104,8 +132,38 @@ impl From<Agent> for AgentView {
             run_location: a.run_location,
             created_at: a.created_at,
             last_message_at: None,
+            yolo: false,
         }
     }
+}
+
+fn harness_caps_wire(caps: rt_runtime::HarnessCaps) -> HarnessCapsWire {
+    HarnessCapsWire {
+        one_shot: caps.one_shot,
+        long_lived: caps.long_lived,
+        stream_tokens: caps.stream_tokens,
+        tools: caps.tools,
+        session_resume: caps.session_resume,
+        a2a_inbox: caps.a2a_inbox,
+        pty: caps.pty,
+        needs_api_key: caps.needs_api_key,
+        api_key_env: caps.api_key_env.map(str::to_string),
+    }
+}
+
+fn policy_view_from_row(row: &rt_storage::PolicyRow, source: PolicySource) -> Result<PolicyView> {
+    let mode = PolicyMode::parse(&row.mode).ok_or_else(|| {
+        HostError::Internal(format!("stored policy mode is invalid: {}", row.mode))
+    })?;
+    let scope = PolicyScope::parse(&row.scope).ok_or_else(|| {
+        HostError::Internal(format!("stored policy scope is invalid: {}", row.scope))
+    })?;
+    Ok(PolicyView {
+        mode,
+        scope,
+        yolo: row.yolo,
+        source,
+    })
 }
 
 fn check_title(title: &str) -> Result<()> {
@@ -137,6 +195,7 @@ impl HostService {
             turn_gate: Arc::new(Mutex::new(())),
             events,
             sessions: Arc::new(Mutex::new(HashMap::new())),
+            ladder: Arc::new(Mutex::new(LadderState::default())),
             host_id,
             data_dir,
             db_path,
@@ -228,6 +287,7 @@ impl HostService {
                     id: backend.id().to_string(),
                     available: avail.available,
                     detail: avail.detail,
+                    caps: harness_caps_wire(backend.caps()),
                 }
             })
             .collect();
@@ -349,6 +409,7 @@ impl HostService {
             .ok_or_else(|| HostError::NotFound(format!("agent {id}")))?;
         let mut view = AgentView::from(agent);
         view.last_message_at = self.store.last_message_at(id)?;
+        view.yolo = self.resolve_policy_for_agent(id)?.yolo;
         Ok(view)
     }
 
@@ -396,8 +457,12 @@ impl HostService {
         files::files_read(&self.store, &p)
     }
 
-    /// Durable user message + spawn turn. Returns the user Message.
+    /// Durable user message + spawn turn. Ladder off — existing callers stay green.
     pub fn send(&self, agent_id: &str, content: &str) -> Result<Message> {
+        Ok(self.send_gated(agent_id, content, false)?.user)
+    }
+
+    pub fn send_gated(&self, agent_id: &str, content: &str, ladder: bool) -> Result<SendOutcome> {
         if content.len() > MAX_CONTENT {
             return Err(HostError::InvalidParams("content exceeds 1 MiB".into()));
         }
@@ -415,21 +480,11 @@ impl HostService {
             .agent_get(agent_id)?
             .ok_or_else(|| HostError::NotFound(format!("agent {agent_id}")))?;
 
-        if agent.status == AgentStatus::Running || self.inflight.contains(agent_id)? {
+        if agent.status == AgentStatus::Running
+            || self.inflight.contains(agent_id)?
+            || self.has_pending_locked(agent_id)?
+        {
             return Err(HostError::AgentBusy);
-        }
-
-        // HashMap lookup, no match on provider. caps() ignored in MVP.
-        let backend = self
-            .backends
-            .get(agent.provider.as_str())
-            .cloned()
-            .ok_or_else(|| {
-                HostError::Internal(format!("no backend registered for {}", agent.provider))
-            })?;
-        let avail = backend.available();
-        if !avail.available {
-            return Err(HostError::Internal(avail.detail));
         }
 
         let task = self
@@ -445,82 +500,62 @@ impl HostService {
             .workspace_get(ws_id)?
             .ok_or_else(|| HostError::NotFound(format!("workspace {ws_id}")))?;
 
-        let gen = self.inflight.reserve(agent_id)?;
-
-        let user = match self
-            .store
-            .message_append(agent_id, MessageRole::User, content)
-        {
-            Ok(user) => user,
-            Err(e) => {
-                self.inflight.remove_if(agent_id, gen);
-                return Err(e.into());
+        if ladder {
+            let view = self.resolve_policy_for_agent(agent_id)?;
+            if !view.yolo && view.mode == PolicyMode::Deny {
+                tracing::info!(agent_id, "policy deny");
+                return Err(HostError::Denied);
             }
-        };
-        if let Err(e) = self.store.agent_set_status(agent_id, AgentStatus::Running) {
-            self.inflight.remove_if(agent_id, gen);
-            return Err(e.into());
-        }
-        if let Err(e) = self.store.task_touch(&task.id) {
-            tracing::warn!(task_id = %task.id, error = %e, "task_touch failed");
-        }
-        let _ = self.events.send(WsEvent::agent_status(
-            &task.id,
-            agent_id,
-            AgentStatus::Running,
-        ));
-        let _ = self
-            .events
-            .send(WsEvent::agent_message(&task.id, agent_id, user.clone()));
-        let _ = self.events.send(WsEvent::task_updated(&task.id));
-
-        let messages = match self.store.message_list(agent_id) {
-            Ok(list) => list
-                .into_iter()
-                .map(|m| WireMessage {
-                    role: match m.role {
-                        MessageRole::User => WireRole::User,
-                        MessageRole::Assistant => WireRole::Assistant,
-                        MessageRole::System => WireRole::System,
-                        MessageRole::Tool => WireRole::Tool,
-                    },
-                    content: m.content,
-                })
-                .collect(),
-            Err(e) => {
-                self.inflight.remove_if(agent_id, gen);
-                return Err(e.into());
+            if !view.yolo && view.mode == PolicyMode::Ask {
+                let backend = self.lookup_backend(&agent)?;
+                let avail = backend.available();
+                if !avail.available {
+                    return Err(HostError::Internal(avail.detail));
+                }
+                let user = self
+                    .store
+                    .message_append(agent_id, MessageRole::User, content)?;
+                let _ = self
+                    .events
+                    .send(WsEvent::agent_message(&task.id, agent_id, user.clone()));
+                let _ = self.events.send(WsEvent::task_updated(&task.id));
+                let approval_id = rt_storage::new_id();
+                let summary = format!("spawn {}", agent.provider);
+                self.store_pending(PendingApproval {
+                    approval_id: approval_id.clone(),
+                    agent_id: agent_id.to_string(),
+                    task_id: task.id.clone(),
+                    kind: "exec".into(),
+                    summary: summary.clone(),
+                })?;
+                let _ = self.events.send(WsEvent::agent_approval(
+                    &approval_id,
+                    agent_id,
+                    &task.id,
+                    "exec",
+                    &summary,
+                ));
+                tracing::info!(agent_id, approval_id = %approval_id, "approval pending");
+                return Ok(SendOutcome {
+                    user,
+                    approval_id: Some(approval_id),
+                });
             }
-        };
+        }
 
-        let req = TurnRequest {
-            agent_id: agent_id.to_string(),
-            task_id: task.id.clone(),
-            workspace_path: workspace.path.into(),
-            messages,
-            extra_env: {
-                let mut env = BTreeMap::new();
-                env.insert("RUSTTRAYCER_AGENT_ID".into(), agent_id.to_string());
-                env.insert("RUSTTRAYCER_TASK_ID".into(), task.id.clone());
-                env
-            },
-        };
+        let backend = self.lookup_backend(&agent)?;
+        let avail = backend.available();
+        if !avail.available {
+            return Err(HostError::Internal(avail.detail));
+        }
 
+        let user =
+            self.append_user_and_spawn(agent_id, content, &task, workspace.path.into(), backend)?;
         drop(gate);
-
-        let handle = supervisor::spawn_turn(supervisor::SpawnTurn {
-            store: self.store.clone(),
-            backend,
-            req,
-            agent_id: agent_id.to_string(),
-            task_id: task.id,
-            events: self.events.clone(),
-            inflight: self.inflight.clone(),
-            gen,
-            timeout: self.turn_timeout,
-        });
-        self.inflight.attach(agent_id, gen, handle);
-        Ok(user)
+        Ok(SendOutcome {
+            user,
+            approval_id: None,
+        })
     }
 
     /// Cancel an inflight turn. Idempotent: idle/error/finished -> cancelled false.
@@ -538,6 +573,14 @@ impl HostService {
             .store
             .agent_get(agent_id)?
             .ok_or_else(|| HostError::NotFound(format!("agent {agent_id}")))?;
+
+        if self.clear_pending_for_agent(agent_id)? {
+            tracing::info!(agent_id, "cancel pending approval");
+            return Ok(CancelOk {
+                agent_id: agent_id.to_string(),
+                cancelled: true,
+            });
+        }
 
         let has_inflight = self.inflight.contains(agent_id)?;
         if !has_inflight && agent.status != AgentStatus::Running {
@@ -571,6 +614,380 @@ impl HostService {
 
     pub fn going_away(&self) {
         let _ = self.events.send(WsEvent::host_going_away(&self.host_id));
+    }
+
+    pub fn policy_get(&self, params: &PolicyGetParams) -> Result<PolicyView> {
+        match (params.agent_id.as_deref(), params.workspace_id.as_deref()) {
+            (Some(agent_id), None) => {
+                if self.store.agent_get(agent_id)?.is_none() {
+                    return Err(HostError::NotFound(format!("agent {agent_id}")));
+                }
+                self.resolve_policy_for_agent(agent_id)
+            }
+            (None, Some(workspace_id)) => {
+                if self.store.workspace_get(workspace_id)?.is_none() {
+                    return Err(HostError::NotFound(format!("workspace {workspace_id}")));
+                }
+                self.resolve_policy_for_workspace(workspace_id)
+            }
+            _ => Err(HostError::InvalidParams(
+                "exactly one of agentId / workspaceId is required".into(),
+            )),
+        }
+    }
+
+    pub fn policy_set(&self, params: &PolicySetParams) -> Result<PolicyView> {
+        match params.scope {
+            PolicyScope::Agent => {
+                let agent_id = params.agent_id.as_deref().ok_or_else(|| {
+                    HostError::InvalidParams("scope=agent requires agentId".into())
+                })?;
+                if params.workspace_id.is_some() {
+                    return Err(HostError::InvalidParams(
+                        "exactly one of agentId / workspaceId is required".into(),
+                    ));
+                }
+                if self.store.agent_get(agent_id)?.is_none() {
+                    return Err(HostError::NotFound(format!("agent {agent_id}")));
+                }
+                let row = self.store.policy_upsert(
+                    Some(agent_id),
+                    None,
+                    params.mode.as_str(),
+                    "agent",
+                    params.yolo,
+                )?;
+                tracing::info!(agent_id, mode = %row.mode, yolo = row.yolo, "policy.set agent");
+                policy_view_from_row(&row, PolicySource::Agent)
+            }
+            PolicyScope::Workspace => {
+                let workspace_id = params.workspace_id.as_deref().ok_or_else(|| {
+                    HostError::InvalidParams("scope=workspace requires workspaceId".into())
+                })?;
+                if params.agent_id.is_some() {
+                    return Err(HostError::InvalidParams(
+                        "exactly one of agentId / workspaceId is required".into(),
+                    ));
+                }
+                if self.store.workspace_get(workspace_id)?.is_none() {
+                    return Err(HostError::NotFound(format!("workspace {workspace_id}")));
+                }
+                let row = self.store.policy_upsert(
+                    None,
+                    Some(workspace_id),
+                    params.mode.as_str(),
+                    "workspace",
+                    params.yolo,
+                )?;
+                tracing::info!(
+                    workspace_id,
+                    mode = %row.mode,
+                    yolo = row.yolo,
+                    "policy.set workspace"
+                );
+                policy_view_from_row(&row, PolicySource::Workspace)
+            }
+        }
+    }
+
+    pub fn approval_respond(&self, params: &ApprovalRespondParams) -> Result<ApprovalRespondOk> {
+        let _gate = self
+            .turn_gate
+            .lock()
+            .map_err(|_| HostError::Internal("turn_gate poisoned".into()))?;
+
+        {
+            let g = self
+                .ladder
+                .lock()
+                .map_err(|_| HostError::Internal("ladder lock poisoned".into()))?;
+            if g.applied.contains(&params.approval_id) {
+                return Ok(ApprovalRespondOk { applied: false });
+            }
+        }
+
+        let pending = self.take_pending(&params.approval_id)?;
+        let Some(pending) = pending else {
+            return Err(HostError::ApprovalExpired);
+        };
+
+        let result = match params.decision {
+            ApprovalDecision::Deny => {
+                tracing::info!(approval_id = %params.approval_id, "approval deny");
+                Ok(())
+            }
+            ApprovalDecision::AllowOnce => {
+                tracing::info!(
+                    approval_id = %params.approval_id,
+                    kind = %pending.kind,
+                    summary = %pending.summary,
+                    task_id = %pending.task_id,
+                    "approval allow-once"
+                );
+                self.start_saved_turn(&pending)
+            }
+            ApprovalDecision::AllowAlways => {
+                tracing::info!(
+                    approval_id = %params.approval_id,
+                    kind = %pending.kind,
+                    summary = %pending.summary,
+                    task_id = %pending.task_id,
+                    "approval allow-always"
+                );
+                let existing = self.store.policy_get_for_agent(&pending.agent_id)?;
+                let yolo = existing.map(|r| r.yolo).unwrap_or(false);
+                self.store.policy_upsert(
+                    Some(&pending.agent_id),
+                    None,
+                    PolicyMode::AllowAlways.as_str(),
+                    "agent",
+                    yolo,
+                )?;
+                self.start_saved_turn(&pending)
+            }
+        };
+        if let Err(e) = result {
+            self.store_pending(pending)?;
+            return Err(e);
+        }
+
+        let mut g = self
+            .ladder
+            .lock()
+            .map_err(|_| HostError::Internal("ladder lock poisoned".into()))?;
+        g.applied.insert(params.approval_id.clone());
+        Ok(ApprovalRespondOk { applied: true })
+    }
+
+    fn resolve_policy_for_agent(&self, agent_id: &str) -> Result<PolicyView> {
+        if let Some(row) = self.store.policy_get_for_agent(agent_id)? {
+            return policy_view_from_row(&row, PolicySource::Agent);
+        }
+        let agent = self
+            .store
+            .agent_get(agent_id)?
+            .ok_or_else(|| HostError::NotFound(format!("agent {agent_id}")))?;
+        let task = self
+            .store
+            .task_get(&agent.task_id)?
+            .ok_or_else(|| HostError::NotFound(format!("task {}", agent.task_id)))?;
+        if let Some(ws_id) = task.workspace_ids.first() {
+            if let Some(row) = self.store.policy_get_for_workspace(ws_id)? {
+                return policy_view_from_row(&row, PolicySource::Workspace);
+            }
+        }
+        Ok(PolicyView {
+            mode: PolicyMode::Ask,
+            scope: PolicyScope::Agent,
+            yolo: false,
+            source: PolicySource::Default,
+        })
+    }
+
+    fn resolve_policy_for_workspace(&self, workspace_id: &str) -> Result<PolicyView> {
+        if let Some(row) = self.store.policy_get_for_workspace(workspace_id)? {
+            return policy_view_from_row(&row, PolicySource::Workspace);
+        }
+        Ok(PolicyView {
+            mode: PolicyMode::Ask,
+            scope: PolicyScope::Workspace,
+            yolo: false,
+            source: PolicySource::Default,
+        })
+    }
+
+    fn lookup_backend(&self, agent: &Agent) -> Result<Arc<dyn AgentBackend>> {
+        self.backends
+            .get(agent.provider.as_str())
+            .cloned()
+            .ok_or_else(|| {
+                HostError::Internal(format!("no backend registered for {}", agent.provider))
+            })
+    }
+
+    fn has_pending_locked(&self, agent_id: &str) -> Result<bool> {
+        let g = self
+            .ladder
+            .lock()
+            .map_err(|_| HostError::Internal("ladder lock poisoned".into()))?;
+        Ok(g.pending_by_agent.contains_key(agent_id))
+    }
+
+    fn store_pending(&self, pending: PendingApproval) -> Result<()> {
+        let mut g = self
+            .ladder
+            .lock()
+            .map_err(|_| HostError::Internal("ladder lock poisoned".into()))?;
+        g.pending_by_agent
+            .insert(pending.agent_id.clone(), pending.approval_id.clone());
+        g.pending_by_id.insert(pending.approval_id.clone(), pending);
+        Ok(())
+    }
+
+    fn take_pending(&self, approval_id: &str) -> Result<Option<PendingApproval>> {
+        let mut g = self
+            .ladder
+            .lock()
+            .map_err(|_| HostError::Internal("ladder lock poisoned".into()))?;
+        let pending = g.pending_by_id.remove(approval_id);
+        if let Some(ref p) = pending {
+            g.pending_by_agent.remove(&p.agent_id);
+        }
+        Ok(pending)
+    }
+
+    fn clear_pending_for_agent(&self, agent_id: &str) -> Result<bool> {
+        let mut g = self
+            .ladder
+            .lock()
+            .map_err(|_| HostError::Internal("ladder lock poisoned".into()))?;
+        if let Some(id) = g.pending_by_agent.remove(agent_id) {
+            g.pending_by_id.remove(&id);
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    fn append_user_and_spawn(
+        &self,
+        agent_id: &str,
+        content: &str,
+        task: &Task,
+        workspace_path: std::path::PathBuf,
+        backend: Arc<dyn AgentBackend>,
+    ) -> Result<Message> {
+        let gen = self.inflight.reserve(agent_id)?;
+        let user = match self
+            .store
+            .message_append(agent_id, MessageRole::User, content)
+        {
+            Ok(user) => user,
+            Err(e) => {
+                self.inflight.remove_if(agent_id, gen);
+                return Err(e.into());
+            }
+        };
+        if let Err(e) = self.spawn_reserved_turn(
+            agent_id,
+            &task.id,
+            workspace_path,
+            backend,
+            gen,
+            Some(user.clone()),
+        ) {
+            self.inflight.remove_if(agent_id, gen);
+            return Err(e);
+        }
+        Ok(user)
+    }
+
+    fn start_saved_turn(&self, pending: &PendingApproval) -> Result<()> {
+        let agent = self
+            .store
+            .agent_get(&pending.agent_id)?
+            .ok_or_else(|| HostError::NotFound(format!("agent {}", pending.agent_id)))?;
+        if agent.status == AgentStatus::Running || self.inflight.contains(&pending.agent_id)? {
+            return Err(HostError::AgentBusy);
+        }
+        let backend = self.lookup_backend(&agent)?;
+        let avail = backend.available();
+        if !avail.available {
+            return Err(HostError::Internal(avail.detail));
+        }
+        let task = self
+            .store
+            .task_get(&agent.task_id)?
+            .ok_or_else(|| HostError::NotFound(format!("task {}", agent.task_id)))?;
+        let ws_id = task
+            .workspace_ids
+            .first()
+            .ok_or_else(|| HostError::Internal("task has no workspace".into()))?;
+        let workspace = self
+            .store
+            .workspace_get(ws_id)?
+            .ok_or_else(|| HostError::NotFound(format!("workspace {ws_id}")))?;
+        let gen = self.inflight.reserve(&pending.agent_id)?;
+        if let Err(e) = self.spawn_reserved_turn(
+            &pending.agent_id,
+            &task.id,
+            workspace.path.into(),
+            backend,
+            gen,
+            None,
+        ) {
+            self.inflight.remove_if(&pending.agent_id, gen);
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    fn spawn_reserved_turn(
+        &self,
+        agent_id: &str,
+        task_id: &str,
+        workspace_path: std::path::PathBuf,
+        backend: Arc<dyn AgentBackend>,
+        gen: u64,
+        user: Option<Message>,
+    ) -> Result<()> {
+        self.store
+            .agent_set_status(agent_id, AgentStatus::Running)?;
+        if let Err(e) = self.store.task_touch(task_id) {
+            tracing::warn!(task_id, error = %e, "task_touch failed");
+        }
+        let _ = self.events.send(WsEvent::agent_status(
+            task_id,
+            agent_id,
+            AgentStatus::Running,
+        ));
+        if let Some(user) = user {
+            let _ = self
+                .events
+                .send(WsEvent::agent_message(task_id, agent_id, user));
+        }
+        let _ = self.events.send(WsEvent::task_updated(task_id));
+
+        let messages = self
+            .store
+            .message_list(agent_id)?
+            .into_iter()
+            .map(|m| WireMessage {
+                role: match m.role {
+                    MessageRole::User => WireRole::User,
+                    MessageRole::Assistant => WireRole::Assistant,
+                    MessageRole::System => WireRole::System,
+                    MessageRole::Tool => WireRole::Tool,
+                },
+                content: m.content,
+            })
+            .collect();
+
+        let req = TurnRequest {
+            agent_id: agent_id.to_string(),
+            task_id: task_id.to_string(),
+            workspace_path,
+            messages,
+            extra_env: {
+                let mut env = BTreeMap::new();
+                env.insert("RUSTTRAYCER_AGENT_ID".into(), agent_id.to_string());
+                env.insert("RUSTTRAYCER_TASK_ID".into(), task_id.to_string());
+                env
+            },
+        };
+
+        let handle = supervisor::spawn_turn(supervisor::SpawnTurn {
+            store: self.store.clone(),
+            backend,
+            req,
+            agent_id: agent_id.to_string(),
+            task_id: task_id.to_string(),
+            events: self.events.clone(),
+            inflight: self.inflight.clone(),
+            gen,
+            timeout: self.turn_timeout,
+        });
+        self.inflight.attach(agent_id, gen, handle);
+        Ok(())
     }
 }
 

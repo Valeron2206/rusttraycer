@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 const MIGRATION_0001: &str = include_str!("../migrations/0001_init.sql");
 const MIGRATION_0002: &str = include_str!("../migrations/0002_worktrees.sql");
+const MIGRATION_0003: &str = include_str!("../migrations/0003_policies.sql");
 
 /// RFC3339 UTC timestamp (millis, Z suffix).
 pub fn now_rfc3339() -> String {
@@ -272,6 +273,18 @@ pub struct Counts {
     pub agent_count: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PolicyRow {
+    pub id: String,
+    pub workspace_id: Option<String>,
+    pub agent_id: Option<String>,
+    pub mode: String,
+    pub scope: String,
+    pub yolo: bool,
+    pub updated_at: String,
+}
+
 /// Single-writer SQLite store. Cheap to clone (`Arc<Mutex<Connection>>`).
 #[derive(Clone)]
 pub struct Store {
@@ -346,13 +359,19 @@ impl Store {
         match current.as_deref() {
             Some("1") => {
                 conn.execute_batch(MIGRATION_0002)?;
+                conn.execute_batch(MIGRATION_0003)?;
                 Ok(())
             }
-            Some("2") => Ok(()),
+            Some("2") => {
+                conn.execute_batch(MIGRATION_0003)?;
+                Ok(())
+            }
+            Some("3") => Ok(()),
             Some(other) => Err(StorageError::UnsupportedSchema(other.to_string())),
             None => {
                 conn.execute_batch(MIGRATION_0001)?;
                 conn.execute_batch(MIGRATION_0002)?;
+                conn.execute_batch(MIGRATION_0003)?;
                 Ok(())
             }
         }
@@ -740,6 +759,97 @@ impl Store {
         })
     }
 
+    pub fn policy_get_for_agent(&self, agent_id: &str) -> Result<Option<PolicyRow>> {
+        let conn = self.lock()?;
+        conn.query_row(
+            "SELECT id, workspace_id, agent_id, mode, scope, yolo, updated_at \
+             FROM policies WHERE agent_id = ?1",
+            [agent_id],
+            map_policy,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    pub fn policy_get_for_workspace(&self, workspace_id: &str) -> Result<Option<PolicyRow>> {
+        let conn = self.lock()?;
+        conn.query_row(
+            "SELECT id, workspace_id, agent_id, mode, scope, yolo, updated_at \
+             FROM policies WHERE workspace_id = ?1",
+            [workspace_id],
+            map_policy,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    /// Insert or replace the unique policy row for the given agent xor workspace.
+    pub fn policy_upsert(
+        &self,
+        agent_id: Option<&str>,
+        workspace_id: Option<&str>,
+        mode: &str,
+        scope: &str,
+        yolo: bool,
+    ) -> Result<PolicyRow> {
+        match (agent_id, workspace_id) {
+            (Some(_), None) | (None, Some(_)) => {}
+            _ => {
+                return Err(StorageError::InvalidParams(
+                    "exactly one of agent_id / workspace_id is required".into(),
+                ));
+            }
+        }
+        if !matches!(mode, "ask" | "allow-always" | "deny") {
+            return Err(StorageError::InvalidParams(format!(
+                "mode must be ask|allow-always|deny, got {mode}"
+            )));
+        }
+        if !matches!(scope, "agent" | "workspace") {
+            return Err(StorageError::InvalidParams(format!(
+                "scope must be agent|workspace, got {scope}"
+            )));
+        }
+        let updated_at = now_rfc3339();
+        let yolo_i = i64::from(yolo);
+        let existing = if let Some(aid) = agent_id {
+            self.policy_get_for_agent(aid)?
+        } else if let Some(wid) = workspace_id {
+            self.policy_get_for_workspace(wid)?
+        } else {
+            None
+        };
+        let id = match existing {
+            Some(row) => {
+                let conn = self.lock()?;
+                conn.execute(
+                    "UPDATE policies SET mode = ?1, scope = ?2, yolo = ?3, updated_at = ?4 WHERE id = ?5",
+                    params![mode, scope, yolo_i, updated_at, row.id],
+                )?;
+                row.id
+            }
+            None => {
+                let id = new_id();
+                let conn = self.lock()?;
+                conn.execute(
+                    "INSERT INTO policies (id, workspace_id, agent_id, mode, scope, yolo, updated_at) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![id, workspace_id, agent_id, mode, scope, yolo_i, updated_at],
+                )?;
+                id
+            }
+        };
+        Ok(PolicyRow {
+            id,
+            workspace_id: workspace_id.map(str::to_string),
+            agent_id: agent_id.map(str::to_string),
+            mode: mode.to_string(),
+            scope: scope.to_string(),
+            yolo,
+            updated_at,
+        })
+    }
+
     pub fn worktree_get_by_agent(&self, agent_id: &str) -> Result<Option<Worktree>> {
         let conn = self.lock()?;
         conn.query_row(
@@ -886,6 +996,19 @@ fn map_worktree(r: &rusqlite::Row<'_>) -> rusqlite::Result<Worktree> {
         path: r.get(3)?,
         branch: r.get(4)?,
         created_at: r.get(5)?,
+    })
+}
+
+fn map_policy(r: &rusqlite::Row<'_>) -> rusqlite::Result<PolicyRow> {
+    let yolo_i: i64 = r.get(5)?;
+    Ok(PolicyRow {
+        id: r.get(0)?,
+        workspace_id: r.get(1)?,
+        agent_id: r.get(2)?,
+        mode: r.get(3)?,
+        scope: r.get(4)?,
+        yolo: yolo_i != 0,
+        updated_at: r.get(6)?,
     })
 }
 
@@ -1065,14 +1188,14 @@ mod tests {
     }
 
     #[test]
-    fn schema_greater_than_one_refuses() {
+    fn schema_greater_than_current_refuses() {
         let dir = tempdir().unwrap();
         let db = dir.path().join("host.db");
         let store = Store::open(&db).unwrap();
         {
             let conn = store.lock().unwrap();
             conn.execute(
-                "UPDATE schema_meta SET value = '3' WHERE key = 'schema'",
+                "UPDATE schema_meta SET value = '4' WHERE key = 'schema'",
                 [],
             )
             .unwrap();
@@ -1081,7 +1204,7 @@ mod tests {
         let err = Store::open(&db).unwrap_err();
         assert_eq!(err.code(), "internal");
         match &err {
-            StorageError::UnsupportedSchema(v) => assert_eq!(v, "3"),
+            StorageError::UnsupportedSchema(v) => assert_eq!(v, "4"),
             other => panic!("expected UnsupportedSchema, got {other:?}"),
         }
     }
@@ -1150,7 +1273,7 @@ mod tests {
     }
 
     #[test]
-    fn fresh_db_is_schema_two() {
+    fn fresh_db_is_schema_three() {
         let (_tmp, store) = open_store();
         let conn = rusqlite::Connection::open(store.path()).unwrap();
         let schema: String = conn
@@ -1160,10 +1283,18 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(schema, "2");
+        assert_eq!(schema, "3");
         let n: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'worktrees'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1);
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'policies'",
                 [],
                 |r| r.get(0),
             )
@@ -1204,7 +1335,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(schema, "2");
+        assert_eq!(schema, "3");
         let n: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'worktrees'",
@@ -1484,5 +1615,184 @@ mod tests {
             "not_found"
         );
         store.agent_set_run_location(&agent.id, "local").unwrap();
+    }
+
+    #[test]
+    fn migration_0003_matches_contract() {
+        assert!(MIGRATION_0003.contains("CREATE TABLE policies"));
+        assert!(MIGRATION_0003.contains("CHECK (mode IN ('ask', 'allow-always', 'deny'))"));
+        assert!(MIGRATION_0003.contains("CHECK (scope IN ('agent', 'workspace'))"));
+        assert!(MIGRATION_0003.contains("CHECK (yolo IN (0, 1))"));
+        assert!(MIGRATION_0003.contains("WHERE agent_id IS NOT NULL"));
+        assert!(MIGRATION_0003.contains("WHERE workspace_id IS NOT NULL"));
+        assert!(MIGRATION_0003
+            .contains("INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('schema', '3')"));
+        assert!(!MIGRATION_0003.contains("ON DELETE CASCADE"));
+        assert!(!MIGRATION_0003.to_lowercase().contains("secret"));
+        assert!(!MIGRATION_0001.contains("CREATE TABLE policies"));
+        assert!(!MIGRATION_0002.contains("CREATE TABLE policies"));
+    }
+
+    #[test]
+    fn migrate_schema_two_applies_policies() {
+        let dir = tempdir().unwrap();
+        let db = dir.path().join("host.db");
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute_batch(MIGRATION_0001).unwrap();
+            conn.execute_batch(MIGRATION_0002).unwrap();
+            let schema: String = conn
+                .query_row(
+                    "SELECT value FROM schema_meta WHERE key = 'schema'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(schema, "2");
+            let n: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'policies'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 0);
+        }
+        let store = Store::open(&db).unwrap();
+        let conn = rusqlite::Connection::open(store.path()).unwrap();
+        let schema: String = conn
+            .query_row(
+                "SELECT value FROM schema_meta WHERE key = 'schema'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(schema, "3");
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'policies'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn policy_upsert_get_and_default_empty() {
+        let (_tmp, store) = open_store();
+        let host_id = new_id();
+        store.host_insert_if_absent(&host_id, "h").unwrap();
+        let ws = store.workspace_add("/p", "p").unwrap();
+        let task = store.task_create("t", &ws.id).unwrap();
+        let agent = store
+            .agent_create(&task.id, &host_id, "cli.generic")
+            .unwrap();
+
+        assert!(store.policy_get_for_agent(&agent.id).unwrap().is_none());
+        assert!(store.policy_get_for_workspace(&ws.id).unwrap().is_none());
+
+        let row = store
+            .policy_upsert(Some(&agent.id), None, "ask", "agent", false)
+            .unwrap();
+        assert_eq!(row.agent_id.as_deref(), Some(agent.id.as_str()));
+        assert!(row.workspace_id.is_none());
+        assert_eq!(row.mode, "ask");
+        assert_eq!(row.scope, "agent");
+        assert!(!row.yolo);
+        let got = store.policy_get_for_agent(&agent.id).unwrap().unwrap();
+        assert_eq!(got.id, row.id);
+        assert!(!got.yolo);
+
+        let again = store
+            .policy_upsert(Some(&agent.id), None, "allow-always", "agent", true)
+            .unwrap();
+        assert_eq!(again.id, row.id);
+        assert_eq!(again.mode, "allow-always");
+        assert!(again.yolo);
+        let n: i64 = {
+            let conn = store.lock().unwrap();
+            conn.query_row(
+                "SELECT COUNT(*) FROM policies WHERE agent_id = ?1",
+                [&agent.id],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(n, 1, "unique per agent");
+
+        let ws_row = store
+            .policy_upsert(None, Some(&ws.id), "deny", "workspace", false)
+            .unwrap();
+        assert_eq!(ws_row.workspace_id.as_deref(), Some(ws.id.as_str()));
+        assert_eq!(ws_row.mode, "deny");
+        let got_ws = store.policy_get_for_workspace(&ws.id).unwrap().unwrap();
+        assert_eq!(got_ws.id, ws_row.id);
+    }
+
+    #[test]
+    fn policy_upsert_rejects_xor_and_bad_mode() {
+        let (_tmp, store) = open_store();
+        assert_eq!(
+            store
+                .policy_upsert(None, None, "ask", "agent", false)
+                .unwrap_err()
+                .code(),
+            "invalid_params"
+        );
+        assert_eq!(
+            store
+                .policy_upsert(Some("a"), Some("w"), "ask", "agent", false)
+                .unwrap_err()
+                .code(),
+            "invalid_params"
+        );
+        assert_eq!(
+            store
+                .policy_upsert(Some("a"), None, "full-access", "agent", false)
+                .unwrap_err()
+                .code(),
+            "invalid_params"
+        );
+        assert_eq!(
+            store
+                .policy_upsert(Some("a"), None, "ask", "global", false)
+                .unwrap_err()
+                .code(),
+            "invalid_params"
+        );
+    }
+
+    #[test]
+    fn policy_check_xor_and_unique_per_agent() {
+        let (_tmp, store) = open_store();
+        let host_id = new_id();
+        store.host_insert_if_absent(&host_id, "h").unwrap();
+        let ws = store.workspace_add("/p", "p").unwrap();
+        let task = store.task_create("t", &ws.id).unwrap();
+        let agent = store
+            .agent_create(&task.id, &host_id, "cli.generic")
+            .unwrap();
+        store
+            .policy_upsert(Some(&agent.id), None, "ask", "agent", false)
+            .unwrap();
+
+        let conn = rusqlite::Connection::open(store.path()).unwrap();
+        conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+        let both = conn.execute(
+            "INSERT INTO policies (id, workspace_id, agent_id, mode, scope, yolo, updated_at)              VALUES ('p-both', ?1, ?2, 'ask', 'agent', 0, '2026-08-19T00:00:00Z')",
+            [&ws.id, &agent.id],
+        );
+        assert!(both.is_err(), "CHECK xor both must fail");
+        let neither = conn.execute(
+            "INSERT INTO policies (id, workspace_id, agent_id, mode, scope, yolo, updated_at)              VALUES ('p-none', NULL, NULL, 'ask', 'agent', 0, '2026-08-19T00:00:00Z')",
+            [],
+        );
+        assert!(neither.is_err(), "CHECK xor neither must fail");
+        let dup = conn.execute(
+            "INSERT INTO policies (id, workspace_id, agent_id, mode, scope, yolo, updated_at)              VALUES ('p-dup', NULL, ?1, 'deny', 'agent', 0, '2026-08-19T00:00:00Z')",
+            [&agent.id],
+        );
+        assert!(dup.is_err(), "unique per agent must fail");
     }
 }

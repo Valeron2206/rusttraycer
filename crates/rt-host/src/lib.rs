@@ -35,6 +35,10 @@ pub enum HostError {
     InvalidParams(String),
     #[error("agent is busy")]
     AgentBusy,
+    #[error("denied")]
+    Denied,
+    #[error("approval expired")]
+    ApprovalExpired,
     #[error("workspace path invalid: {0}")]
     WorkspacePathInvalid(String),
     #[error("unsupported method: {0}")]
@@ -63,6 +67,8 @@ impl HostError {
             Self::NotFound(_) => "not_found",
             Self::InvalidParams(_) => "invalid_params",
             Self::AgentBusy => "agent_busy",
+            Self::Denied => "denied",
+            Self::ApprovalExpired => "approval_expired",
             Self::WorkspacePathInvalid(_) => "workspace_path_invalid",
             Self::UnsupportedMethod(_) => "unsupported_method",
             Self::VersionMismatch(_) => "version_mismatch",
@@ -413,6 +419,8 @@ mod tests {
             "invalid_params"
         );
         assert_eq!(HostError::AgentBusy.code(), "agent_busy");
+        assert_eq!(HostError::Denied.code(), "denied");
+        assert_eq!(HostError::ApprovalExpired.code(), "approval_expired");
         assert_eq!(
             HostError::WorkspacePathInvalid("x".into()).code(),
             "workspace_path_invalid"
