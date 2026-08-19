@@ -337,3 +337,169 @@ pub(crate) fn spawn_turn(args: SpawnTurn) -> JoinHandle<()> {
         inflight_done.remove_if(&agent_done, gen);
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::Stream;
+    use rt_runtime::{AgentBackend, Availability, TurnEvent, TurnRequest};
+    use rt_storage::{new_id, AgentStatus, Store};
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tempfile::tempdir;
+
+    struct SeqBackend(Vec<TurnEvent>);
+
+    impl AgentBackend for SeqBackend {
+        fn id(&self) -> &'static str {
+            "cli.generic"
+        }
+        fn available(&self) -> Availability {
+            Availability {
+                available: true,
+                detail: "seq".into(),
+            }
+        }
+        fn start_turn(&self, _req: TurnRequest) -> Pin<Box<dyn Stream<Item = TurnEvent> + Send>> {
+            Box::pin(futures::stream::iter(self.0.clone()))
+        }
+    }
+
+    fn empty_req() -> TurnRequest {
+        TurnRequest {
+            agent_id: "a".into(),
+            task_id: "t".into(),
+            workspace_path: ".".into(),
+            messages: vec![],
+            extra_env: Default::default(),
+        }
+    }
+
+    fn seeded_store() -> (tempfile::TempDir, Store, String, String) {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path().join("host.db")).unwrap();
+        let host_id = new_id();
+        store.host_insert_if_absent(&host_id, "h").unwrap();
+        let ws = store.workspace_add("/p", "p").unwrap();
+        let task = store.task_create("t", &ws.id).unwrap();
+        let agent = store
+            .agent_create(&task.id, &host_id, "cli.generic")
+            .unwrap();
+        (dir, store, task.id, agent.id)
+    }
+
+    #[tokio::test]
+    async fn inflight_reserve_busy_owns_take_remove_if() {
+        let inf = Inflight::new();
+        let gen = inf.reserve("a1").unwrap();
+        assert!(inf.contains("a1").unwrap());
+        assert!(inf.owns("a1", gen));
+        assert!(!inf.owns("a1", gen + 1));
+        assert_eq!(inf.reserve("a1").unwrap_err().code(), "agent_busy");
+        inf.remove_if("a1", gen + 1);
+        assert!(inf.contains("a1").unwrap());
+        inf.remove_if("a1", gen);
+        assert!(!inf.contains("a1").unwrap());
+        let gen2 = inf.reserve("a1").unwrap();
+        let mismatch = tokio::spawn(async {});
+        inf.attach("a1", gen2 + 1, mismatch);
+        let ok = tokio::spawn(async {});
+        inf.attach("a1", gen2, ok);
+        assert!(inf.take("a1").unwrap().is_some());
+        assert!(inf.take("missing").unwrap().is_none());
+        inf.abort_all();
+    }
+
+    #[tokio::test]
+    async fn inflight_shutdown_empty_and_with_handle() {
+        let inf = Inflight::new();
+        inf.shutdown(Duration::from_millis(10)).await;
+        let gen = inf.reserve("a1").unwrap();
+        let handle = tokio::spawn(async {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        });
+        inf.attach("a1", gen, handle);
+        inf.shutdown(Duration::from_millis(200)).await;
+    }
+
+    #[tokio::test]
+    async fn run_turn_failed_none_tool_and_cancelled() {
+        let (_d, store, task_id, agent_id) = seeded_store();
+        store
+            .agent_set_status(&agent_id, AgentStatus::Running)
+            .unwrap();
+        let (tx, _rx) = tokio::sync::broadcast::channel(8);
+        let inf = Inflight::new();
+        let gen = inf.reserve(&agent_id).unwrap();
+        run_turn(
+            store.clone(),
+            Arc::new(SeqBackend(vec![
+                TurnEvent::Tool {
+                    name: "x".into(),
+                    payload: serde_json::json!({}),
+                },
+                TurnEvent::Token {
+                    text: "partial".into(),
+                },
+                TurnEvent::Failed {
+                    message: "boom".into(),
+                },
+            ])),
+            empty_req(),
+            agent_id.clone(),
+            task_id.clone(),
+            tx.clone(),
+            (inf.clone(), gen),
+        )
+        .await;
+        assert_eq!(
+            store.agent_get(&agent_id).unwrap().unwrap().status,
+            AgentStatus::Error
+        );
+
+        let (_d2, store2, task2, agent2) = seeded_store();
+        store2
+            .agent_set_status(&agent2, AgentStatus::Running)
+            .unwrap();
+        let inf2 = Inflight::new();
+        let gen2 = inf2.reserve(&agent2).unwrap();
+        run_turn(
+            store2.clone(),
+            Arc::new(SeqBackend(vec![TurnEvent::Failed {
+                message: "cancelled".into(),
+            }])),
+            empty_req(),
+            agent2.clone(),
+            task2,
+            tx.clone(),
+            (inf2, gen2),
+        )
+        .await;
+        assert_eq!(
+            store2.agent_get(&agent2).unwrap().unwrap().status,
+            AgentStatus::Running
+        );
+
+        let (_d3, store3, task3, agent3) = seeded_store();
+        store3
+            .agent_set_status(&agent3, AgentStatus::Running)
+            .unwrap();
+        let inf3 = Inflight::new();
+        let gen3 = inf3.reserve(&agent3).unwrap();
+        run_turn(
+            store3.clone(),
+            Arc::new(SeqBackend(vec![])),
+            empty_req(),
+            agent3.clone(),
+            task3,
+            tx,
+            (inf3, gen3),
+        )
+        .await;
+        assert_eq!(
+            store3.agent_get(&agent3).unwrap().unwrap().status,
+            AgentStatus::Error
+        );
+    }
+}

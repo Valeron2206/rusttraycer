@@ -711,4 +711,160 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.code(), "not_found");
     }
+    #[test]
+    fn porcelain_and_diff_parsers() {
+        assert_eq!(classify_status('?', '?'), "untracked");
+        assert_eq!(classify_status('R', ' '), "renamed");
+        assert_eq!(classify_status(' ', 'R'), "renamed");
+        assert_eq!(classify_status('A', ' '), "added");
+        assert_eq!(classify_status(' ', 'A'), "added");
+        assert_eq!(classify_status('D', ' '), "deleted");
+        assert_eq!(classify_status(' ', 'D'), "deleted");
+        assert_eq!(classify_status('M', ' '), "modified");
+        assert_eq!(parse_branch_line("main...origin/main"), "main");
+        assert_eq!(parse_branch_line("No commits yet on topic"), "topic");
+        let (branch, entries) = parse_porcelain(
+            "## main\n M src/lib.rs\n?? new.txt\nR  old.rs -> new.rs\nA  added.rs\n D gone.rs\nx\n",
+        );
+        assert_eq!(branch, "main");
+        assert_eq!(entries[0].status, "modified");
+        assert_eq!(entries[1].status, "untracked");
+        assert_eq!(entries[2].path, "new.rs");
+        assert_eq!(entries[2].status, "renamed");
+        assert_eq!(entries[3].status, "added");
+        assert_eq!(entries[4].status, "deleted");
+
+        assert_eq!(extract_b_path("a/src/lib.rs b/src/lib.rs"), "src/lib.rs");
+        assert!(parse_diff("").is_empty());
+        let files = parse_diff(
+            "diff --git a/a.rs b/a.rs\nindex 1..2\n--- a/a.rs\n+++ b/a.rs\n@@\n+hi\ndiff --git a/b.bin b/b.bin\nBinary files a/b.bin and b/b.bin differ\n",
+        );
+        assert_eq!(files.len(), 2);
+        assert!(files[0].patch.is_some());
+        assert!(files[1].patch.is_none());
+
+        let big = "x".repeat(DIFF_MAX_BYTES + 50);
+        let cap = apply_diff_cap(vec![
+            GitDiffFile {
+                path: "a".into(),
+                patch: Some(big),
+            },
+            GitDiffFile {
+                path: "b".into(),
+                patch: Some("more".into()),
+            },
+        ]);
+        assert!(cap.truncated);
+        assert_eq!(cap.files.len(), 1);
+        assert!(cap.files[0].patch.as_ref().unwrap().len() <= DIFF_MAX_BYTES);
+
+        assert_eq!(
+            short_agent_id("0191f0c6-7c2a-7c11-8000-6f0c1a2b3c4d").len(),
+            8
+        );
+    }
+
+    #[test]
+    fn optional_path_and_worktree_id_validation() {
+        assert!(optional_rel_path(&json!({})).unwrap().is_none());
+        assert_eq!(
+            optional_rel_path(&json!({ "path": "src/a.rs" })).unwrap(),
+            Some("src/a.rs")
+        );
+        assert_eq!(
+            optional_rel_path(&json!({ "path": "../x" }))
+                .unwrap_err()
+                .code(),
+            "invalid_params"
+        );
+        assert_eq!(
+            optional_rel_path(&json!({ "path": "/etc" }))
+                .unwrap_err()
+                .code(),
+            "invalid_params"
+        );
+        assert_eq!(
+            optional_rel_path(&json!({ "path": 1 })).unwrap_err().code(),
+            "invalid_params"
+        );
+        assert!(optional_worktree_id(&json!({})).unwrap().is_none());
+        assert_eq!(
+            optional_worktree_id(&json!({ "worktreeId": "" }))
+                .unwrap_err()
+                .code(),
+            "invalid_params"
+        );
+        assert_eq!(
+            optional_worktree_id(&json!({ "worktreeId": 1 }))
+                .unwrap_err()
+                .code(),
+            "invalid_params"
+        );
+        assert_eq!(
+            require_str(&json!({}), "workspaceId").unwrap_err().code(),
+            "invalid_params"
+        );
+        assert_eq!(
+            require_str(&json!({ "workspaceId": "" }), "workspaceId")
+                .unwrap_err()
+                .code(),
+            "invalid_params"
+        );
+        assert_eq!(
+            require_str(&json!({ "workspaceId": 1 }), "workspaceId")
+                .unwrap_err()
+                .code(),
+            "invalid_params"
+        );
+    }
+
+    #[test]
+    fn git_status_added_deleted_and_untracked_diff() {
+        let (dir, svc) = setup();
+        let ws_dir = dir.path().join("repo2");
+        init_git_repo(&ws_dir);
+        let (ws_id, _agent_id) = seed_agent(&svc, &ws_dir);
+        std::fs::write(ws_dir.join("added.rs"), "fn a() {}\n").unwrap();
+        git(&ws_dir, &["add", "added.rs"]);
+        std::fs::remove_file(ws_dir.join("README.md")).unwrap();
+        std::fs::write(ws_dir.join("fresh.txt"), "hello\n").unwrap();
+        std::fs::write(ws_dir.join("nul.bin"), b"a\0b").unwrap();
+
+        let status = svc.git_status(&json!({ "workspaceId": ws_id })).unwrap();
+        assert!(status.dirty);
+        assert!(status
+            .entries
+            .iter()
+            .any(|e| e.path == "added.rs" && e.status == "added"));
+        assert!(status
+            .entries
+            .iter()
+            .any(|e| e.path == "README.md" && e.status == "deleted"));
+        assert!(status
+            .entries
+            .iter()
+            .any(|e| e.path == "fresh.txt" && e.status == "untracked"));
+
+        let diff = svc.git_diff(&json!({ "workspaceId": ws_id })).unwrap();
+        assert!(diff.files.iter().any(
+            |f| f.path == "fresh.txt" && f.patch.as_ref().is_some_and(|p| p.contains("+hello"))
+        ));
+        assert!(diff
+            .files
+            .iter()
+            .any(|f| f.path == "nul.bin" && f.patch.is_none()));
+
+        let one = svc
+            .git_diff(&json!({ "workspaceId": ws_id, "path": "fresh.txt" }))
+            .unwrap();
+        assert!(one.files.iter().all(|f| f.path == "fresh.txt"));
+        let err = svc
+            .git_diff(&json!({ "workspaceId": ws_id, "path": "../x" }))
+            .unwrap_err();
+        assert_eq!(err.code(), "invalid_params");
+        let err = svc
+            .git_status(&json!({ "workspaceId": ws_id, "worktreeId": "0191f0c6-7c2a-7c11-8000-6f0c1a2b3c4d" }))
+            .unwrap_err();
+        assert_eq!(err.code(), "not_found");
+    }
 }

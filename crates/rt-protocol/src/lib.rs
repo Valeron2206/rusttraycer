@@ -367,4 +367,194 @@ mod tests {
         assert_eq!(v["path"], "a.bin");
         assert!(v["patch"].is_null());
     }
+    #[test]
+    fn host_method_version_is_1_0() {
+        let v = host_method_version();
+        assert_eq!(v, MethodVersion { major: 1, minor: 0 });
+        assert_eq!(v.major, HOST_METHOD_MAJOR);
+        assert_eq!(v.minor, HOST_METHOD_MINOR);
+        assert_eq!(CRATE_VERSION, "0.1.0");
+        assert_eq!(SESSION_HEADER, "X-Rt-Session");
+        assert_eq!(MAX_CONTENT_BYTES, 1_048_576);
+        assert_eq!(MAX_FILE_BYTES, 256 * 1024);
+        assert_eq!(BINARY_SCAN_BYTES, 8 * 1024);
+        assert_eq!(error_codes::NOT_FOUND, "not_found");
+        assert_eq!(error_codes::INVALID_PARAMS, "invalid_params");
+        assert_eq!(error_codes::AGENT_BUSY, "agent_busy");
+        assert_eq!(error_codes::UNAUTHORIZED, "unauthorized");
+        assert_eq!(error_codes::ALREADY_RUNNING, "already_running");
+        assert_eq!(error_codes::FILE_TOO_LARGE, "file_too_large");
+        assert_eq!(error_codes::FILE_BINARY, "file_binary");
+        assert_eq!(error_codes::VERSION_MISMATCH, "version_mismatch");
+        assert_eq!(error_codes::UNSUPPORTED_METHOD, "unsupported_method");
+        assert_eq!(
+            error_codes::WORKSPACE_PATH_INVALID,
+            "workspace_path_invalid"
+        );
+        assert_eq!(error_codes::INTERNAL, "internal");
+        assert_eq!(TRADABLE_METHODS.len(), 22);
+        assert!(!TRADABLE_METHODS.contains(&METHOD_HANDSHAKE));
+    }
+
+    #[test]
+    fn request_params_default_empty_object() {
+        let req: RpcRequest = serde_json::from_str(r#"{"id":"9","method":"host.ping"}"#).unwrap();
+        assert_eq!(req.id, "9");
+        assert!(req.params.is_object());
+        assert_eq!(req.params, empty_object());
+    }
+
+    #[test]
+    fn rpc_ok_error_and_hello_camel_case() {
+        let ok = RpcOk {
+            id: "1".into(),
+            ok: serde_json::json!({"pong": true}),
+        };
+        let v = serde_json::to_value(&ok).unwrap();
+        assert_eq!(v["id"], "1");
+        assert_eq!(v["ok"]["pong"], true);
+        let ok2: RpcOk = serde_json::from_value(v).unwrap();
+        assert_eq!(ok2.id, "1");
+
+        let err = RpcError {
+            id: "2".into(),
+            error: ErrorBody {
+                code: error_codes::NOT_FOUND.into(),
+                message: "gone".into(),
+            },
+        };
+        let v = serde_json::to_value(&err).unwrap();
+        assert_eq!(v["error"]["code"], "not_found");
+        assert_eq!(v["error"]["message"], "gone");
+        let err2: RpcError = serde_json::from_value(v).unwrap();
+        assert_eq!(err2.error.code, "not_found");
+
+        let hello: ClientHello = serde_json::from_str(
+            r#"{"client":"gui","clientVersion":"0.1.0","methods":{"host.ping":{"major":1,"minor":0}}}"#,
+        )
+        .unwrap();
+        assert_eq!(hello.client, "gui");
+        assert_eq!(hello.client_version, "0.1.0");
+        assert_eq!(hello.methods["host.ping"].major, 1);
+
+        let bare: ClientHello =
+            serde_json::from_str(r#"{"client":"cli","clientVersion":"1.0.0"}"#).unwrap();
+        assert!(bare.methods.is_empty());
+
+        let mut accepted = BTreeMap::new();
+        accepted.insert("host.ping".into(), MethodVersion { major: 1, minor: 0 });
+        let mut rejected = BTreeMap::new();
+        rejected.insert(
+            "artifact.create".into(),
+            RejectedMethod {
+                reason: "unsupported".into(),
+            },
+        );
+        let sh = ServerHello {
+            host_id: "h".into(),
+            host_version: "0.1.0".into(),
+            session_token: "tok".into(),
+            accepted,
+            rejected,
+        };
+        let v = serde_json::to_value(&sh).unwrap();
+        assert_eq!(v["hostId"], "h");
+        assert_eq!(v["hostVersion"], "0.1.0");
+        assert_eq!(v["sessionToken"], "tok");
+        assert_eq!(v["accepted"]["host.ping"]["major"], 1);
+        assert_eq!(v["rejected"]["artifact.create"]["reason"], "unsupported");
+        let sh2: ServerHello = serde_json::from_value(v).unwrap();
+        assert_eq!(sh2.session_token, "tok");
+    }
+
+    #[test]
+    fn workspace_task_agent_message_file_types_camel_case() {
+        let ws = Workspace {
+            id: "w".into(),
+            host_id: "h".into(),
+            path: "/p".into(),
+            name: "proj".into(),
+            created_at: "t".into(),
+        };
+        let v = serde_json::to_value(&ws).unwrap();
+        assert_eq!(v["hostId"], "h");
+        assert_eq!(v["createdAt"], "t");
+        let ws2: Workspace = serde_json::from_value(v).unwrap();
+        assert_eq!(ws2.name, "proj");
+
+        let task = Task {
+            id: "t1".into(),
+            title: "T".into(),
+            status: "open".into(),
+            created_at: "c".into(),
+            updated_at: "u".into(),
+            workspace_ids: vec!["w".into()],
+        };
+        let v = serde_json::to_value(&task).unwrap();
+        assert_eq!(v["workspaceIds"][0], "w");
+        assert_eq!(v["createdAt"], "c");
+        assert_eq!(v["updatedAt"], "u");
+        let task2: Task = serde_json::from_value(v).unwrap();
+        assert_eq!(task2.status, "open");
+
+        let agent = Agent {
+            id: "a".into(),
+            task_id: "t1".into(),
+            host_id: "h".into(),
+            parent_id: None,
+            interface: "chat".into(),
+            provider: "cli.generic".into(),
+            status: "idle".into(),
+            run_location: "local".into(),
+            created_at: "c".into(),
+        };
+        let v = serde_json::to_value(&agent).unwrap();
+        assert_eq!(v["taskId"], "t1");
+        assert_eq!(v["hostId"], "h");
+        assert_eq!(v["parentId"], serde_json::Value::Null);
+        assert_eq!(v["runLocation"], "local");
+        assert_eq!(v["createdAt"], "c");
+        let agent2: Agent = serde_json::from_value(v).unwrap();
+        assert_eq!(agent2.provider, "cli.generic");
+
+        let msg = Message {
+            id: "m".into(),
+            agent_id: "a".into(),
+            role: "user".into(),
+            content: "hi".into(),
+            created_at: "c".into(),
+        };
+        let v = serde_json::to_value(&msg).unwrap();
+        assert_eq!(v["agentId"], "a");
+        assert_eq!(v["createdAt"], "c");
+        let msg2: Message = serde_json::from_value(v).unwrap();
+        assert_eq!(msg2.content, "hi");
+
+        let entry = FileEntry {
+            name: "README.md".into(),
+            path: "README.md".into(),
+            kind: "file".into(),
+            size: Some(4),
+            modified_at: Some("c".into()),
+        };
+        let v = serde_json::to_value(&entry).unwrap();
+        assert_eq!(v["modifiedAt"], "c");
+        let tree = FileTreeOk {
+            items: vec![entry],
+            truncated: true,
+        };
+        let v = serde_json::to_value(&tree).unwrap();
+        assert_eq!(v["truncated"], true);
+        assert_eq!(v["items"][0]["name"], "README.md");
+        let read = FileReadOk {
+            path: "README.md".into(),
+            content: "hi".into(),
+            truncated: false,
+            encoding: "utf8".into(),
+        };
+        let v = serde_json::to_value(&read).unwrap();
+        assert_eq!(v["encoding"], "utf8");
+        let read2: FileReadOk = serde_json::from_value(v).unwrap();
+        assert_eq!(read2.content, "hi");
+    }
 }

@@ -543,4 +543,59 @@ mod tests {
         let err = files_read(&store, &json!({ "workspaceId": id, "path": "leak" })).unwrap_err();
         assert_eq!(err.code(), "invalid_params");
     }
+    #[test]
+    fn tree_rejects_bad_params_and_nul_path() {
+        let (_t, store, id, root) = seeded();
+        let err = files_tree(&store, &json!([])).unwrap_err();
+        assert_eq!(err.code(), "invalid_params");
+        let err = files_tree(&store, &json!({ "workspaceId": id, "depth": 0 })).unwrap_err();
+        assert_eq!(err.code(), "invalid_params");
+        let err = files_tree(&store, &json!({ "workspaceId": id, "depth": -3 })).unwrap_err();
+        assert_eq!(err.code(), "invalid_params");
+        let err = files_tree(&store, &json!({ "workspaceId": id, "depth": "x" })).unwrap_err();
+        assert_eq!(err.code(), "invalid_params");
+        let err = files_tree(&store, &json!({ "workspaceId": id, "maxEntries": 0 })).unwrap_err();
+        assert_eq!(err.code(), "invalid_params");
+        let err = files_tree(&store, &json!({ "workspaceId": id, "path": 1 })).unwrap_err();
+        assert_eq!(err.code(), "invalid_params");
+        let err = files_tree(&store, &json!({ "workspaceId": "not-a-uuid" })).unwrap_err();
+        assert_eq!(err.code(), "invalid_params");
+        let err = files_tree(&store, &json!({ "workspaceId": id, "worktreeId": 1 })).unwrap_err();
+        assert_eq!(err.code(), "invalid_params");
+        let err = files_tree(
+            &store,
+            &json!({ "workspaceId": id, "worktreeId": "0191f0c6-7c2a-7c11-8000-6f0c1a2b3c4d" }),
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), "not_found");
+        let nul = format!("src/{}", "\0bad");
+        let err = files_tree(&store, &json!({ "workspaceId": id, "path": nul })).unwrap_err();
+        assert_eq!(err.code(), "invalid_params");
+        let v = files_tree(
+            &store,
+            &json!({ "workspaceId": id, "path": ".", "depth": 1 }),
+        )
+        .unwrap();
+        assert!(v["items"].is_array());
+        let dir_entry = entry_for(&root, &root).unwrap();
+        assert_eq!(dir_entry.kind, "dir");
+        assert!(dir_entry.size.is_none());
+    }
+
+    #[test]
+    fn read_rejects_non_object_params() {
+        let (_t, store, id, _) = seeded();
+        let err = files_read(&store, &json!(null)).unwrap_err();
+        assert_eq!(err.code(), "invalid_params");
+        let err = files_read(&store, &json!({ "path": "README.md" })).unwrap_err();
+        assert_eq!(err.code(), "invalid_params");
+        let err = files_read(&store, &json!({ "workspaceId": id })).unwrap_err();
+        assert_eq!(err.code(), "invalid_params");
+        let err = files_read(
+            &store,
+            &json!({ "workspaceId": id, "path": "README.md", "worktreeId": false }),
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), "invalid_params");
+    }
 }
