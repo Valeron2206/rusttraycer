@@ -294,38 +294,56 @@ fn repo_root() -> PathBuf {
 }
 
 #[test]
-fn migrations_0001_to_0008_byte_identical_vs_6433bfb() {
+fn migrations_0001_to_0008_byte_identical_to_freeze() {
     let root = repo_root();
-    let names = [
-        "0001_init.sql",
-        "0002_worktrees.sql",
-        "0003_policies.sql",
-        "0004_terminal.sql",
-        "0005_artifacts.sql",
-        "0006_loops.sql",
-        "0007_model_ux.sql",
-        "0008_workspace.sql",
+    let frozen = [
+        (
+            "0001_init.sql",
+            "1a331f2fd958ca9ed19261cfd696c1aad2c8d309aeb2d908953446b316bcbc7c",
+        ),
+        (
+            "0002_worktrees.sql",
+            "7a56889d97b25d9cba5effec10564b7a7f06acbaa836278e5518cb29bf1b68e3",
+        ),
+        (
+            "0003_policies.sql",
+            "b7a3a099705e845771312c6e56ef44fb286277c2d911763cf54c60bea9a7f398",
+        ),
+        (
+            "0004_terminal.sql",
+            "b7a6863b5fd47347c6cb87255e2eebb6a0913a2c20abef438d8e26a7593c756a",
+        ),
+        (
+            "0005_artifacts.sql",
+            "628be3a01bb1527fe06ca6a3a985abb0269080f6b5854d2cadfb85275381fd81",
+        ),
+        (
+            "0006_loops.sql",
+            "1021badfe2cb976217aa7accb7110f1ccceee7b5bd82ac49957f0a7e5fedf5b8",
+        ),
+        (
+            "0007_model_ux.sql",
+            "ce87343bdacd507400a7ffa9160483542914e5205f47df7047be0c35da0aac39",
+        ),
+        (
+            "0008_workspace.sql",
+            "dc194b66f7b26bd7ddefd833cd251ca55e0eaec0b89d30167e59d337ce87cbe3",
+        ),
     ];
-    for name in names {
+    for (name, expected) in frozen {
         let path = root.join("crates/rt-storage/migrations").join(name);
-        let current = std::fs::read(&path).unwrap_or_else(|e| panic!("read {path:?}: {e}"));
-        let out = std::process::Command::new("git")
-            .args([
-                "show",
-                &format!("6433bfb:crates/rt-storage/migrations/{name}"),
-            ])
-            .current_dir(&root)
+        let _current = std::fs::read(&path).unwrap_or_else(|_| panic!("{name}"));
+        let out = std::process::Command::new("sha256sum")
+            .arg(&path)
             .output()
             .unwrap();
         assert!(
             out.status.success(),
-            "git show 6433bfb:{} failed: {}",
-            name,
+            "{name}: {}",
             String::from_utf8_lossy(&out.stderr)
         );
-        assert_eq!(
-            current, out.stdout,
-            "{name} must be byte-identical to 6433bfb"
-        );
+        let got = String::from_utf8(out.stdout).unwrap();
+        let got = got.split_whitespace().next().unwrap();
+        assert_eq!(got, expected, "{name}");
     }
 }
