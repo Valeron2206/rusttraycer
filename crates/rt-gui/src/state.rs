@@ -265,6 +265,10 @@ pub struct AppState {
     pub git_diff: Option<GitDiffOk>,
     pub git_selected_path: Option<String>,
     pub git_note: Option<String>,
+    pub git_commit_message: String,
+    pub git_staged: HashSet<String>,
+    pub show_push_confirm: bool,
+    pub write_status: Option<String>,
     pub providers: Vec<DoctorProvider>,
     pub doctor: Option<DoctorOk>,
     pub picker_provider: Option<String>,
@@ -330,6 +334,10 @@ impl AppState {
             git_diff: None,
             git_selected_path: None,
             git_note: None,
+            git_commit_message: String::new(),
+            git_staged: HashSet::new(),
+            show_push_confirm: false,
+            write_status: None,
             providers: Vec::new(),
             doctor: None,
             picker_provider: None,
@@ -741,6 +749,7 @@ impl AppState {
         let wt = self.worktree_id().map(|s| s.to_string());
         match session.git_status(&workspace_id, wt.as_deref()) {
             Ok(status) => {
+                self.git_staged = staged_paths_from_status(&status);
                 self.git_status = Some(status);
                 self.load_git_diff();
             }
@@ -1504,6 +1513,221 @@ impl AppState {
         self.toast = Some(label);
     }
 
+    pub fn write_ready(&self) -> bool {
+        self.can_rpc()
+            && self
+                .session
+                .as_ref()
+                .map(|s| s.write_accepted() && !s.write_rejected())
+                .unwrap_or(false)
+    }
+
+    pub fn request_push(&mut self) {
+        if !self.can_rpc() {
+            self.toast = Some("недоступно: host offline".into());
+            return;
+        }
+        if !self.write_ready() {
+            self.surface_write_unavailable();
+            return;
+        }
+        self.show_push_confirm = true;
+    }
+
+    pub fn cancel_push_confirm(&mut self) {
+        self.show_push_confirm = false;
+    }
+
+    pub fn confirm_push(&mut self) {
+        self.show_push_confirm = false;
+        self.run_git_write(|session, workspace_id, wt| {
+            let ok = session.git_push(&workspace_id, wt, None, None)?;
+            if !ok.ok || ok.remote.is_empty() || ok.git_ref.is_empty() {
+                return Err(ConnectError::Rpc {
+                    code: "git_conflict".into(),
+                    message: format!("{} {}", ok.remote, ok.git_ref),
+                });
+            }
+            Ok(())
+        });
+    }
+
+    pub fn stage_paths(&mut self, paths: Vec<String>) {
+        self.mutate_git_status(paths, |session, workspace_id, wt, refs| {
+            session.git_stage(&workspace_id, wt, refs)
+        });
+    }
+
+    pub fn unstage_paths(&mut self, paths: Vec<String>) {
+        self.mutate_git_status(paths, |session, workspace_id, wt, refs| {
+            session.git_unstage(&workspace_id, wt, refs)
+        });
+    }
+
+    pub fn restore_paths(&mut self, paths: Vec<String>, staged: bool) {
+        self.mutate_git_status(paths, |session, workspace_id, wt, refs| {
+            session.git_restore(&workspace_id, wt, refs, staged)
+        });
+    }
+
+    pub fn restore_selected(&mut self) {
+        if let Some(path) = self.git_selected_path.clone() {
+            self.restore_paths(vec![path], false);
+        }
+    }
+
+    pub fn commit_git(&mut self) {
+        let message = self.git_commit_message.trim().to_string();
+        if message.is_empty() {
+            self.toast = Some("сообщение коммита пусто".into());
+            return;
+        }
+        if message.len() > 4 * 1024 {
+            self.toast = Some("сообщение коммита слишком длинное".into());
+            return;
+        }
+        let ok = self.run_git_write(|session, workspace_id, wt| {
+            let committed = session.git_commit(&workspace_id, wt, &message)?;
+            if committed.commit.is_empty() || committed.branch.is_empty() {
+                return Err(ConnectError::Transport("commit без sha или ветки".into()));
+            }
+            Ok(())
+        });
+        if ok {
+            self.git_commit_message.clear();
+        }
+    }
+
+    pub fn open_in_editor(&mut self, path: String) {
+        if path.trim().is_empty() {
+            return;
+        }
+        if !self.can_rpc() {
+            self.toast = Some("недоступно: host offline".into());
+            return;
+        }
+        if !self.write_ready() {
+            self.surface_write_unavailable();
+            return;
+        }
+        let Some(workspace_id) = self.workspace_id.clone() else {
+            self.toast = Some("нет workspace".into());
+            return;
+        };
+        let Some(session) = self.session.clone() else {
+            self.toast = Some("недоступно: host offline".into());
+            return;
+        };
+        let wt = self.worktree_id().map(|s| s.to_string());
+        match session.files_open(&workspace_id, wt.as_deref(), &path) {
+            Ok(ok) if ok.opened => {
+                self.write_status = None;
+            }
+            Ok(_) => {
+                self.toast = Some("не открыто".into());
+            }
+            Err(err) => self.surface_write_error(err),
+        }
+    }
+
+    fn mutate_git_status<F>(&mut self, paths: Vec<String>, f: F)
+    where
+        F: FnOnce(
+            &crate::rpc::Session,
+            String,
+            Option<&str>,
+            &[&str],
+        ) -> Result<crate::rpc::GitStatusOk, ConnectError>,
+    {
+        let cleaned: Vec<String> = paths
+            .into_iter()
+            .map(|p| p.trim().to_string())
+            .filter(|p| !p.is_empty())
+            .collect();
+        if cleaned.is_empty() {
+            return;
+        }
+        if !self.can_rpc() {
+            self.toast = Some("недоступно: host offline".into());
+            return;
+        }
+        if !self.write_ready() {
+            self.surface_write_unavailable();
+            return;
+        }
+        let Some(workspace_id) = self.workspace_id.clone() else {
+            self.toast = Some("нет workspace".into());
+            return;
+        };
+        let Some(session) = self.session.clone() else {
+            self.toast = Some("недоступно: host offline".into());
+            return;
+        };
+        let wt = self.worktree_id().map(|s| s.to_string());
+        let refs: Vec<&str> = cleaned.iter().map(String::as_str).collect();
+        match f(&session, workspace_id, wt.as_deref(), &refs) {
+            Ok(status) => {
+                self.write_status = None;
+                self.git_staged = staged_paths_from_status(&status);
+                self.git_status = Some(status);
+                self.load_git_diff();
+                self.load_file_tree_root();
+            }
+            Err(err) => self.surface_write_error(err),
+        }
+    }
+
+    fn run_git_write<F>(&mut self, f: F) -> bool
+    where
+        F: FnOnce(&crate::rpc::Session, String, Option<&str>) -> Result<(), ConnectError>,
+    {
+        if !self.can_rpc() {
+            self.toast = Some("недоступно: host offline".into());
+            return false;
+        }
+        if !self.write_ready() {
+            self.surface_write_unavailable();
+            return false;
+        }
+        let Some(workspace_id) = self.workspace_id.clone() else {
+            self.toast = Some("нет workspace".into());
+            return false;
+        };
+        let Some(session) = self.session.clone() else {
+            self.toast = Some("недоступно: host offline".into());
+            return false;
+        };
+        let wt = self.worktree_id().map(|s| s.to_string());
+        match f(&session, workspace_id, wt.as_deref()) {
+            Ok(()) => {
+                self.write_status = None;
+                self.load_git_panel();
+                self.load_file_tree_root();
+                true
+            }
+            Err(err) => {
+                self.surface_write_error(err);
+                false
+            }
+        }
+    }
+
+    fn surface_write_unavailable(&mut self) {
+        let label = crate::ladder::WRITE_UNAVAILABLE.to_string();
+        self.write_status = Some(label.clone());
+        self.toast = Some(label);
+    }
+
+    fn surface_write_error(&mut self, err: ConnectError) {
+        let label = write_error_label(&err);
+        if err.is_write_unsupported() {
+            self.write_status = Some(crate::ladder::WRITE_UNAVAILABLE.into());
+        } else {
+            self.write_status = Some(label.clone());
+        }
+        self.toast = Some(label);
+    }
+
     /// Title-bar X: same path as «Отказать» — `approval.respond` with deny.
     pub fn close_approval_card(&mut self) {
         self.respond_approval("deny");
@@ -1546,6 +1770,35 @@ fn git_error_note(err: &crate::rpc::ConnectError) -> String {
     } else {
         err.as_label()
     }
+}
+
+fn write_error_label(err: &crate::rpc::ConnectError) -> String {
+    if err.is_write_unsupported() {
+        return crate::ladder::WRITE_UNAVAILABLE.to_string();
+    }
+    match err {
+        crate::rpc::ConnectError::Rpc { code, .. } if code == "git_identity" => {
+            crate::ladder::GIT_IDENTITY_HINT.to_string()
+        }
+        crate::rpc::ConnectError::Rpc { code, .. } if code == "git_auth" => {
+            crate::ladder::GIT_AUTH_HINT.to_string()
+        }
+        _ => err.as_label(),
+    }
+}
+
+fn entry_looks_staged(status: &str) -> bool {
+    let s = status.to_ascii_lowercase();
+    s == "added" || s.contains("staged")
+}
+
+fn staged_paths_from_status(status: &crate::rpc::GitStatusOk) -> HashSet<String> {
+    status
+        .entries
+        .iter()
+        .filter(|e| entry_looks_staged(&e.status))
+        .map(|e| e.path.clone())
+        .collect()
 }
 
 #[cfg(test)]
@@ -2788,5 +3041,298 @@ mod tests {
         state.switch_task_tab("task-1".into());
         assert_eq!(state.selected_task_id.as_deref(), Some("task-1"));
         assert_eq!(state.selected_agent_id.as_deref(), Some("ag-1"));
+    }
+
+    fn write_accepted_hello() -> Value {
+        let mut accepted = serde_json::Map::new();
+        for name in crate::rpc::WRITE_METHODS {
+            accepted.insert(name.to_string(), json!({"major": 1, "minor": 2}));
+        }
+        json!({
+            "id": "echo",
+            "ok": {
+                "hostId": "host-a",
+                "hostVersion": "0.1.0",
+                "sessionToken": "tok-1",
+                "accepted": accepted,
+                "rejected": {}
+            }
+        })
+    }
+
+    fn start_write_state_mock(mode: &'static str) -> SliceMock {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(Mutex::new(Vec::new()));
+        let hits_t = hits.clone();
+        thread::spawn(move || {
+            for stream in listener.incoming().take(64) {
+                let Ok(mut stream) = stream else { break };
+                let (headers, body) = read_http_request(&mut stream);
+                let (method, params) = if headers.starts_with("GET /health") {
+                    ("GET /health".to_string(), json!({}))
+                } else {
+                    let parsed: Value = serde_json::from_slice(&body).unwrap_or(json!({}));
+                    (
+                        parsed
+                            .get("method")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("other")
+                            .to_string(),
+                        parsed.get("params").cloned().unwrap_or(json!({})),
+                    )
+                };
+                hits_t.lock().unwrap().push(RpcHit {
+                    method: method.clone(),
+                    params: params.clone(),
+                });
+                let body = match (mode, method.as_str()) {
+                    (_, "GET /health") => json!({"ok": true, "hostId": "host-a"}).to_string(),
+                    ("ok", "handshake") => write_accepted_hello().to_string(),
+                    ("old", "handshake") => json!({
+                        "id": "echo",
+                        "ok": {
+                            "hostId": "host-a",
+                            "hostVersion": "0.1.0",
+                            "sessionToken": "tok-1",
+                            "accepted": {},
+                            "rejected": {
+                                "git.stage": {"reason": "unsupported"},
+                                "git.push": {"reason": "unsupported"},
+                                "files.open": {"reason": "unsupported"}
+                            }
+                        }
+                    })
+                    .to_string(),
+                    (_, "host.ping") => json!({
+                        "id": "echo",
+                        "ok": { "hostId": "host-a", "now": "2026-08-17T12:00:00Z" }
+                    })
+                    .to_string(),
+                    ("ok", "worktree.get") => json!({
+                        "id": "echo",
+                        "error": { "code": "not_found", "message": "no worktree" }
+                    })
+                    .to_string(),
+                    ("ok", "git.status" | "git.stage" | "git.unstage" | "git.restore") => json!({
+                        "id": "echo",
+                        "ok": {
+                            "branch": "main",
+                            "dirty": true,
+                            "truncated": false,
+                            "entries": [{ "path": "src/lib.rs", "status": "modified" }]
+                        }
+                    })
+                    .to_string(),
+                    ("ok", "git.diff") => json!({
+                        "id": "echo",
+                        "ok": { "truncated": false, "files": [] }
+                    })
+                    .to_string(),
+                    ("ok", "files.tree") => json!({
+                        "id": "echo",
+                        "ok": { "items": [], "truncated": false }
+                    })
+                    .to_string(),
+                    ("ok", "git.commit") => json!({
+                        "id": "echo",
+                        "ok": { "commit": "abc1234", "branch": "main" }
+                    })
+                    .to_string(),
+                    ("ok", "git.push") => json!({
+                        "id": "echo",
+                        "ok": { "remote": "origin", "ref": "main", "ok": true }
+                    })
+                    .to_string(),
+                    ("ok", "files.open") => json!({
+                        "id": "echo",
+                        "ok": { "opened": true }
+                    })
+                    .to_string(),
+                    _ => json!({
+                        "id": "echo",
+                        "error": { "code": "unsupported_method", "message": "no 1.2" }
+                    })
+                    .to_string(),
+                };
+                write_http_json(&mut stream, &body);
+            }
+        });
+        SliceMock {
+            origin: format!("http://{addr}"),
+            hits,
+        }
+    }
+
+    fn methods_of(mock: &SliceMock) -> Vec<String> {
+        mock.hits
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|h| h.method.clone())
+            .collect()
+    }
+
+    #[test]
+    fn stage_unstage_commit_restore_open_send_right_rpc() {
+        let mock = start_write_state_mock("ok");
+        let session = connect(&pid(&mock.origin)).expect("online");
+        let mut state = online_state(session);
+        assert!(state.write_ready());
+        state.stage_paths(vec!["src/lib.rs".into()]);
+        state.unstage_paths(vec!["src/lib.rs".into()]);
+        state.git_commit_message = "feat: demo".into();
+        state.commit_git();
+        assert!(state.git_commit_message.is_empty());
+        state.git_selected_path = Some("src/lib.rs".into());
+        state.restore_selected();
+        state.open_in_editor("src/lib.rs".into());
+        assert!(state.toast.is_none());
+        let hits = mock.hits.lock().unwrap().clone();
+        let stage = hits
+            .iter()
+            .find(|h| h.method == "git.stage")
+            .expect("stage");
+        assert_eq!(stage.params["workspaceId"], "ws-1");
+        assert_eq!(stage.params["paths"][0], "src/lib.rs");
+        let unstage = hits
+            .iter()
+            .find(|h| h.method == "git.unstage")
+            .expect("unstage");
+        assert_eq!(unstage.params["paths"][0], "src/lib.rs");
+        let commit = hits
+            .iter()
+            .find(|h| h.method == "git.commit")
+            .expect("commit");
+        assert_eq!(commit.params["message"], "feat: demo");
+        let restore = hits
+            .iter()
+            .find(|h| h.method == "git.restore")
+            .expect("restore");
+        assert_eq!(restore.params["paths"][0], "src/lib.rs");
+        assert_eq!(restore.params["staged"], false);
+        let open = hits
+            .iter()
+            .find(|h| h.method == "files.open")
+            .expect("files.open");
+        assert_eq!(open.params["path"], "src/lib.rs");
+        assert_eq!(open.params["workspaceId"], "ws-1");
+    }
+
+    #[test]
+    fn push_without_confirm_does_not_fire_rpc() {
+        let mock = start_write_state_mock("ok");
+        let session = connect(&pid(&mock.origin)).expect("online");
+        let mut state = online_state(session);
+        state.request_push();
+        assert!(state.show_push_confirm);
+        assert!(!methods_of(&mock).contains(&"git.push".to_string()));
+        state.cancel_push_confirm();
+        assert!(!state.show_push_confirm);
+        assert!(!methods_of(&mock).contains(&"git.push".to_string()));
+        assert_eq!(crate::ladder::PUSH_CONFIRM_TITLE, "Отправить в remote?");
+    }
+
+    #[test]
+    fn confirm_then_push_fires_git_push() {
+        let mock = start_write_state_mock("ok");
+        let session = connect(&pid(&mock.origin)).expect("online");
+        let mut state = online_state(session);
+        state.request_push();
+        assert!(state.show_push_confirm);
+        state.confirm_push();
+        assert!(!state.show_push_confirm);
+        assert!(state.toast.is_none());
+        let hits = mock.hits.lock().unwrap().clone();
+        let push = hits.iter().find(|h| h.method == "git.push").expect("push");
+        assert_eq!(push.params["workspaceId"], "ws-1");
+        assert!(push.params.get("remote").is_none());
+        assert!(push.params.get("ref").is_none());
+    }
+
+    #[test]
+    fn revert_fires_git_restore() {
+        let mock = start_write_state_mock("ok");
+        let session = connect(&pid(&mock.origin)).expect("online");
+        let mut state = online_state(session);
+        state.restore_paths(vec!["README.md".into()], false);
+        let hits = mock.hits.lock().unwrap().clone();
+        let restore = hits
+            .iter()
+            .find(|h| h.method == "git.restore")
+            .expect("git.restore");
+        assert_eq!(restore.params["paths"][0], "README.md");
+        assert_eq!(restore.params["staged"], false);
+    }
+
+    #[test]
+    fn open_in_editor_fires_files_open() {
+        let mock = start_write_state_mock("ok");
+        let session = connect(&pid(&mock.origin)).expect("online");
+        let mut state = online_state(session);
+        state.open_in_editor("Cargo.toml".into());
+        let hits = mock.hits.lock().unwrap().clone();
+        let open = hits
+            .iter()
+            .find(|h| h.method == "files.open")
+            .expect("files.open");
+        assert_eq!(open.params["path"], "Cargo.toml");
+        assert!(
+            !hits.iter().any(|h| h.method == "files.write"),
+            "open must not write"
+        );
+    }
+
+    #[test]
+    fn old_host_write_toasts_and_does_not_panic() {
+        let mock = start_write_state_mock("old");
+        let session = connect(&pid(&mock.origin)).expect("online");
+        assert!(!session.write_accepted());
+        let mut state = online_state(session);
+        state.stage_paths(vec!["src/lib.rs".into()]);
+        assert_eq!(
+            state.write_status.as_deref(),
+            Some(crate::ladder::WRITE_UNAVAILABLE)
+        );
+        assert_eq!(
+            state.toast.as_deref(),
+            Some(crate::ladder::WRITE_UNAVAILABLE)
+        );
+        state.request_push();
+        assert!(!state.show_push_confirm);
+        state.confirm_push();
+        state.open_in_editor("src/lib.rs".into());
+        state.restore_paths(vec!["src/lib.rs".into()], false);
+        state.git_commit_message = "x".into();
+        state.commit_git();
+        let methods = methods_of(&mock);
+        assert!(!methods.contains(&"git.stage".to_string()), "{methods:?}");
+        assert!(!methods.contains(&"git.push".to_string()), "{methods:?}");
+        assert!(!methods.contains(&"git.commit".to_string()), "{methods:?}");
+        assert!(!methods.contains(&"git.restore".to_string()), "{methods:?}");
+        assert!(!methods.contains(&"files.open".to_string()), "{methods:?}");
+        assert_eq!(
+            crate::ladder::WRITE_UNAVAILABLE,
+            "запись недоступна: host без 1.2"
+        );
+    }
+
+    #[test]
+    fn write_error_label_maps_identity_and_auth() {
+        let identity = write_error_label(&ConnectError::Rpc {
+            code: "git_identity".into(),
+            message: "no user".into(),
+        });
+        assert_eq!(identity, crate::ladder::GIT_IDENTITY_HINT);
+        let auth = write_error_label(&ConnectError::Rpc {
+            code: "git_auth".into(),
+            message: "auth".into(),
+        });
+        assert_eq!(auth, crate::ladder::GIT_AUTH_HINT);
+        let unsupported = write_error_label(&ConnectError::Rpc {
+            code: "unsupported_method".into(),
+            message: "no 1.2".into(),
+        });
+        assert_eq!(unsupported, crate::ladder::WRITE_UNAVAILABLE);
     }
 }
