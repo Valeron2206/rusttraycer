@@ -55,6 +55,7 @@ impl AgentBackend for ClaudePtyBackend {
             session_resume: true,
             a2a_inbox: false,
             pty: true,
+            steer: false,
             needs_api_key: false,
             api_key_env: None,
         }

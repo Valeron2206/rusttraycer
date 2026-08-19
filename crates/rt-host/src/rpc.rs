@@ -747,6 +747,11 @@ async fn dispatch_method(
                 .map_err(|e| HostError::InvalidParams(e.to_string()))?;
             Ok(serde_json::to_value(svc.worktree_gc(p.dry_run)?)?)
         }
+        "pr.get" => {
+            let p: rt_protocol::PrGetParams = serde_json::from_value(params)
+                .map_err(|e| HostError::InvalidParams(e.to_string()))?;
+            Ok(serde_json::to_value(svc.pr_get(&p)?)?)
+        }
         other => Err(HostError::UnsupportedMethod(other.to_string())),
     };
     match &result {
