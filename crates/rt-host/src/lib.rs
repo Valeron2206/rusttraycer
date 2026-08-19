@@ -5,6 +5,7 @@ pub mod files;
 pub mod guides;
 pub mod handshake;
 pub mod mux;
+pub mod pdf;
 pub mod pty;
 pub mod rpc;
 pub mod service;

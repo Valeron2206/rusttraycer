@@ -80,6 +80,16 @@ struct LadderState {
     applied: HashSet<String>,
 }
 
+struct ReservedTurn {
+    agent_id: String,
+    task_id: String,
+    workspace_path: std::path::PathBuf,
+    backend: Arc<dyn AgentBackend>,
+    gen: u64,
+    user: Option<Message>,
+    attached: Option<std::path::PathBuf>,
+}
+
 pub struct SendOutcome {
     pub user: rt_storage::Message,
     pub approval_id: Option<String>,
@@ -885,10 +895,16 @@ rusttraycer_tasks{{status="archived"}} {archived}
 
     /// Durable user message + spawn turn. Ladder off — existing callers stay green.
     pub fn send(&self, agent_id: &str, content: &str) -> Result<Message> {
-        Ok(self.send_gated(agent_id, content, false)?.user)
+        Ok(self.send_gated(agent_id, content, false, None)?.user)
     }
 
-    pub fn send_gated(&self, agent_id: &str, content: &str, ladder: bool) -> Result<SendOutcome> {
+    pub fn send_gated(
+        &self,
+        agent_id: &str,
+        content: &str,
+        ladder: bool,
+        attached: Option<&std::path::Path>,
+    ) -> Result<SendOutcome> {
         if content.len() > MAX_CONTENT {
             return Err(HostError::InvalidParams("content exceeds 1 MiB".into()));
         }
@@ -982,8 +998,14 @@ rusttraycer_tasks{{status="archived"}} {archived}
             return Err(HostError::Internal(avail.detail));
         }
 
-        let user =
-            self.append_user_and_spawn(agent_id, content, &task, workspace.path.into(), backend)?;
+        let user = self.append_user_and_spawn(
+            agent_id,
+            content,
+            &task,
+            workspace.path.into(),
+            backend,
+            attached.map(std::path::Path::to_path_buf),
+        )?;
         drop(gate);
         Ok(SendOutcome {
             user,
@@ -1299,6 +1321,7 @@ rusttraycer_tasks{{status="archived"}} {archived}
         task: &Task,
         workspace_path: std::path::PathBuf,
         backend: Arc<dyn AgentBackend>,
+        attached: Option<std::path::PathBuf>,
     ) -> Result<Message> {
         let gen = self.inflight.reserve(agent_id)?;
         let user = match self
@@ -1311,14 +1334,15 @@ rusttraycer_tasks{{status="archived"}} {archived}
                 return Err(e.into());
             }
         };
-        if let Err(e) = self.spawn_reserved_turn(
-            agent_id,
-            &task.id,
+        if let Err(e) = self.spawn_reserved_turn(ReservedTurn {
+            agent_id: agent_id.to_string(),
+            task_id: task.id.clone(),
             workspace_path,
             backend,
             gen,
-            Some(user.clone()),
-        ) {
+            user: Some(user.clone()),
+            attached,
+        }) {
             self.inflight.remove_if(agent_id, gen);
             return Err(e);
         }
@@ -1561,49 +1585,51 @@ rusttraycer_tasks{{status="archived"}} {archived}
             .workspace_get(ws_id)?
             .ok_or_else(|| HostError::NotFound(format!("workspace {ws_id}")))?;
         let gen = self.inflight.reserve(&pending.agent_id)?;
-        if let Err(e) = self.spawn_reserved_turn(
-            &pending.agent_id,
-            &task.id,
-            workspace.path.into(),
+        if let Err(e) = self.spawn_reserved_turn(ReservedTurn {
+            agent_id: pending.agent_id.clone(),
+            task_id: task.id.clone(),
+            workspace_path: workspace.path.into(),
             backend,
             gen,
-            None,
-        ) {
+            user: None,
+            attached: None,
+        }) {
             self.inflight.remove_if(&pending.agent_id, gen);
             return Err(e);
         }
         Ok(())
     }
 
-    fn spawn_reserved_turn(
-        &self,
-        agent_id: &str,
-        task_id: &str,
-        workspace_path: std::path::PathBuf,
-        backend: Arc<dyn AgentBackend>,
-        gen: u64,
-        user: Option<Message>,
-    ) -> Result<()> {
+    fn spawn_reserved_turn(&self, args: ReservedTurn) -> Result<()> {
+        let ReservedTurn {
+            agent_id,
+            task_id,
+            workspace_path,
+            backend,
+            gen,
+            user,
+            attached,
+        } = args;
         self.store
-            .agent_set_status(agent_id, AgentStatus::Running)?;
-        if let Err(e) = self.store.task_touch(task_id) {
+            .agent_set_status(&agent_id, AgentStatus::Running)?;
+        if let Err(e) = self.store.task_touch(&task_id) {
             tracing::warn!(task_id, error = %e, "task_touch failed");
         }
         let _ = self.events.send(WsEvent::agent_status(
-            task_id,
-            agent_id,
+            &task_id,
+            &agent_id,
             AgentStatus::Running,
         ));
         if let Some(user) = user {
             let _ = self
                 .events
-                .send(WsEvent::agent_message(task_id, agent_id, user));
+                .send(WsEvent::agent_message(&task_id, &agent_id, user));
         }
-        let _ = self.events.send(WsEvent::task_updated(task_id));
+        let _ = self.events.send(WsEvent::task_updated(&task_id));
 
         let transcript = self
             .store
-            .message_list(agent_id)?
+            .message_list(&agent_id)?
             .into_iter()
             .map(|m| WireMessage {
                 role: match m.role {
@@ -1615,21 +1641,29 @@ rusttraycer_tasks{{status="archived"}} {archived}
                 content: m.content,
             })
             .collect();
-        let role = match self.store.agent_get(agent_id)? {
+        let role = match self.store.agent_get(&agent_id)? {
             Some(a) => a.role,
             None => "coder".to_string(),
         };
-        let messages = guides::inject_preamble(&self.data_dir, &workspace_path, &role, transcript);
+        let worktree = self
+            .store
+            .worktree_get_by_agent(&agent_id)
+            .ok()
+            .flatten()
+            .map(|w| std::path::PathBuf::from(w.path));
+        let start = guides::walk_start(attached.as_deref(), worktree.as_deref(), &workspace_path);
+        let messages =
+            guides::inject_preamble(&self.data_dir, &workspace_path, &start, &role, transcript);
 
         let req = TurnRequest {
-            agent_id: agent_id.to_string(),
-            task_id: task_id.to_string(),
+            agent_id: agent_id.clone(),
+            task_id: task_id.clone(),
             workspace_path,
             messages,
             extra_env: {
                 let mut env = BTreeMap::new();
-                env.insert("RUSTTRAYCER_AGENT_ID".into(), agent_id.to_string());
-                env.insert("RUSTTRAYCER_TASK_ID".into(), task_id.to_string());
+                env.insert("RUSTTRAYCER_AGENT_ID".into(), agent_id.clone());
+                env.insert("RUSTTRAYCER_TASK_ID".into(), task_id.clone());
                 env
             },
         };
@@ -1638,14 +1672,14 @@ rusttraycer_tasks{{status="archived"}} {archived}
             store: self.store.clone(),
             backend,
             req,
-            agent_id: agent_id.to_string(),
-            task_id: task_id.to_string(),
+            agent_id: agent_id.clone(),
+            task_id: task_id.clone(),
             events: self.events.clone(),
             inflight: self.inflight.clone(),
             gen,
             timeout: self.turn_timeout,
         });
-        self.inflight.attach(agent_id, gen, handle);
+        self.inflight.attach(&agent_id, gen, handle);
         Ok(())
     }
 
@@ -2172,12 +2206,7 @@ rusttraycer_tasks{{status="archived"}} {archived}
         format: &str,
     ) -> Result<rt_protocol::ArtifactExportOk> {
         match format {
-            "md" => {}
-            "pdf" => {
-                return Err(HostError::InvalidParams(
-                    "pdf export is not implemented".into(),
-                ));
-            }
+            "md" | "pdf" => {}
             other => {
                 return Err(HostError::InvalidParams(format!(
                     "format must be md|pdf, got {other}"
@@ -2185,9 +2214,23 @@ rusttraycer_tasks{{status="archived"}} {archived}
             }
         }
         let art = self.artifact_get(artifact_id)?;
+        let markdown = format!("{}\n\n{}", art.title, art.body);
+        if format == "pdf" {
+            let pdf = crate::pdf::render_markdown_pdf(&art.title, &art.body)
+                .map_err(HostError::Internal)?;
+            let bytes = String::from_utf8(pdf)
+                .map_err(|e| HostError::Internal(format!("pdf is not utf-8: {e}")))?;
+            return Ok(rt_protocol::ArtifactExportOk {
+                format: "pdf".into(),
+                markdown: String::new(),
+                bytes,
+                filename: format!("{}.pdf", art.id),
+            });
+        }
         Ok(rt_protocol::ArtifactExportOk {
             format: "md".into(),
-            markdown: format!("{}\n\n{}", art.title, art.body),
+            markdown,
+            bytes: String::new(),
             filename: format!("{}.md", art.id),
         })
     }
