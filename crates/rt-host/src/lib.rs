@@ -63,6 +63,12 @@ pub enum HostError {
     NotPty,
     #[error("pty is dead")]
     PtyDead,
+    #[error("cross-host delivery is not supported")]
+    CrossHost,
+    #[error("recipient has no A2A inbox")]
+    NoInbox,
+    #[error("loop exhausted")]
+    LoopExhausted,
     #[error("{0}")]
     Internal(String),
     #[error("already running (pid {pid})")]
@@ -93,6 +99,9 @@ impl HostError {
             Self::PatchFailed(_) => "patch_failed",
             Self::NotPty => "not_pty",
             Self::PtyDead => "pty_dead",
+            Self::CrossHost => "cross_host",
+            Self::NoInbox => "no_inbox",
+            Self::LoopExhausted => "loop_exhausted",
             Self::Internal(_) | Self::Io(_) | Self::Json(_) => "internal",
             Self::AlreadyRunning { .. } => "already_running",
         }
@@ -247,6 +256,9 @@ pub async fn prepare(config: HostConfig) -> Result<RunningHost> {
 
     if let Err(e) = store.set_running_agents_to_error() {
         tracing::warn!("restart recovery: {e}");
+    }
+    if let Err(e) = store.recover_running_loops_to_stopped() {
+        tracing::warn!("loop recovery: {e}");
     }
 
     let backends = config.backends.unwrap_or_else(|| {

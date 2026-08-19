@@ -853,8 +853,8 @@ async fn client_without_1_3_chat_and_write_live() {
     assert!(hs["ok"]["accepted"]["files.write"].is_object(), "{hs}");
     assert!(hs["ok"]["accepted"].get("pty.open").is_none(), "{hs}");
     assert_eq!(
-        hs["ok"]["accepted"]["agent.create"]["minor"], 3,
-        "offering 1.0 still accepts host 1.3: {hs}"
+        hs["ok"]["accepted"]["agent.create"]["minor"], 5,
+        "offering 1.0 still accepts host 1.5: {hs}"
     );
     assert_eq!(hs["ok"]["accepted"]["files.write"]["minor"], 2);
     assert_eq!(hs["ok"]["accepted"]["host.ping"]["minor"], 0);
@@ -957,7 +957,7 @@ async fn handshake_agent_create_1_3_write_1_2_ping_1_0() {
     let client = reqwest::Client::new();
     let (_token, hs) = handshake(&client, &base, f3_methods()).await;
     assert_eq!(hs["ok"]["accepted"]["agent.create"]["major"], 1);
-    assert_eq!(hs["ok"]["accepted"]["agent.create"]["minor"], 3);
+    assert_eq!(hs["ok"]["accepted"]["agent.create"]["minor"], 5);
     assert_eq!(hs["ok"]["accepted"]["files.write"]["minor"], 2);
     assert_eq!(hs["ok"]["accepted"]["host.ping"]["minor"], 0);
     assert_eq!(hs["ok"]["accepted"]["pty.open"]["minor"], 3);

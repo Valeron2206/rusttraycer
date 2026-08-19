@@ -202,11 +202,19 @@ async fn dispatch_method(
                     ));
                 }
             };
+            let parent_id = match params.get("parentId") {
+                None | Some(Value::Null) => None,
+                Some(Value::String(s)) => Some(s.clone()),
+                Some(_) => {
+                    return Err(HostError::InvalidParams("parentId must be a string".into()));
+                }
+            };
             Ok(serde_json::to_value(svc.agent_create_ex(
                 task_id,
                 provider,
                 interface,
                 launch_args,
+                parent_id.as_deref(),
             )?)?)
         }
         "agent.get" => {
@@ -501,6 +509,78 @@ async fn dispatch_method(
                 .map_err(|e| HostError::InvalidParams(e.to_string()))?;
             Ok(serde_json::to_value(svc.clear_transcript(&p.agent_id)?)?)
         }
+        "a2a.transcript" => {
+            let p: rt_protocol::A2aTranscriptParams = serde_json::from_value(params)
+                .map_err(|e| HostError::InvalidParams(e.to_string()))?;
+            Ok(serde_json::to_value(svc.a2a_transcript(&p.agent_id)?)?)
+        }
+        "a2a.deliver" => {
+            let p: rt_protocol::A2aDeliverParams = serde_json::from_value(params)
+                .map_err(|e| HostError::InvalidParams(e.to_string()))?;
+            Ok(serde_json::to_value(svc.a2a_deliver(
+                &p.from_agent_id,
+                &p.to_agent_id,
+                &p.content,
+            )?)?)
+        }
+        "loop.start" => {
+            let max_iterations = params
+                .get("maxIterations")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| HostError::InvalidParams("maxIterations is required".into()))?;
+            if max_iterations > u32::MAX as u64 {
+                return Err(HostError::InvalidParams(
+                    "maxIterations must be 1..32".into(),
+                ));
+            }
+            let budget_turns = match params.get("budgetTurns") {
+                None | Some(Value::Null) => None,
+                Some(v) => Some(v.as_u64().ok_or_else(|| {
+                    HostError::InvalidParams("budgetTurns must be a number".into())
+                })?),
+            };
+            if let Some(b) = budget_turns {
+                if b > u32::MAX as u64 {
+                    return Err(HostError::InvalidParams("budgetTurns must be 1..64".into()));
+                }
+            }
+            let task_id = params
+                .get("taskId")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| HostError::InvalidParams("taskId is required".into()))?;
+            let agent_ids = params
+                .get("agentIds")
+                .and_then(|v| v.as_array())
+                .ok_or_else(|| HostError::InvalidParams("agentIds is required".into()))?;
+            let mut ids = Vec::new();
+            for v in agent_ids {
+                let s = v
+                    .as_str()
+                    .ok_or_else(|| HostError::InvalidParams("agentIds must be strings".into()))?;
+                ids.push(s.to_string());
+            }
+            let prompt = params
+                .get("prompt")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| HostError::InvalidParams("prompt is required".into()))?;
+            Ok(serde_json::to_value(svc.loop_start(
+                task_id,
+                &ids,
+                max_iterations as u32,
+                budget_turns.map(|b| b as u32),
+                prompt,
+            )?)?)
+        }
+        "loop.get" => {
+            let p: rt_protocol::LoopGetParams = serde_json::from_value(params)
+                .map_err(|e| HostError::InvalidParams(e.to_string()))?;
+            Ok(serde_json::to_value(svc.loop_get(&p.loop_id)?)?)
+        }
+        "loop.stop" => {
+            let p: rt_protocol::LoopStopParams = serde_json::from_value(params)
+                .map_err(|e| HostError::InvalidParams(e.to_string()))?;
+            Ok(serde_json::to_value(svc.loop_stop(&p.loop_id)?)?)
+        }
         other => Err(HostError::UnsupportedMethod(other.to_string())),
     };
     match &result {
@@ -587,6 +667,21 @@ pub enum WsEvent {
         #[serde(rename = "taskId")]
         task_id: String,
     },
+    #[serde(rename = "a2a.delivered")]
+    A2aDelivered {
+        #[serde(rename = "fromAgentId")]
+        from_agent_id: String,
+        #[serde(rename = "toAgentId")]
+        to_agent_id: String,
+        #[serde(rename = "messageId")]
+        message_id: String,
+    },
+    #[serde(rename = "loop.stopped")]
+    LoopStopped {
+        #[serde(rename = "loopId")]
+        loop_id: String,
+        reason: String,
+    },
 }
 
 impl WsEvent {
@@ -665,6 +760,21 @@ impl WsEvent {
         }
     }
 
+    pub fn a2a_delivered(from_agent_id: &str, to_agent_id: &str, message_id: &str) -> Self {
+        Self::A2aDelivered {
+            from_agent_id: from_agent_id.to_string(),
+            to_agent_id: to_agent_id.to_string(),
+            message_id: message_id.to_string(),
+        }
+    }
+
+    pub fn loop_stopped(loop_id: &str, reason: &str) -> Self {
+        Self::LoopStopped {
+            loop_id: loop_id.to_string(),
+            reason: reason.to_string(),
+        }
+    }
+
     pub fn task_id(&self) -> Option<&str> {
         match self {
             Self::AgentMessage { task_id, .. }
@@ -675,7 +785,9 @@ impl WsEvent {
             | Self::PtyExit { task_id, .. }
             | Self::ArtifactUpdated { task_id, .. }
             | Self::ArtifactDeleted { task_id, .. } => Some(task_id.as_str()),
-            Self::HostGoingAway { .. } => None,
+            Self::HostGoingAway { .. } | Self::A2aDelivered { .. } | Self::LoopStopped { .. } => {
+                None
+            }
         }
     }
 }

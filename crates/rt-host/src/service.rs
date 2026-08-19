@@ -427,7 +427,7 @@ impl HostService {
     }
 
     pub fn agent_create(&self, task_id: &str, provider: Option<&str>) -> Result<Agent> {
-        self.agent_create_ex(task_id, provider, None, None)
+        self.agent_create_ex(task_id, provider, None, None, None)
     }
 
     pub fn agent_create_ex(
@@ -436,6 +436,7 @@ impl HostService {
         provider: Option<&str>,
         interface: Option<&str>,
         launch_args: Option<Vec<String>>,
+        parent_id: Option<&str>,
     ) -> Result<Agent> {
         let provider = provider.unwrap_or("cli.generic");
         if !matches!(provider, "cli.generic" | "cli.claude" | "cli.codex") {
@@ -474,9 +475,13 @@ impl HostService {
             }
         }
         // available=false does not block create
-        let agent =
-            self.store
-                .agent_create_interface(task_id, &self.host_id, provider, interface)?;
+        let agent = self.store.agent_create_interface(
+            task_id,
+            &self.host_id,
+            provider,
+            interface,
+            parent_id,
+        )?;
         if interface == "terminal" && !launch_args.is_empty() {
             let mut g = self
                 .launch_args
@@ -1894,6 +1899,300 @@ impl HostService {
     pub fn clear_transcript(&self, agent_id: &str) -> Result<rt_protocol::ClearTranscriptOk> {
         let cleared = self.store.clear_transcript(agent_id)?;
         Ok(rt_protocol::ClearTranscriptOk { cleared })
+    }
+
+    pub fn a2a_transcript(&self, agent_id: &str) -> Result<rt_protocol::A2aTranscriptOk> {
+        let agent = self
+            .store
+            .agent_get(agent_id)?
+            .ok_or_else(|| HostError::NotFound(format!("agent {agent_id}")))?;
+        if agent.host_id != self.host_id {
+            return Err(HostError::CrossHost);
+        }
+        if agent.interface == "terminal" {
+            return Err(HostError::Internal("vendor session unavailable".into()));
+        }
+        let messages = self
+            .store
+            .message_list(agent_id)?
+            .into_iter()
+            .map(storage_message_to_wire)
+            .collect();
+        Ok(rt_protocol::A2aTranscriptOk {
+            agent_id: agent.id,
+            interface: agent.interface,
+            messages,
+        })
+    }
+
+    pub fn a2a_deliver(
+        &self,
+        from_agent_id: &str,
+        to_agent_id: &str,
+        content: &str,
+    ) -> Result<rt_protocol::A2aDeliverOk> {
+        if content.is_empty() || content.len() > MAX_CONTENT {
+            return Err(HostError::InvalidParams("content must be 1..=1 MiB".into()));
+        }
+        let from = self
+            .store
+            .agent_get(from_agent_id)?
+            .ok_or_else(|| HostError::NotFound(format!("agent {from_agent_id}")))?;
+        let to = self
+            .store
+            .agent_get(to_agent_id)?
+            .ok_or_else(|| HostError::NotFound(format!("agent {to_agent_id}")))?;
+        if from.task_id != to.task_id {
+            return Err(HostError::InvalidParams(
+                "from and to must belong to the same task".into(),
+            ));
+        }
+        if from.host_id != to.host_id || to.host_id != self.host_id {
+            return Err(HostError::CrossHost);
+        }
+        let backend = self.lookup_backend(&to)?;
+        if !backend.caps().a2a_inbox {
+            return Err(HostError::NoInbox);
+        }
+        let prefixed = format!("a2a:{from_agent_id}\n{content}");
+        let msg = self
+            .store
+            .message_append(to_agent_id, MessageRole::System, &prefixed)?;
+        let _ = self
+            .events
+            .send(WsEvent::a2a_delivered(from_agent_id, to_agent_id, &msg.id));
+        Ok(rt_protocol::A2aDeliverOk {
+            message_id: msg.id,
+            to_agent_id: to.id,
+        })
+    }
+
+    pub fn loop_start(
+        &self,
+        task_id: &str,
+        agent_ids: &[String],
+        max_iterations: u32,
+        budget_turns: Option<u32>,
+        prompt: &str,
+    ) -> Result<rt_protocol::LoopStartOk> {
+        if agent_ids.len() != 2 {
+            return Err(HostError::InvalidParams(
+                "agentIds must contain exactly 2 ids".into(),
+            ));
+        }
+        if agent_ids[0] == agent_ids[1] {
+            return Err(HostError::InvalidParams(
+                "agentIds must be two different agents".into(),
+            ));
+        }
+        if !(1..=32).contains(&max_iterations) {
+            return Err(HostError::InvalidParams(
+                "maxIterations must be 1..32".into(),
+            ));
+        }
+        let budget = match budget_turns {
+            None => (max_iterations.saturating_mul(2)).min(64),
+            Some(b) if (1..=64).contains(&b) => b,
+            Some(_) => return Err(HostError::InvalidParams("budgetTurns must be 1..64".into())),
+        };
+        if prompt.is_empty() {
+            return Err(HostError::InvalidParams("prompt is required".into()));
+        }
+        if self.store.task_get(task_id)?.is_none() {
+            return Err(HostError::NotFound(format!("task {task_id}")));
+        }
+        let a = self
+            .store
+            .agent_get(&agent_ids[0])?
+            .ok_or_else(|| HostError::NotFound(format!("agent {}", agent_ids[0])))?;
+        let b = self
+            .store
+            .agent_get(&agent_ids[1])?
+            .ok_or_else(|| HostError::NotFound(format!("agent {}", agent_ids[1])))?;
+        if a.task_id != task_id || b.task_id != task_id {
+            return Err(HostError::InvalidParams(
+                "both agents must belong to the task".into(),
+            ));
+        }
+        let row = self.store.loop_insert(
+            task_id,
+            &a.id,
+            &b.id,
+            i64::from(max_iterations),
+            i64::from(budget),
+            prompt,
+        )?;
+        self.spawn_loop_runner(row.id.clone());
+        Ok(rt_protocol::LoopStartOk {
+            loop_id: row.id,
+            iteration: 0,
+            turns: 0,
+            max_iterations,
+            budget_turns: budget,
+        })
+    }
+
+    pub fn loop_get(&self, loop_id: &str) -> Result<rt_protocol::LoopView> {
+        let row = self
+            .store
+            .loop_get(loop_id)?
+            .ok_or_else(|| HostError::NotFound(format!("loop {loop_id}")))?;
+        Ok(loop_row_to_view(&row))
+    }
+
+    pub fn loop_stop(&self, loop_id: &str) -> Result<rt_protocol::LoopView> {
+        let before = self
+            .store
+            .loop_get(loop_id)?
+            .ok_or_else(|| HostError::NotFound(format!("loop {loop_id}")))?;
+        let row = self.store.loop_stop(loop_id, "stop")?;
+        if before.status == "running" {
+            let _ = self.events.send(WsEvent::loop_stopped(loop_id, "stop"));
+        }
+        Ok(loop_row_to_view(&row))
+    }
+
+    fn spawn_loop_runner(&self, loop_id: String) {
+        let svc = self.clone();
+        tokio::spawn(async move {
+            if let Err(e) = svc.run_loop(&loop_id).await {
+                tracing::warn!(loop_id, error = %e, "loop runner failed");
+                if let Err(stop_err) = svc.finish_loop(&loop_id, "error") {
+                    tracing::warn!(loop_id, error = %stop_err, "loop stop after error");
+                }
+            }
+        });
+    }
+
+    async fn run_loop(&self, loop_id: &str) -> Result<()> {
+        let row = self
+            .store
+            .loop_get(loop_id)?
+            .ok_or_else(|| HostError::NotFound(format!("loop {loop_id}")))?;
+        let agents = [row.agent_a.clone(), row.agent_b.clone()];
+        let mut idx = 0usize;
+        let mut first = true;
+        let mut last_text = row.prompt.clone();
+        loop {
+            let row = match self.store.loop_get(loop_id)? {
+                Some(r) => r,
+                None => return Ok(()),
+            };
+            if row.status != "running" {
+                return Ok(());
+            }
+            if row.iteration >= row.max_iterations {
+                return self.finish_loop(loop_id, "max_iterations");
+            }
+            if row.turns >= row.budget_turns {
+                return self.finish_loop(loop_id, "budget");
+            }
+            let agent_id = &agents[idx];
+            let content = if first {
+                row.prompt.clone()
+            } else {
+                last_text.clone()
+            };
+            first = false;
+            self.wait_agent_idle(agent_id).await?;
+            let row = match self.store.loop_get(loop_id)? {
+                Some(r) => r,
+                None => return Ok(()),
+            };
+            if row.status != "running" {
+                return Ok(());
+            }
+            match self.send(agent_id, &content) {
+                Ok(_) => {}
+                Err(HostError::Denied) => return self.finish_loop(loop_id, "denied"),
+                Err(HostError::LoopExhausted) => {
+                    return self.finish_loop(loop_id, "max_iterations")
+                }
+                Err(e) => {
+                    tracing::info!(loop_id, error = %e, "loop send failed");
+                    return self.finish_loop(loop_id, "error");
+                }
+            }
+            self.wait_agent_idle(agent_id).await?;
+            last_text = self
+                .last_assistant_text(agent_id)?
+                .unwrap_or_else(|| content.clone());
+            let new_iter = row.iteration + 1;
+            let new_turns = row.turns + 1;
+            self.store
+                .loop_update_progress(loop_id, new_iter, new_turns)?;
+            if new_iter >= row.max_iterations {
+                return self.finish_loop(loop_id, "max_iterations");
+            }
+            if new_turns >= row.budget_turns {
+                return self.finish_loop(loop_id, "budget");
+            }
+            idx = 1 - idx;
+        }
+    }
+
+    fn finish_loop(&self, loop_id: &str, reason: &str) -> Result<()> {
+        let before = self.store.loop_get(loop_id)?;
+        let row = self.store.loop_stop(loop_id, reason)?;
+        if before
+            .as_ref()
+            .map(|r| r.status == "running")
+            .unwrap_or(false)
+        {
+            let _ = self.events.send(WsEvent::loop_stopped(
+                loop_id,
+                &row.reason.clone().unwrap_or_else(|| reason.to_string()),
+            ));
+        }
+        Ok(())
+    }
+
+    async fn wait_agent_idle(&self, agent_id: &str) -> Result<()> {
+        for _ in 0..200 {
+            let agent = self
+                .store
+                .agent_get(agent_id)?
+                .ok_or_else(|| HostError::NotFound(format!("agent {agent_id}")))?;
+            let busy = agent.status == AgentStatus::Running || self.inflight.contains(agent_id)?;
+            if !busy {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        Err(HostError::Internal(format!(
+            "loop timed out waiting for agent {agent_id}"
+        )))
+    }
+
+    fn last_assistant_text(&self, agent_id: &str) -> Result<Option<String>> {
+        let msgs = self.store.message_list(agent_id)?;
+        Ok(msgs
+            .into_iter()
+            .rev()
+            .find(|m| m.role == MessageRole::Assistant)
+            .map(|m| m.content))
+    }
+}
+
+fn storage_message_to_wire(m: Message) -> rt_protocol::Message {
+    rt_protocol::Message {
+        id: m.id,
+        agent_id: m.agent_id,
+        role: m.role.as_str().to_string(),
+        content: m.content,
+        created_at: m.created_at,
+    }
+}
+
+fn loop_row_to_view(row: &rt_storage::LoopRow) -> rt_protocol::LoopView {
+    rt_protocol::LoopView {
+        loop_id: row.id.clone(),
+        iteration: u32::try_from(row.iteration).unwrap_or(0),
+        turns: u32::try_from(row.turns).unwrap_or(0),
+        max_iterations: u32::try_from(row.max_iterations).unwrap_or(0),
+        budget_turns: u32::try_from(row.budget_turns).unwrap_or(0),
+        status: row.status.clone(),
+        reason: row.reason.clone(),
     }
 }
 

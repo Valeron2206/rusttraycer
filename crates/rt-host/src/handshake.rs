@@ -1,4 +1,4 @@
-//! Per-method {major,minor} negotiation. Existing methods stay 1.0; policy.* is 1.1; write/git mutate is 1.2; agent.create + shell/pty are 1.3; artifacts/comments/clear_transcript are 1.4.
+//! Per-method {major,minor} negotiation. Existing methods stay 1.0; policy.* is 1.1; write/git mutate is 1.2; shell/pty are 1.3; artifacts/comments/clear_transcript are 1.4; agent.create + a2a/loop are 1.5.
 
 use std::collections::BTreeMap;
 
@@ -276,7 +276,7 @@ mod tests {
         e4.insert("host.ping".into(), MethodVersion { major: 1, minor: 0 });
         let (acc, rej) = negotiate(&e4);
         assert!(rej.is_empty(), "{rej:?}");
-        assert_eq!(acc["agent.create"], MethodVersion { major: 1, minor: 3 });
+        assert_eq!(acc["agent.create"], MethodVersion { major: 1, minor: 5 });
         assert_eq!(acc["pty.open"], MethodVersion { major: 1, minor: 3 });
         assert_eq!(acc["files.write"], MethodVersion { major: 1, minor: 2 });
         assert_eq!(acc["host.ping"], MethodVersion { major: 1, minor: 0 });
@@ -286,5 +286,28 @@ mod tests {
         let (acc, rej) = negotiate(&older);
         assert!(rej.is_empty(), "{rej:?}");
         assert_eq!(acc["files.write"], MethodVersion { major: 1, minor: 2 });
+    }
+
+    #[test]
+    fn agent_create_accepted_at_1_5_write_stays_1_2() {
+        let mut client = BTreeMap::new();
+        client.insert("agent.create".into(), MethodVersion { major: 1, minor: 5 });
+        client.insert("a2a.deliver".into(), MethodVersion { major: 1, minor: 5 });
+        client.insert("loop.start".into(), MethodVersion { major: 1, minor: 5 });
+        client.insert("files.write".into(), MethodVersion { major: 1, minor: 2 });
+        let (acc, rej) = negotiate(&client);
+        assert!(rej.is_empty(), "{rej:?}");
+        assert_eq!(acc["agent.create"], MethodVersion { major: 1, minor: 5 });
+        assert_eq!(acc["a2a.deliver"], MethodVersion { major: 1, minor: 5 });
+        assert_eq!(acc["loop.start"], MethodVersion { major: 1, minor: 5 });
+        assert_eq!(acc["files.write"], MethodVersion { major: 1, minor: 2 });
+        assert_eq!(
+            host_methods()["agent.create"],
+            MethodVersion { major: 1, minor: 5 }
+        );
+        assert_eq!(
+            host_methods()["files.write"],
+            MethodVersion { major: 1, minor: 2 }
+        );
     }
 }
