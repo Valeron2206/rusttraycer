@@ -1,3 +1,4 @@
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::Stdio;
@@ -233,9 +234,12 @@ fn run_cli_turn(
         if let Some(mut stdin) = child.stdin.take() {
             let body = format!("{payload}\n");
             if let Err(e) = stdin.write_all(body.as_bytes()).await {
-                yield TurnEvent::Failed { message: format!("write stdin: {e}") };
-                let _ = child.start_kill();
-                return;
+                // B1: /bin/echo and /bin/false close stdin; EPIPE is not a turn failure.
+                if e.kind() != ErrorKind::BrokenPipe && e.kind() != ErrorKind::ConnectionReset {
+                    yield TurnEvent::Failed { message: format!("write stdin: {e}") };
+                    let _ = child.start_kill();
+                    return;
+                }
             }
             drop(stdin);
         }
