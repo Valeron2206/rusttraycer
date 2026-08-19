@@ -523,6 +523,16 @@ mod tests {
     }
 
     #[test]
+    fn files_read_one_mib_is_file_too_large() {
+        let (_t, store, id, root) = seeded();
+        let big = vec![b'x'; 1024 * 1024 + 1];
+        std::fs::write(root.join("huge.txt"), &big).unwrap();
+        let err =
+            files_read(&store, &json!({ "workspaceId": id, "path": "huge.txt" })).unwrap_err();
+        assert_eq!(err.code(), "file_too_large");
+    }
+
+    #[test]
     fn symlink_out_is_invalid_params() {
         let (_t, store, id, root) = seeded();
         let outside = _t.path().join("outside");
