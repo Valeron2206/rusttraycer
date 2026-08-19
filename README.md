@@ -91,6 +91,7 @@ What shipped vs drafts: [`docs/v2-delta.md`](docs/v2-delta.md). v2.1 close: [`do
 | Doc | What it is |
 |---|---|
 | [directive-v2.md](docs/directive-v2.md) | Release goals / DoD |
+| [directive-v3.md](docs/directive-v3.md) | Dogfooding + parity-watch (active) |
 | [parity-matrix.md](docs/parity-matrix.md) | Traycer Desktop → RustTraycer statuses |
 | [adr/0001-target-platforms.md](docs/adr/0001-target-platforms.md) | Linux x86_64 package; macOS aarch64 = source/CI |
 | [adr/0002-agent-cancel.md](docs/adr/0002-agent-cancel.md) | Cancel contract |
