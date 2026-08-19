@@ -48,6 +48,11 @@ fn all_methods() -> Value {
         "agent.get_context",
         "files.tree",
         "files.read",
+        "worktree.ensure",
+        "worktree.get",
+        "worktree.list",
+        "git.status",
+        "git.diff",
     ];
     let mut m = serde_json::Map::new();
     for n in names {
@@ -56,7 +61,13 @@ fn all_methods() -> Value {
     Value::Object(m)
 }
 
-async fn rpc(client: &reqwest::Client, base: &str, token: Option<&str>, method: &str, params: Value) -> Value {
+async fn rpc(
+    client: &reqwest::Client,
+    base: &str,
+    token: Option<&str>,
+    method: &str,
+    params: Value,
+) -> Value {
     let mut req = client.post(format!("{base}/rpc")).json(&json!({
         "id": "t1",
         "method": method,
@@ -108,7 +119,10 @@ async fn host_loop_echo_files_and_busy() {
         .await
         .unwrap()
         .status();
-    assert!(matches!(ws_status.as_u16(), 400 | 401), "ws status={ws_status}");
+    assert!(
+        matches!(ws_status.as_u16(), 400 | 401),
+        "ws status={ws_status}"
+    );
 
     let hs = rpc(
         &client,
@@ -145,7 +159,14 @@ async fn host_loop_echo_files_and_busy() {
     )
     .await;
     let empty_tok = empty_hs["ok"]["sessionToken"].as_str().unwrap().to_string();
-    let mismatch = rpc(&client, &base, Some(&empty_tok), "files.tree", json!({"workspaceId":"x"})).await;
+    let mismatch = rpc(
+        &client,
+        &base,
+        Some(&empty_tok),
+        "files.tree",
+        json!({"workspaceId":"x"}),
+    )
+    .await;
     assert_eq!(mismatch["error"]["code"], "version_mismatch");
 
     let ws_dir = dir.path().join("proj");
@@ -162,7 +183,10 @@ async fn host_loop_echo_files_and_busy() {
         json!({ "path": ws_dir.to_str().unwrap() }),
     )
     .await;
-    let ws_id = ws["ok"]["id"].as_str().expect(&format!("ws={ws}")).to_string();
+    let ws_id = ws["ok"]["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("ws={ws}"))
+        .to_string();
     assert_eq!(ws["ok"]["name"], "proj");
 
     let again = rpc(
@@ -183,7 +207,9 @@ async fn host_loop_echo_files_and_busy() {
         json!({ "workspaceId": ws_id, "depth": 2 }),
     )
     .await;
-    let items = tree["ok"]["items"].as_array().expect(&format!("tree={tree}"));
+    let items = tree["ok"]["items"]
+        .as_array()
+        .unwrap_or_else(|| panic!("tree={tree}"));
     assert!(items.iter().any(|e| e["path"] == "README.md"));
     assert!(items.iter().any(|e| e["path"] == "src/main.rs"));
 
@@ -227,13 +253,23 @@ async fn host_loop_echo_files_and_busy() {
         json!({ "taskId": task_id }),
     )
     .await;
-    let agent_id = agent["ok"]["id"].as_str().expect(&format!("agent={agent}")).to_string();
+    let agent_id = agent["ok"]["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("agent={agent}"))
+        .to_string();
     assert_eq!(agent["ok"]["interface"], "chat");
     assert_eq!(agent["ok"]["provider"], "cli.generic");
     assert_eq!(agent["ok"]["runLocation"], "local");
     assert!(agent["ok"]["parentId"].is_null());
 
-    let got = rpc(&client, &base, Some(&token), "agent.get", json!({ "id": agent_id })).await;
+    let got = rpc(
+        &client,
+        &base,
+        Some(&token),
+        "agent.get",
+        json!({ "id": agent_id }),
+    )
+    .await;
     assert!(got["ok"].get("lastMessageAt").is_some(), "agent.get={got}");
     assert!(got["ok"]["lastMessageAt"].is_null());
 
@@ -251,7 +287,14 @@ async fn host_loop_echo_files_and_busy() {
     let mut idle = false;
     for _ in 0..50 {
         tokio::time::sleep(Duration::from_millis(50)).await;
-        let got = rpc(&client, &base, Some(&token), "agent.get", json!({ "id": agent_id })).await;
+        let got = rpc(
+            &client,
+            &base,
+            Some(&token),
+            "agent.get",
+            json!({ "id": agent_id }),
+        )
+        .await;
         if got["ok"]["status"] == "idle" {
             idle = true;
             assert!(got["ok"]["lastMessageAt"].is_string());
@@ -272,8 +315,9 @@ async fn host_loop_echo_files_and_busy() {
     assert!(msgs
         .iter()
         .any(|m| m["role"] == "user" && m["content"] == "hi there"));
-    assert!(msgs.iter().any(|m| m["role"] == "assistant"
-        && m["content"].as_str().unwrap().contains("hello")));
+    assert!(msgs
+        .iter()
+        .any(|m| m["role"] == "assistant" && m["content"].as_str().unwrap().contains("hello")));
 
     let doctor = rpc(&client, &base, Some(&token), "host.doctor", json!({})).await;
     assert_eq!(doctor["ok"]["hostId"], host_id);
@@ -290,9 +334,7 @@ async fn host_loop_echo_files_and_busy() {
 #[tokio::test]
 async fn handshake_version_reject_via_rpc() {
     let dir = tempfile::tempdir().unwrap();
-    let (addr, shutdown, join, _) = rt_host::spawn_test_host(dir.path(), None)
-        .await
-        .unwrap();
+    let (addr, shutdown, join, _) = rt_host::spawn_test_host(dir.path(), None).await.unwrap();
     let base = format!("http://{addr}");
     let client = reqwest::Client::new();
     let hs = rpc(
@@ -310,8 +352,14 @@ async fn handshake_version_reject_via_rpc() {
         }),
     )
     .await;
-    assert_eq!(hs["ok"]["rejected"]["task.create"]["reason"], "version_mismatch");
-    assert_eq!(hs["ok"]["rejected"]["host.ping"]["reason"], "version_mismatch");
+    assert_eq!(
+        hs["ok"]["rejected"]["task.create"]["reason"],
+        "version_mismatch"
+    );
+    assert_eq!(
+        hs["ok"]["rejected"]["host.ping"]["reason"],
+        "version_mismatch"
+    );
     let _ = shutdown.send(());
     let _ = join.await;
 }
@@ -319,9 +367,7 @@ async fn handshake_version_reject_via_rpc() {
 #[tokio::test]
 async fn second_prepare_fails_already_running() {
     let dir = tempfile::tempdir().unwrap();
-    let (addr, shutdown, join, _) = rt_host::spawn_test_host(dir.path(), None)
-        .await
-        .unwrap();
+    let (addr, shutdown, join, _) = rt_host::spawn_test_host(dir.path(), None).await.unwrap();
     assert!(addr.ip().is_loopback());
 
     // Same-process prepare sees our own pid and is allowed; simulate a foreign live host.

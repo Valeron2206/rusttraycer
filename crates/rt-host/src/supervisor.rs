@@ -54,28 +54,19 @@ impl Inflight {
             return Err(HostError::AgentBusy);
         }
         let gen = self.next_gen.fetch_add(1, Ordering::Relaxed);
-        g.insert(
-            agent_id.to_string(),
-            Slot {
-                gen,
-                handle: None,
-            },
-        );
+        g.insert(agent_id.to_string(), Slot { gen, handle: None });
         Ok(gen)
     }
 
     /// Attach a join handle only if `gen` still owns the slot.
     pub fn attach(&self, agent_id: &str, gen: u64, handle: JoinHandle<()>) {
-        match self.inner.lock() {
-            Ok(mut g) => {
-                if let Some(slot) = g.get_mut(agent_id) {
-                    if slot.gen == gen {
-                        slot.handle = Some(handle);
-                        return;
-                    }
+        if let Ok(mut g) = self.inner.lock() {
+            if let Some(slot) = g.get_mut(agent_id) {
+                if slot.gen == gen {
+                    slot.handle = Some(handle);
+                    return;
                 }
             }
-            Err(_) => {}
         }
         // Slot gone, generation mismatch, or poison: do not leak a detached task.
         handle.abort();
@@ -221,17 +212,31 @@ pub async fn run_turn(
     }
 }
 
+/// Arguments for [`spawn_turn`]. Bundled so the helper stays under clippy's
+/// `too_many_arguments` limit.
+pub(crate) struct SpawnTurn {
+    pub store: Store,
+    pub backend: std::sync::Arc<dyn AgentBackend>,
+    pub req: TurnRequest,
+    pub agent_id: String,
+    pub task_id: String,
+    pub events: tokio::sync::broadcast::Sender<WsEvent>,
+    pub inflight: Inflight,
+    pub gen: u64,
+}
+
 /// Spawn a panic-safe turn task. Caller must have reserved `agent_id` in `inflight`.
-pub fn spawn_turn(
-    store: Store,
-    backend: std::sync::Arc<dyn AgentBackend>,
-    req: TurnRequest,
-    agent_id: String,
-    task_id: String,
-    events: tokio::sync::broadcast::Sender<WsEvent>,
-    inflight: Inflight,
-    gen: u64,
-) -> JoinHandle<()> {
+pub(crate) fn spawn_turn(args: SpawnTurn) -> JoinHandle<()> {
+    let SpawnTurn {
+        store,
+        backend,
+        req,
+        agent_id,
+        task_id,
+        events,
+        inflight,
+        gen,
+    } = args;
     let agent_for_err = agent_id.clone();
     let task_for_err = task_id.clone();
     let store_for_err = store.clone();

@@ -8,6 +8,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 const MIGRATION_0001: &str = include_str!("../migrations/0001_init.sql");
+const MIGRATION_0002: &str = include_str!("../migrations/0002_worktrees.sql");
 
 /// RFC3339 UTC timestamp (millis, Z suffix).
 pub fn now_rfc3339() -> String {
@@ -253,6 +254,17 @@ pub struct Message {
     pub created_at: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Worktree {
+    pub id: String,
+    pub workspace_id: String,
+    pub agent_id: String,
+    pub path: String,
+    pub branch: String,
+    pub created_at: String,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Counts {
     pub workspace_count: i64,
@@ -325,10 +337,15 @@ impl Store {
                 }
             })?;
         match current.as_deref() {
-            Some("1") => Ok(()),
+            Some("1") => {
+                conn.execute_batch(MIGRATION_0002)?;
+                Ok(())
+            }
+            Some("2") => Ok(()),
             Some(other) => Err(StorageError::UnsupportedSchema(other.to_string())),
             None => {
                 conn.execute_batch(MIGRATION_0001)?;
+                conn.execute_batch(MIGRATION_0002)?;
                 Ok(())
             }
         }
@@ -345,17 +362,13 @@ impl Store {
 
     pub fn host_get(&self) -> Result<HostRow> {
         let conn = self.lock()?;
-        conn.query_row(
-            "SELECT id, name, created_at FROM host LIMIT 1",
-            [],
-            |r| {
-                Ok(HostRow {
-                    id: r.get(0)?,
-                    name: r.get(1)?,
-                    created_at: r.get(2)?,
-                })
-            },
-        )
+        conn.query_row("SELECT id, name, created_at FROM host LIMIT 1", [], |r| {
+            Ok(HostRow {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                created_at: r.get(2)?,
+            })
+        })
         .optional()?
         .ok_or(StorageError::NotFound)
     }
@@ -720,6 +733,101 @@ impl Store {
         })
     }
 
+    pub fn worktree_get_by_agent(&self, agent_id: &str) -> Result<Option<Worktree>> {
+        let conn = self.lock()?;
+        conn.query_row(
+            "SELECT id, workspace_id, agent_id, path, branch, created_at              FROM worktrees WHERE agent_id = ?1",
+            [agent_id],
+            map_worktree,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    pub fn worktree_get(&self, id: &str) -> Result<Option<Worktree>> {
+        let conn = self.lock()?;
+        conn.query_row(
+            "SELECT id, workspace_id, agent_id, path, branch, created_at              FROM worktrees WHERE id = ?1",
+            [id],
+            map_worktree,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    pub fn worktree_list(&self, workspace_id: &str) -> Result<Vec<Worktree>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, workspace_id, agent_id, path, branch, created_at              FROM worktrees WHERE workspace_id = ?1 ORDER BY created_at ASC, id ASC",
+        )?;
+        let rows = stmt.query_map([workspace_id], map_worktree)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    pub fn worktree_insert(
+        &self,
+        workspace_id: &str,
+        agent_id: &str,
+        path: &str,
+        branch: &str,
+    ) -> Result<Worktree> {
+        let id = new_id();
+        let created_at = now_rfc3339();
+        {
+            let mut conn = self.lock()?;
+            let tx = conn.transaction()?;
+            let ws_ok: Option<String> = tx
+                .query_row(
+                    "SELECT id FROM workspaces WHERE id = ?1",
+                    [workspace_id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if ws_ok.is_none() {
+                return Err(StorageError::NotFound);
+            }
+            let ag_ok: Option<String> = tx
+                .query_row("SELECT id FROM agents WHERE id = ?1", [agent_id], |r| {
+                    r.get(0)
+                })
+                .optional()?;
+            if ag_ok.is_none() {
+                return Err(StorageError::NotFound);
+            }
+            tx.execute(
+                "INSERT INTO worktrees (id, workspace_id, agent_id, path, branch, created_at)                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![id, workspace_id, agent_id, path, branch, created_at],
+            )?;
+            tx.commit()?;
+        }
+        Ok(Worktree {
+            id,
+            workspace_id: workspace_id.to_string(),
+            agent_id: agent_id.to_string(),
+            path: path.to_string(),
+            branch: branch.to_string(),
+            created_at,
+        })
+    }
+
+    pub fn agent_set_run_location(&self, id: &str, run_location: &str) -> Result<()> {
+        if run_location != "local" && run_location != "worktree" {
+            return Err(StorageError::InvalidParams(format!(
+                "run_location must be local|worktree, got {run_location}"
+            )));
+        }
+        let conn = self.lock()?;
+        let n = conn.execute(
+            "UPDATE agents SET run_location = ?1 WHERE id = ?2",
+            params![run_location, id],
+        )?;
+        if n == 0 {
+            return Err(StorageError::NotFound);
+        }
+        Ok(())
+    }
+
     pub fn set_running_agents_to_error(&self) -> Result<usize> {
         let conn = self.lock()?;
         let n = conn.execute(
@@ -757,6 +865,17 @@ fn map_workspace(r: &rusqlite::Row<'_>) -> rusqlite::Result<Workspace> {
     })
 }
 
+fn map_worktree(r: &rusqlite::Row<'_>) -> rusqlite::Result<Worktree> {
+    Ok(Worktree {
+        id: r.get(0)?,
+        workspace_id: r.get(1)?,
+        agent_id: r.get(2)?,
+        path: r.get(3)?,
+        branch: r.get(4)?,
+        created_at: r.get(5)?,
+    })
+}
+
 type AgentTuple = (
     String,
     String,
@@ -784,7 +903,8 @@ fn map_agent_tuple(r: &rusqlite::Row<'_>) -> rusqlite::Result<AgentTuple> {
 }
 
 fn agent_from_tuple(t: AgentTuple) -> Result<Agent> {
-    let (id, task_id, host_id, parent_id, interface, provider, status, run_location, created_at) = t;
+    let (id, task_id, host_id, parent_id, interface, provider, status, run_location, created_at) =
+        t;
     Ok(Agent {
         id,
         task_id,
@@ -817,7 +937,9 @@ mod tests {
         assert!(MIGRATION_0001.contains("CREATE INDEX idx_messages_agent"));
         assert!(MIGRATION_0001.contains("parent_id    TEXT REFERENCES agents(id)"));
         assert!(MIGRATION_0001.contains("UNIQUE (path)"));
-        assert!(MIGRATION_0001.contains("INSERT INTO schema_meta(key, value) VALUES ('schema', '1')"));
+        assert!(
+            MIGRATION_0001.contains("INSERT INTO schema_meta(key, value) VALUES ('schema', '1')")
+        );
         assert!(!MIGRATION_0001.to_lowercase().contains("create table files"));
         assert!(!MIGRATION_0001.contains("schema_major"));
         assert!(!MIGRATION_0001.contains("ON DELETE CASCADE"));
@@ -931,7 +1053,7 @@ mod tests {
         {
             let conn = store.lock().unwrap();
             conn.execute(
-                "UPDATE schema_meta SET value = '2' WHERE key = 'schema'",
+                "UPDATE schema_meta SET value = '3' WHERE key = 'schema'",
                 [],
             )
             .unwrap();
@@ -940,7 +1062,7 @@ mod tests {
         let err = Store::open(&db).unwrap_err();
         assert_eq!(err.code(), "internal");
         match &err {
-            StorageError::UnsupportedSchema(v) => assert_eq!(v, "2"),
+            StorageError::UnsupportedSchema(v) => assert_eq!(v, "3"),
             other => panic!("expected UnsupportedSchema, got {other:?}"),
         }
     }
@@ -995,5 +1117,126 @@ mod tests {
         let second = store.task_get(&task.id).unwrap().unwrap();
         assert_eq!(first.updated_at, second.updated_at);
         assert_eq!(second.status, TaskStatus::Archived);
+    }
+
+    #[test]
+    fn migration_0002_matches_contract() {
+        assert!(MIGRATION_0002.contains("CREATE TABLE worktrees"));
+        assert!(MIGRATION_0002.contains("CHECK (run_location IN ('local', 'worktree'))"));
+        assert!(MIGRATION_0002.contains("CREATE INDEX idx_agents_task"));
+        assert!(MIGRATION_0002.contains("CREATE INDEX idx_agents_status"));
+        assert!(MIGRATION_0002
+            .contains("INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('schema', '2')"));
+        assert!(!MIGRATION_0001.contains("CREATE TABLE worktrees"));
+    }
+
+    #[test]
+    fn fresh_db_is_schema_two() {
+        let (_tmp, store) = open_store();
+        let conn = rusqlite::Connection::open(store.path()).unwrap();
+        let schema: String = conn
+            .query_row(
+                "SELECT value FROM schema_meta WHERE key = 'schema'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(schema, "2");
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'worktrees'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn migrate_schema_one_applies_worktrees() {
+        let dir = tempdir().unwrap();
+        let db = dir.path().join("host.db");
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute_batch(MIGRATION_0001).unwrap();
+            let schema: String = conn
+                .query_row(
+                    "SELECT value FROM schema_meta WHERE key = 'schema'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(schema, "1");
+            let n: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'worktrees'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 0);
+        }
+        let store = Store::open(&db).unwrap();
+        let conn = rusqlite::Connection::open(store.path()).unwrap();
+        let schema: String = conn
+            .query_row(
+                "SELECT value FROM schema_meta WHERE key = 'schema'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(schema, "2");
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'worktrees'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1);
+        store.host_insert_if_absent(&new_id(), "h").unwrap();
+        let ws = store.workspace_add("/p", "p").unwrap();
+        let task = store.task_create("t", &ws.id).unwrap();
+        let host = store.host_get().unwrap();
+        let agent = store
+            .agent_create(&task.id, &host.id, "cli.generic")
+            .unwrap();
+        store.agent_set_run_location(&agent.id, "worktree").unwrap();
+        assert_eq!(
+            store.agent_get(&agent.id).unwrap().unwrap().run_location,
+            "worktree"
+        );
+    }
+
+    #[test]
+    fn worktree_crud_and_run_location() {
+        let (_tmp, store) = open_store();
+        let host_id = new_id();
+        store.host_insert_if_absent(&host_id, "h").unwrap();
+        let ws = store.workspace_add("/proj", "proj").unwrap();
+        let task = store.task_create("t", &ws.id).unwrap();
+        let agent = store
+            .agent_create(&task.id, &host_id, "cli.generic")
+            .unwrap();
+        assert!(store.worktree_get_by_agent(&agent.id).unwrap().is_none());
+        assert!(store.worktree_list(&ws.id).unwrap().is_empty());
+        let wt = store
+            .worktree_insert(&ws.id, &agent.id, "/wt/a", "rt/abcd1234")
+            .unwrap();
+        store.agent_set_run_location(&agent.id, "worktree").unwrap();
+        assert_eq!(store.worktree_get(&wt.id).unwrap().unwrap().id, wt.id);
+        let by_agent = store.worktree_get_by_agent(&agent.id).unwrap().unwrap();
+        assert_eq!(by_agent.id, wt.id);
+        assert_eq!(by_agent.path, "/wt/a");
+        assert_eq!(by_agent.branch, "rt/abcd1234");
+        assert_eq!(store.worktree_list(&ws.id).unwrap().len(), 1);
+        assert_eq!(
+            store.agent_get(&agent.id).unwrap().unwrap().run_location,
+            "worktree"
+        );
+        let v = serde_json::to_value(&wt).unwrap();
+        assert_eq!(v["workspaceId"], ws.id);
+        assert_eq!(v["agentId"], agent.id);
+        assert!(v.get("workspace_id").is_none());
     }
 }

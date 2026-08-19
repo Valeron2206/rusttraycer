@@ -35,7 +35,7 @@ pub struct HostService {
     events: tokio::sync::broadcast::Sender<WsEvent>,
     sessions: Arc<Mutex<HashMap<String, Session>>>,
     host_id: String,
-    data_dir: std::path::PathBuf,
+    pub(crate) data_dir: std::path::PathBuf,
     db_path: std::path::PathBuf,
     log_path: std::path::PathBuf,
     rpc_url: String,
@@ -107,7 +107,7 @@ impl From<Agent> for AgentView {
 
 fn check_title(title: &str) -> Result<()> {
     let n = title.chars().count();
-    if n < 1 || n > MAX_TITLE_CHARS {
+    if !(1..=MAX_TITLE_CHARS).contains(&n) {
         return Err(HostError::InvalidParams(
             "title must be 1..200 characters".into(),
         ));
@@ -185,7 +185,12 @@ impl HostService {
         self.sessions
             .lock()
             .map_err(|_| HostError::Internal("session lock poisoned".into()))?
-            .insert(token.clone(), Session { accepted: accepted_names });
+            .insert(
+                token.clone(),
+                Session {
+                    accepted: accepted_names,
+                },
+            );
         Ok(HandshakeResult {
             host_id: self.host_id.clone(),
             host_version: handshake::HOST_VERSION.to_string(),
@@ -249,7 +254,9 @@ impl HostService {
             .filter(|s| !s.is_empty())
             .unwrap_or("workspace")
             .to_string();
-        Ok(self.store.workspace_add(canon.to_string_lossy().as_ref(), &name)?)
+        Ok(self
+            .store
+            .workspace_add(canon.to_string_lossy().as_ref(), &name)?)
     }
 
     pub fn task_list(&self, status: &str) -> Result<Vec<Task>> {
@@ -342,6 +349,7 @@ impl HostService {
         path: Option<&str>,
         depth: Option<u32>,
         max_entries: Option<u32>,
+        worktree_id: Option<&str>,
     ) -> Result<serde_json::Value> {
         let mut p = serde_json::json!({ "workspaceId": workspace_id });
         if let Some(path) = path {
@@ -353,14 +361,23 @@ impl HostService {
         if let Some(m) = max_entries {
             p["maxEntries"] = serde_json::json!(m);
         }
+        if let Some(wt) = worktree_id {
+            p["worktreeId"] = serde_json::json!(wt);
+        }
         files::files_tree(&self.store, &p)
     }
 
-    pub fn files_read(&self, workspace_id: &str, path: &str) -> Result<serde_json::Value> {
-        files::files_read(
-            &self.store,
-            &serde_json::json!({ "workspaceId": workspace_id, "path": path }),
-        )
+    pub fn files_read(
+        &self,
+        workspace_id: &str,
+        path: &str,
+        worktree_id: Option<&str>,
+    ) -> Result<serde_json::Value> {
+        let mut p = serde_json::json!({ "workspaceId": workspace_id, "path": path });
+        if let Some(wt) = worktree_id {
+            p["worktreeId"] = serde_json::json!(wt);
+        }
+        files::files_read(&self.store, &p)
     }
 
     /// Durable user message + spawn turn. Returns the user Message.
@@ -387,9 +404,13 @@ impl HostService {
         }
 
         // HashMap lookup, no match on provider. caps() ignored in MVP.
-        let backend = self.backends.get(agent.provider.as_str()).cloned().ok_or_else(|| {
-            HostError::Internal(format!("no backend registered for {}", agent.provider))
-        })?;
+        let backend = self
+            .backends
+            .get(agent.provider.as_str())
+            .cloned()
+            .ok_or_else(|| {
+                HostError::Internal(format!("no backend registered for {}", agent.provider))
+            })?;
         let avail = backend.available();
         if !avail.available {
             return Err(HostError::Internal(avail.detail));
@@ -469,16 +490,16 @@ impl HostService {
 
         drop(gate);
 
-        let handle = supervisor::spawn_turn(
-            self.store.clone(),
+        let handle = supervisor::spawn_turn(supervisor::SpawnTurn {
+            store: self.store.clone(),
             backend,
             req,
-            agent_id.to_string(),
-            task.id,
-            self.events.clone(),
-            self.inflight.clone(),
+            agent_id: agent_id.to_string(),
+            task_id: task.id,
+            events: self.events.clone(),
+            inflight: self.inflight.clone(),
             gen,
-        );
+        });
         self.inflight.attach(agent_id, gen, handle);
         Ok(user)
     }
@@ -531,7 +552,9 @@ mod tests {
         }
         fn start_turn(&self, _req: TurnRequest) -> Pin<Box<dyn Stream<Item = TurnEvent> + Send>> {
             Box::pin(futures::stream::once(async {
-                TurnEvent::Failed { message: "should not run".into() }
+                TurnEvent::Failed {
+                    message: "should not run".into(),
+                }
             }))
         }
     }
@@ -605,7 +628,9 @@ mod tests {
         assert_eq!(first.role, MessageRole::User);
         assert_eq!(first.content, "hello");
         tokio::time::sleep(Duration::from_millis(50)).await;
-        let second = svc.send(&agent_id, "again").expect("second send after instant finish");
+        let second = svc
+            .send(&agent_id, "again")
+            .expect("second send after instant finish");
         assert_eq!(second.role, MessageRole::User);
         assert_eq!(second.content, "again");
         svc.inflight.abort_all();
@@ -630,7 +655,10 @@ mod tests {
             .filter(|r| matches!(r, Err(e) if e.code() == "agent_busy"))
             .count();
         assert_eq!(oks, 1, "exactly one send should succeed: {ra:?} {rb:?}");
-        assert_eq!(busy, 1, "exactly one send should be agent_busy: {ra:?} {rb:?}");
+        assert_eq!(
+            busy, 1,
+            "exactly one send should be agent_busy: {ra:?} {rb:?}"
+        );
         let users: Vec<_> = svc
             .get_context(&agent_id)
             .unwrap()
