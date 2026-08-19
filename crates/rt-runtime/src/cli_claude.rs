@@ -272,8 +272,11 @@ fn run_claude_turn(
         let prompt = flatten_prompt(&req.messages);
 
         let mut cmd = Command::new(&command);
-        cmd.args(CLAUDE_ARGS)
-            .current_dir(&req.workspace_path)
+        cmd.args(CLAUDE_ARGS);
+        if let Some(sid) = crate::provider_session_id(&req.extra_env) {
+            cmd.args(["--resume", sid]);
+        }
+        cmd.current_dir(&req.workspace_path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -564,6 +567,8 @@ mod tests {
     fn caps_are_cli_claude() {
         let backend = CliClaude::new("/bin/true");
         assert_eq!(backend.caps(), HarnessCaps::CLI_CLAUDE);
+        assert!(backend.caps().pty);
+        assert!(backend.caps().session_resume);
         assert_eq!(backend.id(), "cli.claude");
     }
 
@@ -918,5 +923,59 @@ sys.stdout.write(json.dumps({"type":"assistant","message":{"content":[{"type":"t
             }
             other => panic!("expected spawn Failed, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn resume_session_id_adds_vendor_argv() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dump_argv.py");
+        write_exec(
+            &path,
+            r#"#!/usr/bin/env python3
+import json, sys
+sys.stdin.read()
+text = " ".join(sys.argv[1:])
+print(json.dumps({"type":"assistant","message":{"content":[{"type":"text","text": text}]}}))
+"#,
+        );
+        let mut req = echo_req();
+        req.extra_env
+            .insert(crate::PROVIDER_SESSION_ENV.into(), "sess-abc".into());
+        let backend = CliClaude::new(path.to_string_lossy().into_owned());
+        let events = collect_exec(&backend, req).await;
+        let tokens = tokens_of(&events);
+        assert!(
+            tokens.contains("-p")
+                && tokens.contains("--output-format")
+                && tokens.contains("--resume")
+                && tokens.contains("sess-abc"),
+            "tokens={tokens:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_session_id_does_not_add_resume() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dump_argv.py");
+        write_exec(
+            &path,
+            r#"#!/usr/bin/env python3
+import json, sys
+sys.stdin.read()
+text = " ".join(sys.argv[1:])
+print(json.dumps({"type":"assistant","message":{"content":[{"type":"text","text": text}]}}))
+"#,
+        );
+        let mut req = echo_req();
+        req.extra_env
+            .insert(crate::PROVIDER_SESSION_ENV.into(), "   ".into());
+        let backend = CliClaude::new(path.to_string_lossy().into_owned());
+        let events = collect_exec(&backend, req).await;
+        let tokens = tokens_of(&events);
+        assert!(tokens.contains("-p"), "tokens={tokens:?}");
+        assert!(
+            !tokens.contains("--resume"),
+            "empty session must not resume, tokens={tokens:?}"
+        );
     }
 }

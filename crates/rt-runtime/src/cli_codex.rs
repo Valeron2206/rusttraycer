@@ -250,8 +250,12 @@ fn run_codex_turn(
         let prompt = flatten_prompt(&req.messages);
 
         let mut cmd = Command::new(&command);
-        cmd.args(CODEX_ARGS)
-            .current_dir(&req.workspace_path)
+        if let Some(sid) = crate::provider_session_id(&req.extra_env) {
+            cmd.args(["exec", "resume", sid, "--json", "-"]);
+        } else {
+            cmd.args(CODEX_ARGS);
+        }
+        cmd.current_dir(&req.workspace_path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -552,6 +556,8 @@ mod tests {
     fn caps_are_cli_codex() {
         let backend = CliCodex::new("/bin/true");
         assert_eq!(backend.caps(), HarnessCaps::CLI_CODEX);
+        assert!(backend.caps().pty);
+        assert!(backend.caps().session_resume);
         assert_eq!(backend.id(), "cli.codex");
     }
 
@@ -885,5 +891,63 @@ print(json.dumps({"type":"error","message":"quota"}))
             }
             other => panic!("expected spawn Failed, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn resume_session_id_adds_vendor_argv() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dump_argv.py");
+        write_exec(
+            &path,
+            r#"#!/usr/bin/env python3
+import json, sys
+sys.stdin.read()
+text = " ".join(sys.argv[1:])
+print(json.dumps({"type":"item.completed","item":{"id":"i","type":"agent_message","text": text}}))
+"#,
+        );
+        let mut req = echo_req();
+        req.extra_env
+            .insert(crate::PROVIDER_SESSION_ENV.into(), "sess-xyz".into());
+        let backend = CliCodex::new(path.to_string_lossy().into_owned());
+        let events = collect_exec(&backend, req).await;
+        let tokens = tokens_of(&events);
+        assert!(
+            tokens.contains("exec")
+                && tokens.contains("resume")
+                && tokens.contains("sess-xyz")
+                && tokens.contains("--json")
+                && tokens.contains("-"),
+            "tokens={tokens:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_session_id_keeps_fresh_exec_argv() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dump_argv.py");
+        write_exec(
+            &path,
+            r#"#!/usr/bin/env python3
+import json, sys
+sys.stdin.read()
+text = " ".join(sys.argv[1:])
+print(json.dumps({"type":"item.completed","item":{"id":"i","type":"agent_message","text": text}}))
+"#,
+        );
+        let mut req = echo_req();
+        req.extra_env
+            .insert(crate::PROVIDER_SESSION_ENV.into(), "".into());
+        let backend = CliCodex::new(path.to_string_lossy().into_owned());
+        let events = collect_exec(&backend, req).await;
+        let tokens = tokens_of(&events);
+        assert!(
+            tokens.contains("exec") && tokens.contains("--json"),
+            "tokens={tokens:?}"
+        );
+        assert!(
+            !tokens.contains("resume"),
+            "empty session must not resume, tokens={tokens:?}"
+        );
     }
 }

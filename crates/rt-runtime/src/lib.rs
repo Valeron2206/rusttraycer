@@ -106,9 +106,9 @@ impl HarnessCaps {
         long_lived: false,
         stream_tokens: true,
         tools: false,
-        session_resume: false,
+        session_resume: true,
         a2a_inbox: false,
-        pty: false,
+        pty: true,
         needs_api_key: false,
         api_key_env: None,
     };
@@ -118,12 +118,25 @@ impl HarnessCaps {
         long_lived: false,
         stream_tokens: true,
         tools: false,
-        session_resume: false,
+        session_resume: true,
         a2a_inbox: false,
-        pty: false,
+        pty: true,
         needs_api_key: false,
         api_key_env: None,
     };
+}
+
+/// Host stores `providerSessionId` and puts it here on the next turn / pty.open.
+/// Adapters map it to vendor argv (`claude --resume ID`, `codex exec resume ID`).
+pub const PROVIDER_SESSION_ENV: &str = "RUSTTRAYCER_PROVIDER_SESSION_ID";
+
+/// Non-empty trimmed vendor session id from `extra_env`, if host supplied one.
+pub fn provider_session_id(extra_env: &BTreeMap<String, String>) -> Option<&str> {
+    extra_env
+        .get(PROVIDER_SESSION_ENV)
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
 }
 
 pub trait AgentBackend: Send + Sync {
@@ -233,33 +246,44 @@ mod cancel_tests {
         assert_eq!(WireRole::Tool.as_str(), "tool");
     }
 
-    fn assert_one_shot_cli_caps(caps: HarnessCaps) {
+    fn assert_one_shot_cli_caps(caps: HarnessCaps, pty: bool, session_resume: bool) {
         assert!(caps.one_shot);
         assert!(!caps.long_lived);
         assert!(caps.stream_tokens);
         assert!(!caps.tools);
-        assert!(!caps.session_resume);
+        assert_eq!(caps.session_resume, session_resume);
         assert!(!caps.a2a_inbox);
-        assert!(!caps.pty);
+        assert_eq!(caps.pty, pty);
         assert!(!caps.needs_api_key);
         assert!(caps.api_key_env.is_none());
     }
 
     #[test]
     fn harness_caps_cli_generic_fields() {
-        assert_one_shot_cli_caps(HarnessCaps::CLI_GENERIC);
+        assert_one_shot_cli_caps(HarnessCaps::CLI_GENERIC, false, false);
     }
 
     #[test]
     fn harness_caps_cli_claude_fields() {
-        assert_one_shot_cli_caps(HarnessCaps::CLI_CLAUDE);
-        assert_eq!(HarnessCaps::CLI_CLAUDE, HarnessCaps::CLI_GENERIC);
+        assert_one_shot_cli_caps(HarnessCaps::CLI_CLAUDE, true, true);
+        assert_ne!(HarnessCaps::CLI_CLAUDE, HarnessCaps::CLI_GENERIC);
     }
 
     #[test]
     fn harness_caps_cli_codex_fields() {
-        assert_one_shot_cli_caps(HarnessCaps::CLI_CODEX);
-        assert_eq!(HarnessCaps::CLI_CODEX, HarnessCaps::CLI_GENERIC);
+        assert_one_shot_cli_caps(HarnessCaps::CLI_CODEX, true, true);
+        assert_eq!(HarnessCaps::CLI_CODEX, HarnessCaps::CLI_CLAUDE);
+        assert_ne!(HarnessCaps::CLI_CODEX, HarnessCaps::CLI_GENERIC);
+    }
+
+    #[test]
+    fn provider_session_id_trims_and_skips_empty() {
+        let mut env = BTreeMap::new();
+        assert_eq!(provider_session_id(&env), None);
+        env.insert(PROVIDER_SESSION_ENV.into(), "  ".into());
+        assert_eq!(provider_session_id(&env), None);
+        env.insert(PROVIDER_SESSION_ENV.into(), "  sess-abc  ".into());
+        assert_eq!(provider_session_id(&env), Some("sess-abc"));
     }
 }
 
