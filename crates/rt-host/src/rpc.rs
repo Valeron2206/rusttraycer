@@ -209,12 +209,38 @@ async fn dispatch_method(
                     return Err(HostError::InvalidParams("parentId must be a string".into()));
                 }
             };
+            let model = match params.get("model") {
+                None | Some(Value::Null) => None,
+                Some(Value::String(s)) => Some(s.clone()),
+                Some(_) => {
+                    return Err(HostError::InvalidParams("model must be a string".into()));
+                }
+            };
+            let effort = match params.get("effort") {
+                None | Some(Value::Null) => None,
+                Some(Value::String(s)) => Some(s.clone()),
+                Some(_) => {
+                    return Err(HostError::InvalidParams("effort must be a string".into()));
+                }
+            };
+            let fast = match params.get("fast") {
+                None | Some(Value::Null) => None,
+                Some(Value::Bool(b)) => Some(*b),
+                Some(_) => {
+                    return Err(HostError::InvalidParams("fast must be a boolean".into()));
+                }
+            };
             Ok(serde_json::to_value(svc.agent_create_ex(
-                task_id,
-                provider,
-                interface,
-                launch_args,
-                parent_id.as_deref(),
+                crate::service::AgentCreateArgs {
+                    task_id,
+                    provider,
+                    interface,
+                    launch_args,
+                    parent_id: parent_id.as_deref(),
+                    model,
+                    effort,
+                    fast,
+                },
             )?)?)
         }
         "agent.get" => {
@@ -581,6 +607,41 @@ async fn dispatch_method(
                 .map_err(|e| HostError::InvalidParams(e.to_string()))?;
             Ok(serde_json::to_value(svc.loop_stop(&p.loop_id)?)?)
         }
+        "agent.switch" => {
+            let p: rt_protocol::AgentSwitchParams = serde_json::from_value(params)
+                .map_err(|e| HostError::InvalidParams(e.to_string()))?;
+            Ok(serde_json::to_value(svc.agent_switch(
+                &p.agent_id,
+                p.provider.as_deref(),
+                p.model,
+                p.effort,
+                p.fast,
+                p.profile_id.as_deref(),
+            )?)?)
+        }
+        "profile.create" => {
+            let p: rt_protocol::ProfileCreateParams = serde_json::from_value(params)
+                .map_err(|e| HostError::InvalidParams(e.to_string()))?;
+            Ok(serde_json::to_value(svc.profile_create(p)?)?)
+        }
+        "profile.list" => Ok(serde_json::to_value(svc.profile_list()?)?),
+        "profile.get" => {
+            let p: rt_protocol::ProfileGetParams = serde_json::from_value(params)
+                .map_err(|e| HostError::InvalidParams(e.to_string()))?;
+            Ok(serde_json::to_value(svc.profile_get(&p)?)?)
+        }
+        "profile.update" => {
+            let p: rt_protocol::ProfileUpdateParams = serde_json::from_value(params)
+                .map_err(|e| HostError::InvalidParams(e.to_string()))?;
+            Ok(serde_json::to_value(svc.profile_update(p)?)?)
+        }
+        "profile.delete" => {
+            let p: rt_protocol::ProfileDeleteParams = serde_json::from_value(params)
+                .map_err(|e| HostError::InvalidParams(e.to_string()))?;
+            svc.profile_delete(&p)?;
+            Ok(serde_json::json!({ "deleted": true }))
+        }
+        "prefs.get" => Ok(serde_json::to_value(svc.prefs_get()?)?),
         other => Err(HostError::UnsupportedMethod(other.to_string())),
     };
     match &result {

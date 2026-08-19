@@ -95,6 +95,13 @@ pub const METHOD_A2A_DELIVER: &str = "a2a.deliver";
 pub const METHOD_LOOP_START: &str = "loop.start";
 pub const METHOD_LOOP_GET: &str = "loop.get";
 pub const METHOD_LOOP_STOP: &str = "loop.stop";
+pub const METHOD_AGENT_SWITCH: &str = "agent.switch";
+pub const METHOD_PROFILE_CREATE: &str = "profile.create";
+pub const METHOD_PROFILE_LIST: &str = "profile.list";
+pub const METHOD_PROFILE_GET: &str = "profile.get";
+pub const METHOD_PROFILE_UPDATE: &str = "profile.update";
+pub const METHOD_PROFILE_DELETE: &str = "profile.delete";
+pub const METHOD_PREFS_GET: &str = "prefs.get";
 
 /// Tradable methods (handshake itself is not included).
 pub const TRADABLE_METHODS: &[&str] = &[
@@ -153,6 +160,13 @@ pub const TRADABLE_METHODS: &[&str] = &[
     METHOD_LOOP_START,
     METHOD_LOOP_GET,
     METHOD_LOOP_STOP,
+    METHOD_AGENT_SWITCH,
+    METHOD_PROFILE_CREATE,
+    METHOD_PROFILE_LIST,
+    METHOD_PROFILE_GET,
+    METHOD_PROFILE_UPDATE,
+    METHOD_PROFILE_DELETE,
+    METHOD_PREFS_GET,
 ];
 
 pub fn host_method_version() -> MethodVersion {
@@ -165,8 +179,9 @@ pub fn host_method_version() -> MethodVersion {
 /// Per-method negotiated version. Policy/approval methods are 1.1; write/git
 /// mutate methods are 1.2; shell/pty methods are 1.3; artifact/comment/
 /// `agent.clear_transcript` methods are 1.4; `agent.create` and A2A/loop
-/// methods are 1.5; all other tradable methods stay 1.0 (`HOST_METHOD_MINOR`
-/// is not bumped). Unknown names return `None`.
+/// methods are 1.5; model-ux methods (`agent.switch`, `profile.*`, `prefs.get`)
+/// are 1.6; all other tradable methods stay 1.0 (`HOST_METHOD_MINOR` is not
+/// bumped). Unknown names return `None`.
 pub fn method_version(name: &str) -> Option<MethodVersion> {
     if !TRADABLE_METHODS.iter().any(|m| *m == name) {
         return None;
@@ -199,6 +214,13 @@ pub fn method_version(name: &str) -> Option<MethodVersion> {
         | METHOD_LOOP_START
         | METHOD_LOOP_GET
         | METHOD_LOOP_STOP => Some(MethodVersion { major: 1, minor: 5 }),
+        METHOD_AGENT_SWITCH
+        | METHOD_PROFILE_CREATE
+        | METHOD_PROFILE_LIST
+        | METHOD_PROFILE_GET
+        | METHOD_PROFILE_UPDATE
+        | METHOD_PROFILE_DELETE
+        | METHOD_PREFS_GET => Some(MethodVersion { major: 1, minor: 6 }),
         _ => Some(host_method_version()),
     }
 }
@@ -303,6 +325,12 @@ pub struct Agent {
     pub created_at: String,
     #[serde(default)]
     pub provider_session_id: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub effort: Option<String>,
+    #[serde(default)]
+    pub fast: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -792,6 +820,103 @@ pub struct LoopStopParams {
     pub loop_id: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Profile {
+    pub id: String,
+    pub name: String,
+    pub provider: String,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub effort: Option<String>,
+    #[serde(default)]
+    pub fast: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileListOk {
+    pub items: Vec<Profile>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileCreateParams {
+    pub name: String,
+    pub provider: String,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub effort: Option<String>,
+    #[serde(default)]
+    pub fast: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileGetParams {
+    pub profile_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileUpdateParams {
+    pub profile_id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub effort: Option<String>,
+    #[serde(default)]
+    pub fast: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileDeleteParams {
+    pub profile_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSwitchParams {
+    pub agent_id: String,
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub effort: Option<String>,
+    #[serde(default)]
+    pub fast: Option<bool>,
+    #[serde(default)]
+    pub profile_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrefsItem {
+    pub provider: String,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub effort: Option<String>,
+    #[serde(default)]
+    pub fast: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrefsGetOk {
+    pub items: Vec<PrefsItem>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -926,7 +1051,7 @@ mod tests {
         assert_eq!(error_codes::CROSS_HOST, "cross_host");
         assert_eq!(error_codes::NO_INBOX, "no_inbox");
         assert_eq!(error_codes::LOOP_EXHAUSTED, "loop_exhausted");
-        assert_eq!(TRADABLE_METHODS.len(), 55);
+        assert_eq!(TRADABLE_METHODS.len(), 62);
         assert!(TRADABLE_METHODS.contains(&METHOD_POLICY_GET));
         assert!(TRADABLE_METHODS.contains(&METHOD_POLICY_SET));
         assert!(TRADABLE_METHODS.contains(&METHOD_APPROVAL_RESPOND));
@@ -1256,6 +1381,9 @@ mod tests {
             run_location: "local".into(),
             created_at: "c".into(),
             provider_session_id: None,
+            model: None,
+            effort: None,
+            fast: false,
         };
         let v = serde_json::to_value(&agent).unwrap();
         assert_eq!(v["taskId"], "t1");
@@ -1409,6 +1537,9 @@ mod tests {
             run_location: "local".into(),
             created_at: "c".into(),
             provider_session_id: Some("sess-1".into()),
+            model: Some("opus".into()),
+            effort: Some("high".into()),
+            fast: true,
         };
         let v = serde_json::to_value(&agent).unwrap();
         assert_eq!(v["providerSessionId"], "sess-1");
@@ -1564,6 +1695,18 @@ mod tests {
             Some(MethodVersion { major: 1, minor: 5 })
         );
         assert_eq!(
+            method_version(METHOD_AGENT_SWITCH),
+            Some(MethodVersion { major: 1, minor: 6 })
+        );
+        assert_eq!(
+            method_version(METHOD_PROFILE_CREATE),
+            Some(MethodVersion { major: 1, minor: 6 })
+        );
+        assert_eq!(
+            method_version(METHOD_PREFS_GET),
+            Some(MethodVersion { major: 1, minor: 6 })
+        );
+        assert_eq!(
             method_version(METHOD_FILES_WRITE),
             Some(MethodVersion { major: 1, minor: 2 })
         );
@@ -1621,5 +1764,109 @@ mod tests {
         assert_eq!(v["status"], "stopped");
         assert_eq!(v["reason"], "max_iterations");
         assert!(v.get("loop_id").is_none());
+    }
+
+    #[test]
+    fn e7_model_ux_types_and_versions_camel_case() {
+        assert_eq!(
+            method_version(METHOD_AGENT_SWITCH),
+            Some(MethodVersion { major: 1, minor: 6 })
+        );
+        assert_eq!(
+            method_version(METHOD_PROFILE_LIST),
+            Some(MethodVersion { major: 1, minor: 6 })
+        );
+        assert_eq!(
+            method_version(METHOD_PROFILE_GET),
+            Some(MethodVersion { major: 1, minor: 6 })
+        );
+        assert_eq!(
+            method_version(METHOD_PROFILE_UPDATE),
+            Some(MethodVersion { major: 1, minor: 6 })
+        );
+        assert_eq!(
+            method_version(METHOD_PROFILE_DELETE),
+            Some(MethodVersion { major: 1, minor: 6 })
+        );
+        assert_eq!(
+            method_version(METHOD_PREFS_GET),
+            Some(MethodVersion { major: 1, minor: 6 })
+        );
+        assert_eq!(
+            method_version(METHOD_AGENT_CREATE),
+            Some(MethodVersion { major: 1, minor: 5 })
+        );
+        assert_eq!(
+            method_version(METHOD_HOST_PING),
+            Some(MethodVersion { major: 1, minor: 0 })
+        );
+        assert!(TRADABLE_METHODS.contains(&METHOD_AGENT_SWITCH));
+        assert!(TRADABLE_METHODS.contains(&METHOD_PREFS_GET));
+        assert_eq!(TRADABLE_METHODS.len(), 62);
+
+        let sw: AgentSwitchParams = serde_json::from_str(
+            r#"{"agentId":"a1","provider":"cli.codex","model":"o3","effort":"high","fast":false}"#,
+        )
+        .unwrap();
+        assert_eq!(sw.agent_id, "a1");
+        assert_eq!(sw.provider.as_deref(), Some("cli.codex"));
+        assert_eq!(sw.model.as_deref(), Some("o3"));
+        assert_eq!(sw.effort.as_deref(), Some("high"));
+        assert_eq!(sw.fast, Some(false));
+        assert!(sw.profile_id.is_none());
+        let sv = serde_json::to_value(&sw).unwrap();
+        assert_eq!(sv["agentId"], "a1");
+        assert!(sv.get("agent_id").is_none());
+
+        let profile = Profile {
+            id: "p1".into(),
+            name: "fast-opus".into(),
+            provider: "cli.claude".into(),
+            model: Some("opus".into()),
+            effort: Some("high".into()),
+            fast: true,
+            created_at: "c".into(),
+            updated_at: "u".into(),
+        };
+        let v = serde_json::to_value(&profile).unwrap();
+        assert_eq!(v["createdAt"], "c");
+        assert_eq!(v["updatedAt"], "u");
+        assert_eq!(v["fast"], true);
+        assert!(v.get("created_at").is_none());
+
+        let prefs = PrefsGetOk {
+            items: vec![PrefsItem {
+                provider: "cli.generic".into(),
+                model: None,
+                effort: None,
+                fast: false,
+            }],
+        };
+        let v = serde_json::to_value(&prefs).unwrap();
+        assert_eq!(v["items"][0]["provider"], "cli.generic");
+        assert!(v["items"][0]["model"].is_null());
+
+        let agent = Agent {
+            id: "a".into(),
+            task_id: "t1".into(),
+            host_id: "h".into(),
+            parent_id: None,
+            interface: "chat".into(),
+            provider: "cli.generic".into(),
+            status: "idle".into(),
+            run_location: "local".into(),
+            created_at: "c".into(),
+            provider_session_id: None,
+            model: Some("gpt".into()),
+            effort: Some("low".into()),
+            fast: true,
+        };
+        let v = serde_json::to_value(&agent).unwrap();
+        assert_eq!(v["model"], "gpt");
+        assert_eq!(v["effort"], "low");
+        assert_eq!(v["fast"], true);
+        let agent2: Agent = serde_json::from_value(v).unwrap();
+        assert_eq!(agent2.model.as_deref(), Some("gpt"));
+        assert!(agent2.fast);
     }
 }

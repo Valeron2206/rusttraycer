@@ -1,4 +1,4 @@
-//! Per-method {major,minor} negotiation. Existing methods stay 1.0; policy.* is 1.1; write/git mutate is 1.2; shell/pty are 1.3; artifacts/comments/clear_transcript are 1.4; agent.create + a2a/loop are 1.5.
+//! Per-method {major,minor} negotiation. Existing methods stay 1.0; policy.* is 1.1; write/git mutate is 1.2; shell/pty are 1.3; artifacts/comments/clear_transcript are 1.4; agent.create + a2a/loop are 1.5; agent.switch/profile.*/prefs.get are 1.6.
 
 use std::collections::BTreeMap;
 
@@ -308,6 +308,39 @@ mod tests {
         assert_eq!(
             host_methods()["files.write"],
             MethodVersion { major: 1, minor: 2 }
+        );
+    }
+
+    #[test]
+    fn model_ux_methods_accepted_at_1_6_older_minors_kept() {
+        let mut client = BTreeMap::new();
+        client.insert("agent.switch".into(), MethodVersion { major: 1, minor: 6 });
+        client.insert(
+            "profile.create".into(),
+            MethodVersion { major: 1, minor: 6 },
+        );
+        client.insert("profile.list".into(), MethodVersion { major: 1, minor: 6 });
+        client.insert("prefs.get".into(), MethodVersion { major: 1, minor: 6 });
+        client.insert("agent.create".into(), MethodVersion { major: 1, minor: 5 });
+        client.insert("a2a.deliver".into(), MethodVersion { major: 1, minor: 5 });
+        client.insert("files.write".into(), MethodVersion { major: 1, minor: 2 });
+        client.insert("host.ping".into(), MethodVersion { major: 1, minor: 0 });
+        let (acc, rej) = negotiate(&client);
+        assert!(rej.is_empty(), "{rej:?}");
+        assert_eq!(acc["agent.switch"], MethodVersion { major: 1, minor: 6 });
+        assert_eq!(acc["profile.create"], MethodVersion { major: 1, minor: 6 });
+        assert_eq!(acc["prefs.get"], MethodVersion { major: 1, minor: 6 });
+        assert_eq!(acc["agent.create"], MethodVersion { major: 1, minor: 5 });
+        assert_eq!(acc["a2a.deliver"], MethodVersion { major: 1, minor: 5 });
+        assert_eq!(acc["files.write"], MethodVersion { major: 1, minor: 2 });
+        assert_eq!(acc["host.ping"], MethodVersion { major: 1, minor: 0 });
+        assert_eq!(
+            host_methods()["agent.switch"],
+            MethodVersion { major: 1, minor: 6 }
+        );
+        assert_eq!(
+            host_methods()["agent.create"],
+            MethodVersion { major: 1, minor: 5 }
         );
     }
 }
