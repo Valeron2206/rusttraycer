@@ -26,6 +26,8 @@ pub mod error_codes {
     pub const ALREADY_RUNNING: &str = "already_running";
     pub const FILE_TOO_LARGE: &str = "file_too_large";
     pub const FILE_BINARY: &str = "file_binary";
+    pub const DENIED: &str = "denied";
+    pub const APPROVAL_EXPIRED: &str = "approval_expired";
 }
 
 pub const METHOD_HANDSHAKE: &str = "handshake";
@@ -51,6 +53,9 @@ pub const METHOD_WORKTREE_GET: &str = "worktree.get";
 pub const METHOD_WORKTREE_LIST: &str = "worktree.list";
 pub const METHOD_GIT_STATUS: &str = "git.status";
 pub const METHOD_GIT_DIFF: &str = "git.diff";
+pub const METHOD_POLICY_GET: &str = "policy.get";
+pub const METHOD_POLICY_SET: &str = "policy.set";
+pub const METHOD_APPROVAL_RESPOND: &str = "approval.respond";
 
 /// Tradable methods (handshake itself is not included).
 pub const TRADABLE_METHODS: &[&str] = &[
@@ -76,12 +81,29 @@ pub const TRADABLE_METHODS: &[&str] = &[
     METHOD_WORKTREE_LIST,
     METHOD_GIT_STATUS,
     METHOD_GIT_DIFF,
+    METHOD_POLICY_GET,
+    METHOD_POLICY_SET,
+    METHOD_APPROVAL_RESPOND,
 ];
 
 pub fn host_method_version() -> MethodVersion {
     MethodVersion {
         major: HOST_METHOD_MAJOR,
         minor: HOST_METHOD_MINOR,
+    }
+}
+
+/// Per-method negotiated version. Policy/approval methods are 1.1; all other
+/// tradable methods stay 1.0. Unknown names return `None`.
+pub fn method_version(name: &str) -> Option<MethodVersion> {
+    if !TRADABLE_METHODS.iter().any(|m| *m == name) {
+        return None;
+    }
+    match name {
+        METHOD_POLICY_GET | METHOD_POLICY_SET | METHOD_APPROVAL_RESPOND => {
+            Some(MethodVersion { major: 1, minor: 1 })
+        }
+        _ => Some(host_method_version()),
     }
 }
 
@@ -269,6 +291,131 @@ pub struct GitDiff {
     pub truncated: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PolicyMode {
+    Ask,
+    AllowAlways,
+    Deny,
+}
+
+impl PolicyMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ask => "ask",
+            Self::AllowAlways => "allow-always",
+            Self::Deny => "deny",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "ask" => Some(Self::Ask),
+            "allow-always" => Some(Self::AllowAlways),
+            "deny" => Some(Self::Deny),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PolicyScope {
+    Agent,
+    Workspace,
+}
+
+impl PolicyScope {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Agent => "agent",
+            Self::Workspace => "workspace",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "agent" => Some(Self::Agent),
+            "workspace" => Some(Self::Workspace),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PolicySource {
+    Default,
+    Agent,
+    Workspace,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PolicyView {
+    pub mode: PolicyMode,
+    pub scope: PolicyScope,
+    pub yolo: bool,
+    pub source: PolicySource,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PolicyGetParams {
+    #[serde(default)]
+    pub agent_id: Option<String>,
+    #[serde(default)]
+    pub workspace_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PolicySetParams {
+    #[serde(default)]
+    pub agent_id: Option<String>,
+    #[serde(default)]
+    pub workspace_id: Option<String>,
+    pub mode: PolicyMode,
+    pub scope: PolicyScope,
+    pub yolo: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ApprovalDecision {
+    AllowOnce,
+    AllowAlways,
+    Deny,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovalRespondParams {
+    pub approval_id: String,
+    pub decision: ApprovalDecision,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovalRespondOk {
+    pub applied: bool,
+}
+
+/// Wire `caps` object on `host.doctor.providers[]` (e1-canvas-v2).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HarnessCaps {
+    pub one_shot: bool,
+    pub long_lived: bool,
+    pub stream_tokens: bool,
+    pub tools: bool,
+    pub session_resume: bool,
+    pub a2a_inbox: bool,
+    pub pty: bool,
+    pub needs_api_key: bool,
+    pub api_key_env: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -392,8 +539,136 @@ mod tests {
             "workspace_path_invalid"
         );
         assert_eq!(error_codes::INTERNAL, "internal");
-        assert_eq!(TRADABLE_METHODS.len(), 22);
+        assert_eq!(error_codes::DENIED, "denied");
+        assert_eq!(error_codes::APPROVAL_EXPIRED, "approval_expired");
+        assert_eq!(TRADABLE_METHODS.len(), 25);
+        assert!(TRADABLE_METHODS.contains(&METHOD_POLICY_GET));
+        assert!(TRADABLE_METHODS.contains(&METHOD_POLICY_SET));
+        assert!(TRADABLE_METHODS.contains(&METHOD_APPROVAL_RESPOND));
         assert!(!TRADABLE_METHODS.contains(&METHOD_HANDSHAKE));
+        assert_eq!(
+            method_version(METHOD_POLICY_GET),
+            Some(MethodVersion { major: 1, minor: 1 })
+        );
+        assert_eq!(
+            method_version(METHOD_POLICY_SET),
+            Some(MethodVersion { major: 1, minor: 1 })
+        );
+        assert_eq!(
+            method_version(METHOD_APPROVAL_RESPOND),
+            Some(MethodVersion { major: 1, minor: 1 })
+        );
+        assert_eq!(
+            method_version(METHOD_HOST_PING),
+            Some(MethodVersion { major: 1, minor: 0 })
+        );
+        assert_eq!(method_version("handshake"), None);
+        assert_eq!(method_version("no.such"), None);
+    }
+
+    #[test]
+    fn policy_approval_and_caps_camel_case() {
+        let view = PolicyView {
+            mode: PolicyMode::Ask,
+            scope: PolicyScope::Agent,
+            yolo: false,
+            source: PolicySource::Default,
+        };
+        let v = serde_json::to_value(&view).unwrap();
+        assert_eq!(v["mode"], "ask");
+        assert_eq!(v["scope"], "agent");
+        assert_eq!(v["yolo"], false);
+        assert_eq!(v["source"], "default");
+        assert!(v.get("agent_id").is_none());
+        let view2: PolicyView = serde_json::from_value(v).unwrap();
+        assert_eq!(view2.mode, PolicyMode::Ask);
+        assert_eq!(view2.source, PolicySource::Default);
+
+        assert_eq!(
+            serde_json::to_value(PolicyMode::AllowAlways).unwrap(),
+            "allow-always"
+        );
+        assert_eq!(serde_json::to_value(PolicyMode::Deny).unwrap(), "deny");
+        assert_eq!(PolicyMode::AllowAlways.as_str(), "allow-always");
+        assert_eq!(
+            PolicyMode::parse("allow-always"),
+            Some(PolicyMode::AllowAlways)
+        );
+        assert_eq!(PolicyMode::parse("nope"), None);
+        assert_eq!(PolicyScope::Agent.as_str(), "agent");
+        assert_eq!(
+            PolicyScope::parse("workspace"),
+            Some(PolicyScope::Workspace)
+        );
+        assert_eq!(PolicyScope::parse("nope"), None);
+
+        let get: PolicyGetParams = serde_json::from_str(r#"{"agentId":"a1"}"#).unwrap();
+        assert_eq!(get.agent_id.as_deref(), Some("a1"));
+        assert!(get.workspace_id.is_none());
+        let get_ws: PolicyGetParams = serde_json::from_str(r#"{"workspaceId":"w1"}"#).unwrap();
+        assert_eq!(get_ws.workspace_id.as_deref(), Some("w1"));
+
+        let set: PolicySetParams = serde_json::from_str(
+            r#"{"agentId":"a1","mode":"allow-always","scope":"agent","yolo":true}"#,
+        )
+        .unwrap();
+        assert_eq!(set.agent_id.as_deref(), Some("a1"));
+        assert_eq!(set.mode, PolicyMode::AllowAlways);
+        assert_eq!(set.scope, PolicyScope::Agent);
+        assert!(set.yolo);
+        let sv = serde_json::to_value(&set).unwrap();
+        assert_eq!(sv["agentId"], "a1");
+        assert_eq!(sv["mode"], "allow-always");
+        assert!(sv.get("agent_id").is_none());
+
+        assert_eq!(
+            serde_json::to_value(ApprovalDecision::AllowOnce).unwrap(),
+            "allow-once"
+        );
+        assert_eq!(
+            serde_json::to_value(ApprovalDecision::AllowAlways).unwrap(),
+            "allow-always"
+        );
+        assert_eq!(
+            serde_json::to_value(ApprovalDecision::Deny).unwrap(),
+            "deny"
+        );
+
+        let resp: ApprovalRespondParams =
+            serde_json::from_str(r#"{"approvalId":"x","decision":"deny"}"#).unwrap();
+        assert_eq!(resp.approval_id, "x");
+        assert_eq!(resp.decision, ApprovalDecision::Deny);
+        let rv = serde_json::to_value(&resp).unwrap();
+        assert_eq!(rv["approvalId"], "x");
+        assert!(rv.get("approval_id").is_none());
+
+        let ok = ApprovalRespondOk { applied: true };
+        let ov = serde_json::to_value(&ok).unwrap();
+        assert_eq!(ov["applied"], true);
+
+        let caps = HarnessCaps {
+            one_shot: true,
+            long_lived: false,
+            stream_tokens: true,
+            tools: false,
+            session_resume: false,
+            a2a_inbox: false,
+            pty: false,
+            needs_api_key: false,
+            api_key_env: None,
+        };
+        let cv = serde_json::to_value(&caps).unwrap();
+        assert_eq!(cv["oneShot"], true);
+        assert_eq!(cv["longLived"], false);
+        assert_eq!(cv["streamTokens"], true);
+        assert_eq!(cv["sessionResume"], false);
+        assert_eq!(cv["a2aInbox"], false);
+        assert_eq!(cv["needsApiKey"], false);
+        assert!(cv["apiKeyEnv"].is_null());
+        assert!(cv.get("one_shot").is_none());
+        let caps2: HarnessCaps = serde_json::from_value(cv).unwrap();
+        assert!(caps2.one_shot);
+        assert!(caps2.api_key_env.is_none());
     }
 
     #[test]
