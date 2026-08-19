@@ -406,6 +406,40 @@ impl HostService {
         })
     }
 
+    /// Prometheus text 0.0.4. No hostId, paths, transcript, or secrets.
+    pub fn prometheus_metrics(&self) -> Result<String> {
+        let mut open = 0usize;
+        let mut archived = 0usize;
+        let mut idle = 0usize;
+        let mut running = 0usize;
+        let mut error = 0usize;
+        for task in self.store.task_list(TaskFilter::All)? {
+            match task.status {
+                TaskStatus::Open => open += 1,
+                TaskStatus::Archived => archived += 1,
+            }
+            for agent in self.store.agent_list(&task.id)? {
+                match agent.status {
+                    AgentStatus::Idle => idle += 1,
+                    AgentStatus::Running => running += 1,
+                    AgentStatus::Error => error += 1,
+                }
+            }
+        }
+        Ok(format!(
+            r#"# TYPE rusttraycer_up gauge
+rusttraycer_up 1
+# TYPE rusttraycer_agents gauge
+rusttraycer_agents{{status="idle"}} {idle}
+rusttraycer_agents{{status="running"}} {running}
+rusttraycer_agents{{status="error"}} {error}
+# TYPE rusttraycer_tasks gauge
+rusttraycer_tasks{{status="open"}} {open}
+rusttraycer_tasks{{status="archived"}} {archived}
+"#
+        ))
+    }
+
     pub fn workspace_list(&self) -> Result<Vec<Workspace>> {
         Ok(self.store.workspace_list()?)
     }
