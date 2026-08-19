@@ -3147,6 +3147,7 @@ dependencies = [
  "rt-protocol",
  "rt-runtime",
  "rt-storage",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",

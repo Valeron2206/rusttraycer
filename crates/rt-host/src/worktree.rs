@@ -1,9 +1,11 @@
-//! Git worktree + `git.status` / `git.diff` via the `git` CLI. No git2.
+//! Git worktree + `git.status` / `git.diff` / mutate via the `git` CLI. No git2.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use rt_protocol::{GitDiff, GitDiffFile, GitStatus, GitStatusEntry, Worktree};
+use rt_protocol::{
+    GitCommitOk, GitDiff, GitDiffFile, GitPushOk, GitStatus, GitStatusEntry, Worktree,
+};
 use serde_json::Value;
 
 use crate::service::HostService;
@@ -88,6 +90,148 @@ impl HostService {
         require_git(&root)?;
         let path = optional_rel_path(params)?;
         run_git_diff(&root, path)
+    }
+
+    pub fn git_stage(&self, params: &Value) -> Result<GitStatus> {
+        let root = git_root(&self.store, params)?;
+        require_git(&root)?;
+        let paths = require_paths(params)?;
+        let mut args = vec!["add".to_string(), "--".to_string()];
+        args.extend(paths);
+        git_stdout(&root, &args.iter().map(String::as_str).collect::<Vec<_>>())?;
+        run_git_status(&root)
+    }
+
+    pub fn git_unstage(&self, params: &Value) -> Result<GitStatus> {
+        let root = git_root(&self.store, params)?;
+        require_git(&root)?;
+        let paths = require_paths(params)?;
+        let mut args = vec![
+            "restore".to_string(),
+            "--staged".to_string(),
+            "--".to_string(),
+        ];
+        args.extend(paths);
+        git_stdout(&root, &args.iter().map(String::as_str).collect::<Vec<_>>())?;
+        run_git_status(&root)
+    }
+
+    pub fn git_restore(&self, params: &Value) -> Result<GitStatus> {
+        let root = git_root(&self.store, params)?;
+        require_git(&root)?;
+        let paths = require_paths(params)?;
+        let staged = optional_bool(params, "staged", false)?;
+        let mut tracked = Vec::new();
+        let mut untracked = Vec::new();
+        for path in paths {
+            if is_tracked(&root, &path)? {
+                tracked.push(path);
+            } else {
+                untracked.push(path);
+            }
+        }
+        if !tracked.is_empty() {
+            let mut args = vec!["restore".to_string(), "--worktree".to_string()];
+            if staged {
+                args.push("--staged".to_string());
+            }
+            args.push("--".to_string());
+            args.extend(tracked);
+            git_stdout(&root, &args.iter().map(String::as_str).collect::<Vec<_>>())?;
+        }
+        for path in untracked {
+            let target = crate::files::resolve_inside(&root, &path)?;
+            if target.is_dir() {
+                return Err(HostError::InvalidParams("path is a directory".into()));
+            }
+            if target.is_file() {
+                std::fs::remove_file(&target).map_err(|e| HostError::Internal(e.to_string()))?;
+            }
+        }
+        run_git_status(&root)
+    }
+
+    pub fn git_commit(&self, params: &Value) -> Result<GitCommitOk> {
+        let root = git_root(&self.store, params)?;
+        require_git(&root)?;
+        let message = require_str(params, "message")?;
+        if message.trim().is_empty() {
+            return Err(HostError::InvalidParams("message is required".into()));
+        }
+        if message.len() > 4096 {
+            return Err(HostError::InvalidParams("message exceeds 4 KiB".into()));
+        }
+        require_git_identity(&root)?;
+        let out = git_output(&root, &["commit", "-m", message])?;
+        if !out.status.success() {
+            let stderr = redact_secrets(&String::from_utf8_lossy(&out.stderr));
+            return Err(classify_commit_fail(&stderr));
+        }
+        let commit = git_stdout(&root, &["rev-parse", "HEAD"])?
+            .trim()
+            .to_string();
+        let branch = git_stdout(&root, &["rev-parse", "--abbrev-ref", "HEAD"])?
+            .trim()
+            .to_string();
+        Ok(GitCommitOk { commit, branch })
+    }
+
+    pub async fn git_push(&self, params: &Value) -> Result<GitPushOk> {
+        let root = git_root(&self.store, params)?;
+        require_git(&root)?;
+        let remote = match params.get("remote") {
+            None | Some(Value::Null) => "origin".to_string(),
+            Some(Value::String(s)) if !s.is_empty() => s.clone(),
+            Some(Value::String(_)) => {
+                return Err(HostError::InvalidParams("remote is required".into()));
+            }
+            Some(_) => return Err(HostError::InvalidParams("remote must be a string".into())),
+        };
+        let ref_name = match params.get("ref") {
+            None | Some(Value::Null) => git_stdout(&root, &["rev-parse", "--abbrev-ref", "HEAD"])?
+                .trim()
+                .to_string(),
+            Some(Value::String(s)) if !s.is_empty() => s.clone(),
+            Some(Value::String(_)) => {
+                return Err(HostError::InvalidParams("ref is required".into()));
+            }
+            Some(_) => return Err(HostError::InvalidParams("ref must be a string".into())),
+        };
+        if ref_name == "HEAD" {
+            return Err(HostError::InvalidParams(
+                "ref must be a branch name, not detached HEAD".into(),
+            ));
+        }
+        let args = push_args(&remote, &ref_name);
+        let out = git_output_timeout(&root, &args, std::time::Duration::from_secs(120)).await?;
+        if !out.status.success() {
+            let stderr = redact_secrets(&String::from_utf8_lossy(&out.stderr));
+            return Err(classify_push_stderr(&stderr));
+        }
+        Ok(GitPushOk {
+            remote,
+            ref_name,
+            ok: true,
+        })
+    }
+
+    pub fn files_patch(&self, params: &Value) -> Result<Value> {
+        if !params.is_object() {
+            return Err(HostError::InvalidParams("params must be an object".into()));
+        }
+        let workspace_id = require_str(params, "workspaceId")?;
+        let patch = require_str(params, "patch")?;
+        let wt = optional_worktree_id(params)?;
+        apply_unified_diff(&self.store, workspace_id, wt, patch)
+    }
+
+    pub fn apply_patch_at(
+        &self,
+        workspace_id: &str,
+        worktree_id: Option<&str>,
+        patch: &str,
+    ) -> Result<Value> {
+        apply_unified_diff(&self.store, workspace_id, worktree_id, patch)
     }
 }
 
@@ -193,7 +337,7 @@ fn git_output(root: &Path, args: &[&str]) -> Result<std::process::Output> {
 fn git_stdout(root: &Path, args: &[&str]) -> Result<String> {
     let out = git_output(root, args)?;
     if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
+        let stderr = redact_secrets(&String::from_utf8_lossy(&out.stderr));
         return Err(HostError::Internal(format!(
             "git {args:?} failed: {stderr}"
         )));
@@ -230,7 +374,7 @@ fn git_worktree_add(workspace: &Path, dest: &Path, branch: &str) -> Result<()> {
         .ok_or_else(|| HostError::Internal("worktree path is not utf-8".into()))?;
     let out = git_output(workspace, &["worktree", "add", "-b", branch, dest_str])?;
     if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
+        let stderr = redact_secrets(&String::from_utf8_lossy(&out.stderr));
         return Err(HostError::Internal(format!(
             "git worktree add failed: {stderr}"
         )));
@@ -470,6 +614,291 @@ fn run_git_diff(root: &Path, path: Option<&str>) -> Result<GitDiff> {
     }
 
     Ok(apply_diff_cap(files))
+}
+
+fn require_paths(params: &Value) -> Result<Vec<String>> {
+    let arr = match params.get("paths") {
+        None | Some(Value::Null) => {
+            return Err(HostError::InvalidParams("paths is required".into()));
+        }
+        Some(Value::Array(a)) => a,
+        Some(_) => {
+            return Err(HostError::InvalidParams("paths must be an array".into()));
+        }
+    };
+    if arr.is_empty() || arr.len() > 500 {
+        return Err(HostError::InvalidParams(
+            "paths must have 1..=500 entries".into(),
+        ));
+    }
+    let mut out = Vec::with_capacity(arr.len());
+    for v in arr {
+        let s = v
+            .as_str()
+            .ok_or_else(|| HostError::InvalidParams("paths entries must be strings".into()))?;
+        if s.is_empty() {
+            return Err(HostError::InvalidParams("path must be nonempty".into()));
+        }
+        if s.split(['/', '\\']).any(|c| c == "..") || Path::new(s).is_absolute() {
+            return Err(HostError::InvalidParams(
+                "path must not contain '..' or be absolute".into(),
+            ));
+        }
+        out.push(s.to_string());
+    }
+    Ok(out)
+}
+
+fn optional_bool(params: &Value, field: &str, default: bool) -> Result<bool> {
+    match params.get(field) {
+        None | Some(Value::Null) => Ok(default),
+        Some(Value::Bool(b)) => Ok(*b),
+        Some(_) => Err(HostError::InvalidParams(format!(
+            "{field} must be a boolean"
+        ))),
+    }
+}
+
+fn is_tracked(root: &Path, rel: &str) -> Result<bool> {
+    let out = git_output(root, &["ls-files", "--error-unmatch", "--", rel])?;
+    Ok(out.status.success())
+}
+
+fn git_config_get(root: &Path, key: &str) -> Result<Option<String>> {
+    let out = git_output(root, &["config", "--get", key])?;
+    if !out.status.success() {
+        return Ok(None);
+    }
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if s.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(s))
+    }
+}
+
+fn require_git_identity(root: &Path) -> Result<()> {
+    let name = git_config_get(root, "user.name")?;
+    let email = git_config_get(root, "user.email")?;
+    match (name, email) {
+        (Some(n), Some(e)) if !n.is_empty() && !e.is_empty() => Ok(()),
+        _ => Err(HostError::GitIdentity(
+            "set git config user.email (and user.name) before committing".into(),
+        )),
+    }
+}
+
+fn classify_commit_fail(stderr: &str) -> HostError {
+    let low = stderr.to_ascii_lowercase();
+    if low.contains("author identity")
+        || low.contains("tell me who you are")
+        || (low.contains("user.email") && low.contains("unable"))
+    {
+        HostError::GitIdentity("set git config user.email (and user.name) before committing".into())
+    } else {
+        HostError::Internal(format!("git commit failed: {stderr}"))
+    }
+}
+
+/// `git push <remote> <ref>` — never force, tags, or mirror.
+pub fn push_args(remote: &str, ref_name: &str) -> Vec<String> {
+    vec!["push".to_string(), remote.to_string(), ref_name.to_string()]
+}
+
+pub fn classify_push_stderr(stderr: &str) -> HostError {
+    let stderr = redact_secrets(stderr);
+    let low = stderr.to_ascii_lowercase();
+    const AUTH: &[&str] = &[
+        "authentication",
+        "403",
+        "401",
+        "could not read username",
+        "permission denied (publickey)",
+        "fatal: could not read",
+        "unable to access",
+        "failed to connect",
+        "connection refused",
+        "could not resolve",
+        "could not read from remote",
+        "terminal prompts disabled",
+        "could not read password",
+    ];
+    const CONFLICT: &[&str] = &[
+        "non-fast-forward",
+        "failed to push some refs",
+        "[rejected]",
+        "updates were rejected",
+        "fetch first",
+    ];
+    if AUTH.iter().any(|p| low.contains(p)) {
+        return HostError::GitAuth(stderr.to_string());
+    }
+    if CONFLICT.iter().any(|p| low.contains(p)) || low.contains("rejected") {
+        return HostError::GitConflict(stderr.to_string());
+    }
+    HostError::Internal(format!("git push failed: {stderr}"))
+}
+
+pub fn redact_secrets(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(scheme) = rest.find("://") {
+        out.push_str(&rest[..scheme]);
+        let after = &rest[scheme + 3..];
+        if let Some(at) = after.find('@') {
+            let creds = &after[..at];
+            if creds.contains(':') && !creds.contains('/') {
+                out.push_str("://***:***@");
+                rest = &after[at + 1..];
+                continue;
+            }
+        }
+        out.push_str("://");
+        rest = after;
+    }
+    out.push_str(rest);
+    redact_token_like(&out)
+}
+
+fn redact_token_like(s: &str) -> String {
+    const PREFIXES: &[&str] = &[
+        "ghp_",
+        "gho_",
+        "ghs_",
+        "ghu_",
+        "ghr_",
+        "github_pat_",
+        "glpat-",
+        "xoxb-",
+        "xoxp-",
+        "sk-live-",
+        "sk-test-",
+    ];
+    let mut out = s.to_string();
+    for prefix in PREFIXES {
+        let mut start = 0;
+        while let Some(idx) = out[start..].find(prefix) {
+            let abs = start + idx;
+            let rest = &out[abs + prefix.len()..];
+            let n = rest
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+                .count();
+            if n >= 8 {
+                let end =
+                    abs + prefix.len() + rest.chars().take(n).map(|c| c.len_utf8()).sum::<usize>();
+                out.replace_range(abs..end, &format!("{prefix}***"));
+                start = abs + prefix.len() + 3;
+            } else {
+                start = abs + prefix.len();
+            }
+        }
+    }
+    out
+}
+
+pub fn parse_patch_stats(patch: &str) -> (Vec<String>, u32) {
+    let mut paths = Vec::new();
+    let mut hunks = 0u32;
+    for line in patch.lines() {
+        if let Some(rest) = line.strip_prefix("+++ b/") {
+            let p = rest.trim().to_string();
+            if !p.is_empty() && !paths.iter().any(|x| x == &p) {
+                paths.push(p);
+            }
+        } else if let Some(rest) = line.strip_prefix("diff --git ") {
+            if let Some(idx) = rest.rfind(" b/") {
+                let p = rest[idx + 3..].trim().to_string();
+                if !p.is_empty() && !paths.iter().any(|x| x == &p) {
+                    paths.push(p);
+                }
+            }
+        } else if line.starts_with("@@") {
+            hunks += 1;
+        }
+    }
+    (paths, hunks)
+}
+
+fn apply_unified_diff(
+    store: &rt_storage::Store,
+    workspace_id: &str,
+    worktree_id: Option<&str>,
+    patch: &str,
+) -> Result<Value> {
+    if patch.len() as u64 > crate::files::MAX_FILE_BYTES {
+        return Err(HostError::FileTooLarge("patch exceeds 256 KiB".into()));
+    }
+    let scan = patch.len().min(crate::files::BINARY_SCAN_BYTES);
+    if patch.as_bytes()[..scan].contains(&0) {
+        return Err(HostError::FileBinary("NUL in first 8 KiB".into()));
+    }
+    let mut params = serde_json::json!({ "workspaceId": workspace_id });
+    if let Some(wt) = worktree_id {
+        params["worktreeId"] = serde_json::json!(wt);
+    }
+    let root = git_root(store, &params)?;
+    require_git(&root)?;
+    let check = git_apply(&root, patch, true)?;
+    if !check.status.success() {
+        let stderr = redact_secrets(&String::from_utf8_lossy(&check.stderr));
+        return Err(HostError::PatchFailed(stderr));
+    }
+    let applied = git_apply(&root, patch, false)?;
+    if !applied.status.success() {
+        let stderr = redact_secrets(&String::from_utf8_lossy(&applied.stderr));
+        return Err(HostError::PatchFailed(stderr));
+    }
+    let (paths, hunks) = parse_patch_stats(patch);
+    Ok(serde_json::json!({ "paths": paths, "hunks": hunks }))
+}
+
+fn git_apply(root: &Path, patch: &str, check: bool) -> Result<std::process::Output> {
+    use std::io::Write;
+    use std::process::Stdio;
+    let mut cmd = git_command(root);
+    cmd.arg("apply");
+    if check {
+        cmd.arg("--check");
+    }
+    cmd.stdin(Stdio::piped());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| HostError::Internal(format!("git apply: {e}")))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(patch.as_bytes())
+            .map_err(|e| HostError::Internal(format!("git apply stdin: {e}")))?;
+    }
+    child
+        .wait_with_output()
+        .map_err(|e| HostError::Internal(format!("git apply: {e}")))
+}
+
+async fn git_output_timeout(
+    root: &Path,
+    args: &[String],
+    timeout: std::time::Duration,
+) -> Result<std::process::Output> {
+    let mut cmd = tokio::process::Command::new("git");
+    cmd.arg("--no-pager");
+    cmd.current_dir(root);
+    cmd.env("GIT_TERMINAL_PROMPT", "0");
+    cmd.env("GIT_OPTIONAL_LOCKS", "0");
+    cmd.args(args);
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+    cmd.kill_on_drop(true);
+    let child = cmd
+        .spawn()
+        .map_err(|e| HostError::Internal(format!("git: {e}")))?;
+    match tokio::time::timeout(timeout, child.wait_with_output()).await {
+        Ok(Ok(out)) => Ok(out),
+        Ok(Err(e)) => Err(HostError::Internal(format!("git: {e}"))),
+        Err(_) => Err(HostError::Internal("git push timed out".into())),
+    }
 }
 
 #[cfg(test)]
@@ -866,5 +1295,46 @@ mod tests {
             .git_status(&json!({ "workspaceId": ws_id, "worktreeId": "0191f0c6-7c2a-7c11-8000-6f0c1a2b3c4d" }))
             .unwrap_err();
         assert_eq!(err.code(), "not_found");
+    }
+
+    #[test]
+    fn push_args_has_no_force() {
+        let args = push_args("origin", "main");
+        assert_eq!(args, vec!["push", "origin", "main"]);
+        assert!(!args.iter().any(|a| a.contains("force")));
+        assert!(!args.iter().any(|a| a == "--mirror" || a == "--tags"));
+    }
+
+    #[test]
+    fn classify_push_stderr_auth_and_conflict() {
+        let err = classify_push_stderr(
+            "fatal: Authentication failed for 'https://user:hunter2@example.com/repo.git'",
+        );
+        assert_eq!(err.code(), "git_auth");
+        let msg = err.to_string();
+        assert!(!msg.contains("hunter2"), "{msg}");
+        assert!(!msg.contains("user:hunter2"));
+
+        let err = classify_push_stderr(
+            "unable to access 'https://127.0.0.1:1/denied.git/': Failed to connect",
+        );
+        assert_eq!(err.code(), "git_auth");
+
+        let err = classify_push_stderr("! [rejected] main -> main (non-fast-forward)");
+        assert_eq!(err.code(), "git_conflict");
+
+        let red =
+            redact_secrets("clone https://octocat:ghp_abcdefghijklmnopqrstuvwxyz@github.com/x/y");
+        assert!(!red.contains("ghp_abcdefgh"), "{red}");
+        assert!(!red.contains("octocat:"), "{red}");
+        assert!(red.contains("://***:***@"), "{red}");
+    }
+
+    #[test]
+    fn parse_patch_stats_counts_files_and_hunks() {
+        let patch = "diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1,1 +1,2 @@\n+x\n@@ -4,1 +5,1 @@\n+y\n";
+        let (paths, hunks) = parse_patch_stats(&patch.replace("\\n", "\n"));
+        assert_eq!(paths, vec!["src/a.rs"]);
+        assert_eq!(hunks, 2);
     }
 }

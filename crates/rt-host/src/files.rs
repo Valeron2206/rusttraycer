@@ -1,4 +1,4 @@
-//! Read-only `files.tree` / `files.read` (protocol-v0 1.0). No file tables.
+//! `files.tree` / `files.read` (1.0) plus write/patch-support helpers and `files.open` (1.2).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -239,7 +239,7 @@ fn parse_positive(v: Option<&Value>, default: u64, name: &str) -> Result<u64, Ho
     }
 }
 
-fn require_workspace(
+pub(crate) fn require_workspace(
     store: &Store,
     workspace_id: &str,
 ) -> Result<rt_storage::Workspace, HostError> {
@@ -251,7 +251,7 @@ fn require_workspace(
         .ok_or_else(|| HostError::NotFound(format!("workspace {workspace_id}")))
 }
 
-fn optional_worktree_id(params: &Value) -> Result<Option<&str>, HostError> {
+pub(crate) fn optional_worktree_id(params: &Value) -> Result<Option<&str>, HostError> {
     match params.get("worktreeId") {
         None | Some(Value::Null) => Ok(None),
         Some(Value::String(s)) => Ok(Some(s.as_str())),
@@ -261,7 +261,7 @@ fn optional_worktree_id(params: &Value) -> Result<Option<&str>, HostError> {
     }
 }
 
-fn walk_root(
+pub(crate) fn walk_root(
     store: &Store,
     ws: &rt_storage::Workspace,
     worktree_id: Option<&str>,
@@ -379,6 +379,189 @@ pub fn files_read(store: &Store, params: &Value) -> Result<Value, HostError> {
         "truncated": false,
         "encoding": "utf8",
     }))
+}
+
+fn validate_rel_path(rel: &str) -> Result<(), HostError> {
+    if rel.is_empty() {
+        return Err(HostError::InvalidParams("path must be nonempty".into()));
+    }
+    if rel.starts_with('/') || Path::new(rel).is_absolute() {
+        return Err(HostError::InvalidParams(
+            "path must be relative to the workspace".into(),
+        ));
+    }
+    if rel.split('/').any(|c| c == "..") {
+        return Err(HostError::InvalidParams(
+            "path must not contain '..'".into(),
+        ));
+    }
+    if rel.split('/').any(|c| c.contains('\0')) {
+        return Err(HostError::InvalidParams("invalid path".into()));
+    }
+    Ok(())
+}
+
+/// Resolve a path that may not exist yet. Parent directory must exist.
+/// Does not create directories. Target may be a new file.
+pub fn resolve_for_create(root: &Path, rel: &str) -> Result<PathBuf, HostError> {
+    validate_rel_path(rel)?;
+    let root_canon = root
+        .canonicalize()
+        .map_err(|_| HostError::NotFound("workspace path is missing".into()))?;
+
+    let mut components: Vec<&str> = rel
+        .split('/')
+        .filter(|c| !c.is_empty() && *c != ".")
+        .collect();
+    if components.is_empty() {
+        return Err(HostError::InvalidParams("path must be nonempty".into()));
+    }
+    let file_name = components
+        .pop()
+        .ok_or_else(|| HostError::InvalidParams("path must be nonempty".into()))?;
+
+    let mut parent = root_canon.clone();
+    for component in &components {
+        parent.push(component);
+    }
+    let parent_canon = match parent.canonicalize() {
+        Ok(p) => p,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(HostError::NotFound(format!(
+                "parent directory does not exist: {rel}"
+            )));
+        }
+        Err(e) => {
+            return Err(HostError::InvalidParams(format!(
+                "cannot resolve parent: {e}"
+            )));
+        }
+    };
+    if !is_inside(&root_canon, &parent_canon) {
+        return Err(HostError::InvalidParams(
+            "path escapes the workspace".into(),
+        ));
+    }
+    if !parent_canon.is_dir() {
+        return Err(HostError::InvalidParams(
+            "parent path is not a directory".into(),
+        ));
+    }
+
+    let target = parent_canon.join(file_name);
+    if target.exists() {
+        let canon = target
+            .canonicalize()
+            .map_err(|e| HostError::InvalidParams(format!("cannot resolve path: {e}")))?;
+        if !is_inside(&root_canon, &canon) {
+            return Err(HostError::InvalidParams(
+                "path escapes the workspace".into(),
+            ));
+        }
+        if canon.is_dir() {
+            return Err(HostError::InvalidParams("path is a directory".into()));
+        }
+        return Ok(canon);
+    }
+    Ok(target)
+}
+
+pub fn check_text_content(content: &str) -> Result<(), HostError> {
+    let data = content.as_bytes();
+    if data.len() as u64 > MAX_FILE_BYTES {
+        return Err(HostError::FileTooLarge("content exceeds 256 KiB".into()));
+    }
+    let scan = data.len().min(BINARY_SCAN_BYTES);
+    if data[..scan].contains(&0) {
+        return Err(HostError::FileBinary("NUL in first 8 KiB".into()));
+    }
+    Ok(())
+}
+
+pub fn apply_write(
+    store: &Store,
+    workspace_id: &str,
+    worktree_id: Option<&str>,
+    rel: &str,
+    content: &str,
+) -> Result<serde_json::Value, HostError> {
+    check_text_content(content)?;
+    let ws = require_workspace(store, workspace_id)?;
+    let root = walk_root(store, &ws, worktree_id)?;
+    let target = resolve_for_create(&root, rel)?;
+    fs::write(&target, content.as_bytes()).map_err(|e| HostError::Internal(e.to_string()))?;
+    let root_canon = root
+        .canonicalize()
+        .map_err(|_| HostError::NotFound("workspace path is missing".into()))?;
+    let path = rel_of(&root_canon, &target);
+    Ok(json!({
+        "path": path,
+        "bytes": content.len() as u64,
+    }))
+}
+
+pub fn files_write(store: &Store, params: &Value) -> Result<Value, HostError> {
+    if !params.is_object() {
+        return Err(HostError::InvalidParams("params must be an object".into()));
+    }
+    let workspace_id = params
+        .get("workspaceId")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| HostError::InvalidParams("workspaceId is required".into()))?;
+    let rel = params
+        .get("path")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| HostError::InvalidParams("path is required".into()))?;
+    let content = params
+        .get("content")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| HostError::InvalidParams("content is required".into()))?;
+    let wt_id = optional_worktree_id(params)?;
+    apply_write(store, workspace_id, wt_id, rel, content)
+}
+
+pub fn xdg_open_command(path: &Path) -> std::process::Command {
+    let mut cmd = std::process::Command::new("xdg-open");
+    cmd.arg(path);
+    cmd
+}
+
+pub fn files_open(store: &Store, params: &Value) -> Result<Value, HostError> {
+    if !params.is_object() {
+        return Err(HostError::InvalidParams("params must be an object".into()));
+    }
+    let workspace_id = params
+        .get("workspaceId")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| HostError::InvalidParams("workspaceId is required".into()))?;
+    let rel = params
+        .get("path")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| HostError::InvalidParams("path is required".into()))?;
+    if rel.is_empty() {
+        return Err(HostError::InvalidParams("path must be nonempty".into()));
+    }
+    let ws = require_workspace(store, workspace_id)?;
+    let wt_id = optional_worktree_id(params)?;
+    let root = walk_root(store, &ws, wt_id)?;
+    let target = resolve_inside(&root, rel)?;
+    if target.is_dir() {
+        return Err(HostError::InvalidParams("path is a directory".into()));
+    }
+    if !target.is_file() {
+        return Err(HostError::NotFound(rel.to_string()));
+    }
+    let mut cmd = xdg_open_command(&target);
+    match cmd.spawn() {
+        Ok(mut child) => {
+            let _ = child.try_wait();
+            Ok(json!({ "opened": true }))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(HostError::Internal(
+            "xdg-open is not available; install xdg-utils".into(),
+        )),
+        Err(e) => Err(HostError::Internal(format!("xdg-open failed: {e}"))),
+    }
 }
 
 #[cfg(test)]
@@ -596,6 +779,92 @@ mod tests {
             &json!({ "workspaceId": id, "path": "README.md", "worktreeId": false }),
         )
         .unwrap_err();
+        assert_eq!(err.code(), "invalid_params");
+    }
+
+    #[test]
+    fn resolve_for_create_new_file_and_overwrite() {
+        let (_t, _store, _id, root) = seeded();
+        let created = resolve_for_create(&root, "src/new.rs").unwrap();
+        assert_eq!(created, root.join("src").join("new.rs"));
+        assert!(!created.exists());
+        std::fs::write(&created, "fn x() {}\n").unwrap();
+        let again = resolve_for_create(&root, "src/new.rs").unwrap();
+        assert_eq!(again.file_name().unwrap(), "new.rs");
+        let err = resolve_for_create(&root, "missing-dir/a.rs").unwrap_err();
+        assert_eq!(err.code(), "not_found");
+        let err = resolve_for_create(&root, "../escape.rs").unwrap_err();
+        assert_eq!(err.code(), "invalid_params");
+        let err = resolve_for_create(&root, "/etc/passwd").unwrap_err();
+        assert_eq!(err.code(), "invalid_params");
+        let err = resolve_for_create(&root, "src").unwrap_err();
+        assert_eq!(err.code(), "invalid_params");
+    }
+
+    #[test]
+    fn files_write_parent_and_binary() {
+        let (_t, store, id, root) = seeded();
+        let ok = files_write(
+            &store,
+            &json!({ "workspaceId": id, "path": "src/lib.rs", "content": "pub fn x() {}\n" }),
+        )
+        .unwrap();
+        assert_eq!(ok["path"], "src/lib.rs");
+        assert!(ok["bytes"].as_u64().unwrap() > 0);
+        assert_eq!(
+            std::fs::read_to_string(root.join("src").join("lib.rs")).unwrap(),
+            "pub fn x() {}\n"
+        );
+
+        let err = files_write(
+            &store,
+            &json!({ "workspaceId": id, "path": "no-dir/a.rs", "content": "x" }),
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), "not_found");
+
+        let err = files_write(
+            &store,
+            &json!({ "workspaceId": id, "path": "../x.rs", "content": "x" }),
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), "invalid_params");
+
+        let err = files_write(
+            &store,
+            &json!({ "workspaceId": id, "path": "src/nul.rs", "content": "hello\u{0000}world" }),
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), "file_binary");
+        assert!(!root.join("src").join("nul.rs").exists());
+
+        let big = "a".repeat((MAX_FILE_BYTES as usize) + 1);
+        let err = files_write(
+            &store,
+            &json!({ "workspaceId": id, "path": "src/big.rs", "content": big }),
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), "file_too_large");
+    }
+
+    #[test]
+    fn xdg_open_command_is_xdg_open_plus_canonical() {
+        let path = PathBuf::from("/tmp/example.rs");
+        let cmd = xdg_open_command(&path);
+        assert_eq!(cmd.get_program(), "xdg-open");
+        let args: Vec<_> = cmd.get_args().collect();
+        assert_eq!(args, [" /tmp/example.rs".trim()]);
+        assert_eq!(args[0], path.as_os_str());
+    }
+
+    #[test]
+    fn files_open_validates_without_ladder() {
+        let (_t, store, id, _) = seeded();
+        let err = files_open(&store, &json!({ "workspaceId": id, "path": "missing" })).unwrap_err();
+        assert_eq!(err.code(), "not_found");
+        let err = files_open(&store, &json!({ "workspaceId": id, "path": ".." })).unwrap_err();
+        assert_eq!(err.code(), "invalid_params");
+        let err = files_open(&store, &json!({ "workspaceId": id, "path": "src" })).unwrap_err();
         assert_eq!(err.code(), "invalid_params");
     }
 }

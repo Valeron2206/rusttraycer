@@ -30,3 +30,4 @@ futures.workspace = true
 serde_json.workspace = true
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tokio-tungstenite = "0.29"
+rusqlite.workspace = true
