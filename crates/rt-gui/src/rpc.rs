@@ -972,22 +972,22 @@ impl Session {
 
     pub fn shell_create(
         &self,
-        task_id: &str,
+        task_id: Option<&str>,
         workspace_id: &str,
         worktree_id: Option<&str>,
         cols: u16,
         rows: u16,
     ) -> Result<ShellCreateOk, ConnectError> {
-        parse_ok(self.call(
-            METHOD_SHELL_CREATE,
-            json!({
-                "taskId": task_id,
-                "workspaceId": workspace_id,
-                "worktreeId": worktree_id,
-                "cols": cols,
-                "rows": rows,
-            }),
-        )?)
+        let mut params = json!({
+            "workspaceId": workspace_id,
+            "worktreeId": worktree_id,
+            "cols": cols,
+            "rows": rows,
+        });
+        if let Some(task_id) = task_id {
+            params["taskId"] = json!(task_id);
+        }
+        parse_ok(self.call(METHOD_SHELL_CREATE, params)?)
     }
 
     pub fn shell_list(&self, task_id: &str) -> Result<Vec<ShellInfo>, ConnectError> {
@@ -3531,7 +3531,7 @@ mod tests {
                 });
                 let body = match (mode, method.as_str()) {
                     (_, "GET /health") => json!({"ok": true, "hostId": "host-a"}).to_string(),
-                    ("ok", "handshake") => json!({
+                    ("ok" | "require_task", "handshake") => json!({
                         "id": "echo",
                         "ok": {
                             "hostId": "host-a",
@@ -3728,7 +3728,7 @@ mod tests {
                 });
                 let body = match (mode, method.as_str()) {
                     (_, "GET /health") => json!({"ok": true, "hostId": "host-a"}).to_string(),
-                    ("ok", "handshake") => json!({
+                    ("ok" | "require_task", "handshake") => json!({
                         "id": "echo",
                         "ok": {
                             "hostId": "host-a",
@@ -3772,6 +3772,28 @@ mod tests {
                         }
                     })
                     .to_string(),
+                    ("require_task", "shell.create") => {
+                        if params.get("taskId").and_then(|v| v.as_str()).is_none() {
+                            json!({
+                                "id": "echo",
+                                "error": {
+                                    "code": "invalid_params",
+                                    "message": "taskId is required"
+                                }
+                            })
+                            .to_string()
+                        } else {
+                            json!({
+                                "id": "echo",
+                                "ok": {
+                                    "shellId": "sh-1",
+                                    "ptyId": "pty-shell-1",
+                                    "cwd": "/tmp/proj"
+                                }
+                            })
+                            .to_string()
+                        }
+                    }
                     ("ok", "shell.list") => json!({
                         "id": "echo",
                         "ok": {
@@ -4196,7 +4218,7 @@ mod tests {
         session.pty_write("pty-1", b"ls\n").expect("write");
         session.pty_resize("pty-1", 100, 30).expect("resize");
         let created = session
-            .shell_create("task-1", "ws-1", None, 80, 24)
+            .shell_create(Some("task-1"), "ws-1", None, 80, 24)
             .expect("shell");
         assert_eq!(created.shell_id, "sh-1");
         assert_eq!(created.pty_id, "pty-shell-1");
@@ -4225,6 +4247,52 @@ mod tests {
     }
 
     #[test]
+    fn shell_create_without_task_omits_task_id() {
+        let mock = start_pty_mock("ok");
+        let session = connect(&pid("host-a", &mock.origin)).expect("online");
+        session
+            .shell_create(None, "ws-1", None, 80, 24)
+            .expect("shell");
+        let hits = mock.hits.lock().unwrap().clone();
+        let create = hits.iter().find(|h| h.method == "shell.create").unwrap();
+        assert!(
+            create.params.get("taskId").is_none(),
+            "taskId must be omitted, not null: {}",
+            create.params
+        );
+        assert_eq!(create.params["workspaceId"], "ws-1");
+        assert_eq!(create.params["cols"], 80);
+        assert_eq!(create.params["rows"], 24);
+    }
+
+    #[test]
+    fn shell_create_with_task_still_sends_task_id() {
+        let mock = start_pty_mock("ok");
+        let session = connect(&pid("host-a", &mock.origin)).expect("online");
+        session
+            .shell_create(Some("task-1"), "ws-1", None, 80, 24)
+            .expect("shell");
+        let hits = mock.hits.lock().unwrap().clone();
+        let create = hits.iter().find(|h| h.method == "shell.create").unwrap();
+        assert_eq!(create.params["taskId"], "task-1");
+        assert_eq!(create.params["workspaceId"], "ws-1");
+    }
+
+    #[test]
+    fn shell_create_without_task_invalid_params_is_error() {
+        let mock = start_pty_mock("require_task");
+        let session = connect(&pid("host-a", &mock.origin)).expect("online");
+        assert!(session.terminal_accepted());
+        let err = session
+            .shell_create(None, "ws-1", None, 80, 24)
+            .unwrap_err();
+        assert!(err.is_invalid_params(), "{err:?}");
+        let label = err.as_label();
+        assert!(label.contains("invalid_params"), "{label}");
+        assert!(label.contains("taskId is required"), "{label}");
+    }
+
+    #[test]
     fn old_host_pty_methods_error_not_panic() {
         let mock = start_pty_mock("old");
         let session = connect(&pid("host-a", &mock.origin)).expect("online");
@@ -4235,7 +4303,7 @@ mod tests {
         let label = err.as_label();
         assert!(label.contains("unsupported_method"), "{label}");
         let err = session
-            .shell_create("task-1", "ws-1", None, 80, 24)
+            .shell_create(Some("task-1"), "ws-1", None, 80, 24)
             .unwrap_err();
         assert!(err.is_unsupported_method());
         let _ = mock;

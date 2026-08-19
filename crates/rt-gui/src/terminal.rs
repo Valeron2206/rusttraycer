@@ -10,6 +10,7 @@ pub const CLOSE_TERMINAL: &str = "Закрыть";
 pub const NO_LIVE_SHELL: &str = "нет живых shell";
 pub const AGENT_IS_CHAT: &str = "этот агент — чат; live PTY нет";
 pub const NEED_TASK: &str = "сначала выберите задачу";
+pub const NEED_WORKSPACE: &str = "нет workspace";
 pub const PTY_HINT: &str = "ввод идёт в host PTY · GUI процесс не спавнит";
 pub const TERMINAL_DISABLED_CAPS: &str = "Терминал выключен: harness без pty";
 pub const INTERFACE_LABEL: &str = "Интерфейс";
@@ -180,6 +181,7 @@ mod tests {
         assert_eq!(TERMINAL_TAB, "Терминал");
         assert_eq!(TERMINALS_PANE, "Терминалы");
         assert_eq!(NEED_TASK, "сначала выберите задачу");
+        assert_eq!(NEED_WORKSPACE, "нет workspace");
         assert_eq!(AGENT_IS_CHAT, "этот агент — чат; live PTY нет");
         assert_eq!(SHELL_HINT, "Shell · не агент");
     }

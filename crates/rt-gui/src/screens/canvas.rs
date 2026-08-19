@@ -37,7 +37,8 @@ use crate::workspace_ux::{
 };
 
 pub fn show(ctx: &egui::Context, state: &mut AppState) {
-    if state.selected_task_id.is_none() && state.open_task_ids.is_empty() {
+    if state.selected_task_id.is_none() && state.open_task_ids.is_empty() && !state.has_workspace()
+    {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.centered_and_justified(|ui| {
                 ui.weak("Задача не выбрана. Вернитесь к списку «Задачи».");
@@ -52,7 +53,10 @@ pub fn show(ctx: &egui::Context, state: &mut AppState) {
         .exact_height(36.0)
         .show(ctx, |ui| {
             ui.horizontal_centered(|ui| {
-                let title = state.selected_task_title().unwrap_or("Task").to_string();
+                let title = state
+                    .selected_task_title()
+                    .unwrap_or(terminal::TERMINALS_PANE)
+                    .to_string();
                 ui.strong(title);
                 if let Some(preset) = state.selected_task_preset() {
                     ui.weak(workspace_ux::preset_label_ru(preset));
@@ -1274,8 +1278,8 @@ fn show_shells(ui: &mut egui::Ui, state: &mut AppState) {
             state.create_shell();
         }
     });
-    if state.selected_task_id.is_none() {
-        ui.weak(terminal::NEED_TASK);
+    if !state.has_workspace() {
+        ui.weak(terminal::NEED_WORKSPACE);
     } else if !state.terminal_host_ok() && state.can_rpc() {
         ui.weak(TERMINAL_UNAVAILABLE);
     }

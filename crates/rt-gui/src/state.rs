@@ -29,7 +29,7 @@ use crate::sync_ux::{
 };
 use crate::terminal::{
     self, AgentInterface, AgentView, ShellStub, DEFAULT_COLS, DEFAULT_ROWS, NEED_TASK,
-    TERMINAL_UNAVAILABLE,
+    NEED_WORKSPACE, TERMINAL_UNAVAILABLE,
 };
 use crate::workspace_ux::{self, GUIDE_TOO_LONG, ROLE_CODER, WORKSPACE_UNAVAILABLE};
 use crate::ws::{self, ApplyOutcome, WsBridge, WsIncoming};
@@ -1424,17 +1424,12 @@ impl AppState {
     }
 
     pub fn can_create_shell(&self) -> bool {
-        self.can_rpc() && self.selected_task_id.is_some() && self.has_workspace()
+        self.can_rpc() && self.has_workspace()
     }
 
     pub fn create_shell(&mut self) {
-        if self.selected_task_id.is_none() {
-            self.toast = Some(NEED_TASK.into());
-            self.terminal_status = Some(NEED_TASK.into());
-            return;
-        }
         if !self.has_workspace() {
-            self.toast = Some("нет workspace".into());
+            self.toast = Some(NEED_WORKSPACE.into());
             return;
         }
         if !self.can_rpc() {
@@ -1447,17 +1442,15 @@ impl AppState {
             self.surface_terminal_error_label(TERMINAL_UNAVAILABLE);
             return;
         }
-        let Some(task_id) = self.selected_task_id.clone() else {
-            self.toast = Some(NEED_TASK.into());
-            return;
-        };
         let Some(workspace_id) = self.workspace_id.clone() else {
+            self.toast = Some(NEED_WORKSPACE.into());
             return;
         };
+        let task_id = self.selected_task_id.clone();
         let wt = self.worktree_id().map(|s| s.to_string());
         let agents_before = self.agents.len();
         match session.shell_create(
-            &task_id,
+            task_id.as_deref(),
             &workspace_id,
             wt.as_deref(),
             DEFAULT_COLS,
@@ -1663,8 +1656,8 @@ impl AppState {
 
     fn refresh_shells(&mut self) {
         let Some(task_id) = self.selected_task_id.clone() else {
-            self.shells.clear();
-            self.selected_shell_id = None;
+            // 0084 workspace-scoped shell.list is not in the host tree yet.
+            // Keep the just-created stub; do not invent a list method.
             return;
         };
         let Some(session) = self.session.clone() else {
@@ -5809,6 +5802,14 @@ mod tests {
     }
 
     fn start_pty_state_mock() -> SliceMock {
+        start_pty_state_mock_mode(false)
+    }
+
+    fn start_pty_state_mock_require_task() -> SliceMock {
+        start_pty_state_mock_mode(true)
+    }
+
+    fn start_pty_state_mock_mode(require_task: bool) -> SliceMock {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let hits = Arc::new(Mutex::new(Vec::new()));
@@ -5830,7 +5831,7 @@ mod tests {
                 let params = parsed.get("params").cloned().unwrap_or(json!({}));
                 hits_t.lock().unwrap().push(RpcHit {
                     method: method.clone(),
-                    params,
+                    params: params.clone(),
                 });
                 let mut accepted = serde_json::Map::new();
                 for name in crate::rpc::PTY_METHODS {
@@ -5854,15 +5855,29 @@ mod tests {
                         "ok": { "hostId": "host-a", "now": "2026-08-17T12:00:00Z" }
                     })
                     .to_string(),
-                    "shell.create" => json!({
-                        "id": "echo",
-                        "ok": {
-                            "shellId": "sh-1",
-                            "ptyId": "pty-shell-1",
-                            "cwd": "/tmp/proj"
+                    "shell.create" => {
+                        let missing_task = params.get("taskId").and_then(|v| v.as_str()).is_none();
+                        if require_task && missing_task {
+                            json!({
+                                "id": "echo",
+                                "error": {
+                                    "code": "invalid_params",
+                                    "message": "taskId is required"
+                                }
+                            })
+                            .to_string()
+                        } else {
+                            json!({
+                                "id": "echo",
+                                "ok": {
+                                    "shellId": "sh-1",
+                                    "ptyId": "pty-shell-1",
+                                    "cwd": "/tmp/proj"
+                                }
+                            })
+                            .to_string()
                         }
-                    })
-                    .to_string(),
+                    }
                     "shell.list" => json!({
                         "id": "echo",
                         "ok": { "items": [] }
@@ -5887,26 +5902,112 @@ mod tests {
         }
     }
 
-    #[test]
-    fn no_task_cannot_start_shell() {
-        let mut state = AppState::new();
-        state.pending_discover = false;
-        state.demo = false;
-        state.host_status = HostStatus::Online;
-        state.session = Some(offline_session_without_1_3());
-        state.workspace_id = Some("ws-1".into());
-        state.workspaces.push(rt_protocol::Workspace {
+    fn sample_ws() -> rt_protocol::Workspace {
+        rt_protocol::Workspace {
             id: "ws-1".into(),
             host_id: "host-a".into(),
             path: "/tmp/proj".into(),
             name: "proj".into(),
             created_at: "t".into(),
-        });
+        }
+    }
+
+    #[test]
+    fn can_create_shell_without_task_when_workspace_set() {
+        let mut state = AppState::new();
+        state.pending_discover = false;
+        state.demo = false;
+        state.host_status = HostStatus::Online;
+        state.workspace_id = Some("ws-1".into());
+        state.workspaces.push(sample_ws());
         assert!(state.selected_task_id.is_none());
+        assert!(state.can_create_shell());
+        state.selected_task_id = Some("task-1".into());
+        assert!(state.can_create_shell());
+        state.workspace_id = None;
+        state.workspaces.clear();
+        assert!(!state.can_create_shell());
+    }
+
+    #[test]
+    fn no_workspace_cannot_start_shell() {
+        let mock = start_pty_state_mock();
+        let session = connect(&pid(&mock.origin)).expect("online");
+        let mut state = online_state(session);
+        state.selected_task_id = None;
+        state.workspace_id = None;
+        state.workspaces.clear();
+        assert!(!state.can_create_shell());
         state.create_shell();
-        assert_eq!(state.toast.as_deref(), Some(NEED_TASK));
+        assert_eq!(state.toast.as_deref(), Some(NEED_WORKSPACE));
         assert!(state.shells.is_empty());
-        assert!(state.agents.is_empty());
+        let hits = mock.hits.lock().unwrap().clone();
+        assert!(
+            !hits.iter().any(|h| h.method == "shell.create"),
+            "no workspace must not send shell.create: {hits:?}"
+        );
+    }
+
+    #[test]
+    fn new_terminal_without_task_omits_task_id() {
+        let mock = start_pty_state_mock();
+        let session = connect(&pid(&mock.origin)).expect("online");
+        let mut state = online_state(session);
+        state.selected_task_id = None;
+        state.workspaces.push(sample_ws());
+        assert!(state.can_create_shell());
+        assert!(state.terminal_host_ok());
+        state.create_shell();
+        assert_eq!(state.shells.len(), 1);
+        assert_eq!(state.shells[0].id, "sh-1");
+        assert_eq!(state.selected_shell_id.as_deref(), Some("sh-1"));
+        let hits = mock.hits.lock().unwrap().clone();
+        let create = hits
+            .iter()
+            .find(|h| h.method == "shell.create")
+            .expect("shell.create");
+        assert!(
+            create.params.get("taskId").is_none(),
+            "taskId must be omitted: {}",
+            create.params
+        );
+        assert_eq!(create.params["workspaceId"], "ws-1");
+        assert_eq!(create.params["cols"], 80);
+        assert_eq!(create.params["rows"], 24);
+        assert!(!hits.iter().any(|h| h.method == "agent.create"));
+    }
+
+    #[test]
+    fn new_terminal_with_task_still_sends_task_id() {
+        let mock = start_pty_state_mock();
+        let session = connect(&pid(&mock.origin)).expect("online");
+        let mut state = online_state(session);
+        state.workspaces.push(sample_ws());
+        assert_eq!(state.selected_task_id.as_deref(), Some("task-1"));
+        state.create_shell();
+        let hits = mock.hits.lock().unwrap().clone();
+        let create = hits
+            .iter()
+            .find(|h| h.method == "shell.create")
+            .expect("shell.create");
+        assert_eq!(create.params["taskId"], "task-1");
+        assert_eq!(create.params["workspaceId"], "ws-1");
+    }
+
+    #[test]
+    fn old_13_host_invalid_params_on_no_task_create_toasts() {
+        let mock = start_pty_state_mock_require_task();
+        let session = connect(&pid(&mock.origin)).expect("online");
+        let mut state = online_state(session);
+        state.selected_task_id = None;
+        state.workspaces.push(sample_ws());
+        state.create_shell();
+        let toast = state.toast.as_deref().expect("toast");
+        assert!(toast.contains("invalid_params"), "{toast}");
+        assert_eq!(state.terminal_status.as_deref(), Some(toast));
+        assert!(state.shells.is_empty());
+        state.write_pty_bytes("pty-1", b"x");
+        assert!(state.toast.is_some());
     }
 
     #[test]
@@ -5955,7 +6056,12 @@ mod tests {
         assert_eq!(state.agents.len(), agents_before);
         assert!(state.agents.iter().all(|a| a.id != "sh-1"));
         let hits = mock.hits.lock().unwrap().clone();
-        assert!(hits.iter().any(|h| h.method == "shell.create"));
+        let create = hits
+            .iter()
+            .find(|h| h.method == "shell.create")
+            .expect("shell.create");
+        assert_eq!(create.params["taskId"], "task-1");
+        assert_eq!(create.params["workspaceId"], "ws-1");
         assert!(!hits.iter().any(|h| h.method == "agent.create"));
     }
 

@@ -19,9 +19,10 @@ pub fn show(ctx: &egui::Context, state: &mut AppState) {
                 let canvas_label = state
                     .selected_task_title()
                     .map(|t| t.to_string())
-                    .unwrap_or_else(|| "Task".to_string());
-                let canvas_enabled =
-                    state.selected_task_id.is_some() || !state.open_task_ids.is_empty();
+                    .unwrap_or_else(|| crate::terminal::TERMINALS_PANE.to_string());
+                let canvas_enabled = state.selected_task_id.is_some()
+                    || !state.open_task_ids.is_empty()
+                    || state.has_workspace();
                 nav_item(ui, state, Screen::Canvas, &canvas_label, canvas_enabled);
 
                 nav_item(ui, state, Screen::Host, "Host", true);
