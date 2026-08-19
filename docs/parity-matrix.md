@@ -49,7 +49,7 @@ Sources (live, 2026-08-19):
 | C34 | Terminal mux | directive E4; pty.rs/mux.rs stubs | missing | E4 | Ф3 | 4 |
 | C35 | Resume via provider session id, not scrollback | brief №13; terminal-agents-vs-terminals | missing | E4 | Ф3 | 13 |
 | C36 | Chat transcript ≠ terminal scrollback (tested) | brief №1, №2 | missing | E4 | Ф3 | 2, 13 |
-| C37 | Terminals outside a Task / start without folder | changelog | missing | E4 | Ф3 | 4 |
+| C37 | Terminals outside a Task / start without folder | changelog; [e4-terminal-v2](e4-terminal-v2.md) | missing | E4 | later | 4 |
 | C38 | Artifacts first-class (spec/ticket/story/review) | panels/artifacts | missing | E5 | Ф4 | 6 |
 | C39 | `artifact.create` (today stub: unsupported) | 0036 audit; protocol leftover | missing | E5 | Ф4 | 6 |
 | C40 | Artifact survives transcript delete | brief №6 | missing | E5 | Ф4 | 6 |
@@ -118,7 +118,7 @@ Sources (live, 2026-08-19):
 |---|---|---|
 | Ф1 | E1 + E2 foundation | C18–C25, C63, C65 |
 | Ф2 | E3 | C27–C31 (C64 later, e3-write-v2) |
-| Ф3 | E4 | C32–C37 |
+| Ф3 | E4 | C32–C36 (C37 later, e4-terminal-v2) |
 | Ф4 | E5 then E6 | C38–C47 |
 | Ф5 | E7 + E8 | C48–C56 |
 | Ф6 | E9 + E10 | C57–C62 |
