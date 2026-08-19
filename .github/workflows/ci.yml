@@ -110,8 +110,8 @@ jobs:
         with:
           toolchain: "1.85"
 
-      - name: host API e2e (directive-v2 §5 / F7 smoke)
-        run: cargo test -p rt-host --test e2e_harness --test e3_write --test e6_a2a --test e7_model_ux --test e8_workspace --test e10_metrics
+      - name: master e2e (directive-v2 §5 / F7 smoke)
+        run: scripts/ci-e2e.sh
 
   macos:
     runs-on: macos-latest
