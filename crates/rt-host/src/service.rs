@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use rt_runtime::{AgentBackend, TurnRequest, WireMessage, WireRole};
 use rt_storage::{
@@ -40,6 +41,7 @@ pub struct HostService {
     log_path: std::path::PathBuf,
     rpc_url: String,
     pid: u32,
+    turn_timeout: Duration,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -140,7 +142,13 @@ impl HostService {
             log_path,
             rpc_url,
             pid,
+            turn_timeout: supervisor::TURN_TIMEOUT,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_turn_timeout(&mut self, timeout: Duration) {
+        self.turn_timeout = timeout;
     }
 
     pub fn host_id(&self) -> &str {
@@ -499,6 +507,7 @@ impl HostService {
             events: self.events.clone(),
             inflight: self.inflight.clone(),
             gen,
+            timeout: self.turn_timeout,
         });
         self.inflight.attach(agent_id, gen, handle);
         Ok(user)
@@ -717,5 +726,36 @@ mod tests {
         let v = serde_json::to_value(&agent).unwrap();
         assert_eq!(v["provider"], "cli.generic");
         assert_eq!(v["interface"], "chat");
+    }
+
+    #[test]
+    fn send_rejects_content_over_1_mib() {
+        let (dir, svc) = setup_with(Arc::new(InstantBackend));
+        let agent_id = seed_agent(&svc, &dir);
+        let content = "x".repeat(MAX_CONTENT + 1);
+        let err = svc.send(&agent_id, &content).unwrap_err();
+        assert_eq!(err.code(), "invalid_params");
+        assert!(err.to_string().contains("1 MiB"));
+    }
+
+    #[tokio::test]
+    async fn turn_timeout_marks_agent_error() {
+        let (dir, mut svc) = setup_with(Arc::new(SlowBackend));
+        svc.set_turn_timeout(Duration::from_millis(30));
+        let agent_id = seed_agent(&svc, &dir);
+        svc.send(&agent_id, "hello").unwrap();
+        let mut timed_out = false;
+        for _ in 0..50 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            if svc.agent_get(&agent_id).unwrap().status == AgentStatus::Error {
+                timed_out = true;
+                break;
+            }
+        }
+        assert!(
+            timed_out,
+            "agent did not enter Error after short turn timeout"
+        );
+        svc.inflight.abort_all();
     }
 }

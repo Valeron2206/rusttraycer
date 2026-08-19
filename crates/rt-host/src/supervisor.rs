@@ -16,6 +16,9 @@ use crate::HostError;
 
 const FLUSH_EVERY: Duration = Duration::from_millis(100);
 
+/// Production turn deadline. Tests pass a shorter `Duration` via [`SpawnTurn::timeout`].
+pub(crate) const TURN_TIMEOUT: Duration = Duration::from_secs(600);
+
 struct Slot {
     gen: u64,
     handle: Option<JoinHandle<()>>,
@@ -85,6 +88,14 @@ impl Inflight {
         Ok(self.lock_map()?.contains_key(agent_id))
     }
 
+    /// True if `gen` still owns the slot for `agent_id`.
+    pub fn owns(&self, agent_id: &str, gen: u64) -> bool {
+        match self.inner.lock() {
+            Ok(g) => g.get(agent_id).is_some_and(|s| s.gen == gen),
+            Err(_) => false,
+        }
+    }
+
     /// Wait up to `grace` for turns to finish, then abort the rest (kills children).
     pub async fn shutdown(&self, grace: Duration) {
         let handles: Vec<JoinHandle<()>> = {
@@ -138,6 +149,7 @@ pub async fn run_turn(
     task_id: String,
     events: tokio::sync::broadcast::Sender<WsEvent>,
 ) {
+    tracing::info!(agent_id = %agent_id, task_id = %task_id, "turn start");
     let mut stream = backend.start_turn(req);
     let mut buf = String::new();
     let mut tick = interval(FLUSH_EVERY);
@@ -223,6 +235,7 @@ pub(crate) struct SpawnTurn {
     pub events: tokio::sync::broadcast::Sender<WsEvent>,
     pub inflight: Inflight,
     pub gen: u64,
+    pub timeout: Duration,
 }
 
 /// Spawn a panic-safe turn task. Caller must have reserved `agent_id` in `inflight`.
@@ -236,6 +249,7 @@ pub(crate) fn spawn_turn(args: SpawnTurn) -> JoinHandle<()> {
         events,
         inflight,
         gen,
+        timeout,
     } = args;
     let agent_for_err = agent_id.clone();
     let task_for_err = task_id.clone();
@@ -246,18 +260,46 @@ pub(crate) fn spawn_turn(args: SpawnTurn) -> JoinHandle<()> {
 
     tokio::spawn(async move {
         let fut = run_turn(store, backend, req, agent_id, task_id, events);
-        let panicked = std::panic::AssertUnwindSafe(fut)
-            .catch_unwind()
-            .await
-            .is_err();
-        if panicked {
-            tracing::error!(agent_id = %agent_for_err, "turn task panicked");
-            let _ = store_for_err.agent_set_status(&agent_for_err, AgentStatus::Error);
-            let _ = events_for_err.send(WsEvent::agent_status(
-                &task_for_err,
-                &agent_for_err,
-                AgentStatus::Error,
-            ));
+        let timed = tokio::time::timeout(timeout, fut);
+        let outcome = std::panic::AssertUnwindSafe(timed).catch_unwind().await;
+        match outcome {
+            Ok(Ok(())) => {}
+            Ok(Err(_elapsed)) => {
+                tracing::warn!(agent_id = %agent_for_err, "turn timeout");
+                if inflight_done.owns(&agent_done, gen) {
+                    if let Err(e) =
+                        store_for_err.agent_set_status(&agent_for_err, AgentStatus::Error)
+                    {
+                        tracing::error!(error = %e, "set agent status after timeout");
+                    }
+                    if events_for_err
+                        .send(WsEvent::agent_status(
+                            &task_for_err,
+                            &agent_for_err,
+                            AgentStatus::Error,
+                        ))
+                        .is_err()
+                    {
+                        tracing::debug!("no ws subscribers for timeout status");
+                    }
+                }
+            }
+            Err(_) => {
+                tracing::error!(agent_id = %agent_for_err, "turn task panicked");
+                if let Err(e) = store_for_err.agent_set_status(&agent_for_err, AgentStatus::Error) {
+                    tracing::error!(error = %e, "set agent status after panic");
+                }
+                if events_for_err
+                    .send(WsEvent::agent_status(
+                        &task_for_err,
+                        &agent_for_err,
+                        AgentStatus::Error,
+                    ))
+                    .is_err()
+                {
+                    tracing::debug!("no ws subscribers for panic status");
+                }
+            }
         }
         inflight_done.remove_if(&agent_done, gen);
     })

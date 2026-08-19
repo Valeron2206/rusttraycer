@@ -82,16 +82,38 @@ async fn rpc_handler(
     headers: HeaderMap,
     Json(req): Json<RpcRequest>,
 ) -> impl IntoResponse {
+    tracing::debug!(method = %req.method, "rpc enter");
     if let Err(e) = require_session(&state, &headers, &req.method) {
+        tracing::info!(method = %req.method, code = e.code(), "rpc error");
         return (StatusCode::OK, rpc_err(req.id, &e));
     }
     match dispatch(&state.service, &req.method, req.params).await {
-        Ok(ok) => (StatusCode::OK, rpc_ok(req.id, ok)),
-        Err(e) => (StatusCode::OK, rpc_err(req.id, &e)),
+        Ok(ok) => {
+            tracing::info!(method = %req.method, "rpc ok");
+            (StatusCode::OK, rpc_ok(req.id, ok))
+        }
+        Err(e) => {
+            tracing::info!(method = %req.method, code = e.code(), "rpc error");
+            (StatusCode::OK, rpc_err(req.id, &e))
+        }
     }
 }
 
 async fn dispatch(svc: &HostService, method: &str, params: Value) -> Result<Value, HostError> {
+    tracing::debug!(method, "dispatch");
+    let result = dispatch_method(svc, method, params).await;
+    match &result {
+        Ok(_) => tracing::debug!(method, "rpc ok"),
+        Err(e) => tracing::info!(method, code = e.code(), "rpc error"),
+    }
+    result
+}
+
+async fn dispatch_method(
+    svc: &HostService,
+    method: &str,
+    params: Value,
+) -> Result<Value, HostError> {
     if !params.is_object() {
         return Err(HostError::InvalidParams("params must be an object".into()));
     }
@@ -456,5 +478,55 @@ mod tests {
         }
         let ok = dispatch(&svc, "host.ping", json!({})).await.unwrap();
         assert_eq!(ok["hostId"], svc.host_id());
+    }
+
+    #[tokio::test]
+    async fn rpc_logs_method_enter_and_result() {
+        use std::io::Write;
+        use std::sync::{Arc, Mutex};
+
+        let (_dir, svc) = test_service();
+        let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+
+        #[derive(Clone)]
+        struct Capture(Arc<Mutex<Vec<u8>>>);
+        impl Write for Capture {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Capture {
+            type Writer = Capture;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_writer(Capture(buf.clone()))
+            .with_ansi(false)
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let _ = dispatch(&svc, "host.ping", json!({})).await.unwrap();
+        let err = dispatch(&svc, "no.such", json!({})).await.unwrap_err();
+        assert_eq!(err.code(), "unsupported_method");
+
+        let text = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        assert!(text.contains("host.ping"), "enter/ok missing: {text}");
+        assert!(text.contains("no.such"), "error method missing: {text}");
+        assert!(
+            text.contains("rpc ok") || text.contains("dispatch"),
+            "result log missing: {text}"
+        );
+        assert!(
+            text.contains("unsupported_method") || text.contains("rpc error"),
+            "{text}"
+        );
     }
 }
