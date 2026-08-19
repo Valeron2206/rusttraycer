@@ -405,4 +405,85 @@ mod tests {
         assert_eq!(err.code(), "already_running");
         assert_eq!(err.exit_code(), 2);
     }
+    #[test]
+    fn host_error_codes_exit_and_from_storage() {
+        assert_eq!(HostError::NotFound("x".into()).code(), "not_found");
+        assert_eq!(
+            HostError::InvalidParams("x".into()).code(),
+            "invalid_params"
+        );
+        assert_eq!(HostError::AgentBusy.code(), "agent_busy");
+        assert_eq!(
+            HostError::WorkspacePathInvalid("x".into()).code(),
+            "workspace_path_invalid"
+        );
+        assert_eq!(
+            HostError::UnsupportedMethod("x".into()).code(),
+            "unsupported_method"
+        );
+        assert_eq!(
+            HostError::VersionMismatch("x".into()).code(),
+            "version_mismatch"
+        );
+        assert_eq!(HostError::Unauthorized.code(), "unauthorized");
+        assert_eq!(HostError::FileTooLarge("x".into()).code(), "file_too_large");
+        assert_eq!(HostError::FileBinary("x".into()).code(), "file_binary");
+        assert_eq!(HostError::Internal("x".into()).code(), "internal");
+        assert_eq!(
+            HostError::AlreadyRunning {
+                pid: 7,
+                rpc_url: "http://127.0.0.1:1".into()
+            }
+            .code(),
+            "already_running"
+        );
+        assert_eq!(
+            HostError::AlreadyRunning {
+                pid: 7,
+                rpc_url: "u".into()
+            }
+            .exit_code(),
+            2
+        );
+        assert_eq!(HostError::NotFound("x".into()).exit_code(), 1);
+        assert_eq!(
+            HostError::from(rt_storage::StorageError::NotFound).code(),
+            "not_found"
+        );
+        assert_eq!(
+            HostError::from(rt_storage::StorageError::WorkspacePathInvalid("p".into())).code(),
+            "workspace_path_invalid"
+        );
+        assert_eq!(
+            HostError::from(rt_storage::StorageError::InvalidParams("p".into())).code(),
+            "invalid_params"
+        );
+        assert_eq!(
+            HostError::from(rt_storage::StorageError::UnsupportedSchema("9".into())).code(),
+            "internal"
+        );
+        assert_eq!(
+            HostError::from(rt_storage::StorageError::Io(std::io::Error::other("e"))).code(),
+            "internal"
+        );
+    }
+
+    #[test]
+    fn generic_cmd_probe_set_and_unset() {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _g = LOCK.lock().unwrap();
+        let prev = std::env::var("RUSTTRAYCER_GENERIC_CMD").ok();
+        std::env::remove_var("RUSTTRAYCER_GENERIC_CMD");
+        let down = generic_cmd_probe();
+        assert!(!down.available);
+        assert!(down.detail.contains("unset"));
+        std::env::set_var("RUSTTRAYCER_GENERIC_CMD", "  echo  ");
+        let up = generic_cmd_probe();
+        assert!(up.available);
+        assert!(up.detail.contains("echo"));
+        match prev {
+            Some(v) => std::env::set_var("RUSTTRAYCER_GENERIC_CMD", v),
+            None => std::env::remove_var("RUSTTRAYCER_GENERIC_CMD"),
+        }
+    }
 }

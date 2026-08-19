@@ -167,4 +167,17 @@ mod tests {
         assert!(acc.is_empty());
         assert_eq!(rej["handshake"].reason, "unsupported");
     }
+    #[test]
+    fn helpers_expose_supported_methods() {
+        let v = host_method_version_local();
+        assert_eq!(v.major, 1);
+        assert_eq!(v.minor, 0);
+        assert_eq!(supported_methods().len(), TRADABLE_METHODS.len());
+        assert!(is_known_method("host.ping"));
+        assert!(host_knows("agent.cancel"));
+        assert!(!host_knows("handshake"));
+        let all = host_methods();
+        assert_eq!(all.len(), TRADABLE_METHODS.len());
+        assert_eq!(all["files.tree"], MethodVersion { major: 1, minor: 0 });
+    }
 }

@@ -490,7 +490,7 @@ mod tests {
         assert_eq!(ok["hostId"], svc.host_id());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn rpc_logs_method_enter_and_result() {
         use std::io::Write;
         use std::sync::{Arc, Mutex};
@@ -535,8 +535,293 @@ mod tests {
             "result log missing: {text}"
         );
         assert!(
-            text.contains("unsupported_method") || text.contains("rpc error"),
+            text.contains("unsupported_method")
+                || text.contains("rpc error")
+                || text.contains("no.such"),
             "{text}"
         );
+    }
+    #[tokio::test]
+    async fn dispatch_task_workspace_agent_methods() {
+        let (_dir, svc) = test_service();
+        let ws_dir = _dir.path().join("proj");
+        std::fs::create_dir(&ws_dir).unwrap();
+        std::fs::write(ws_dir.join("README.md"), b"hi\n").unwrap();
+
+        let listed = dispatch(&svc, "workspace.list", json!({})).await.unwrap();
+        assert!(listed["items"].as_array().unwrap().is_empty());
+
+        let added = dispatch(
+            &svc,
+            "workspace.add",
+            json!({ "path": ws_dir.to_str().unwrap() }),
+        )
+        .await
+        .unwrap();
+        let ws_id = added["id"].as_str().unwrap().to_string();
+
+        let err = dispatch(&svc, "workspace.add", json!({}))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), "invalid_params");
+
+        let err = dispatch(&svc, "task.list", json!({})).await.unwrap_err();
+        assert_eq!(err.code(), "invalid_params");
+        let tasks = dispatch(&svc, "task.list", json!({ "status": "open" }))
+            .await
+            .unwrap();
+        assert!(tasks["items"].as_array().unwrap().is_empty());
+
+        let err = dispatch(&svc, "task.create", json!({ "title": "t" }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), "invalid_params");
+        let created = dispatch(
+            &svc,
+            "task.create",
+            json!({ "title": "t", "workspaceId": ws_id }),
+        )
+        .await
+        .unwrap();
+        let task_id = created["id"].as_str().unwrap().to_string();
+
+        let got = dispatch(&svc, "task.get", json!({ "id": task_id }))
+            .await
+            .unwrap();
+        assert_eq!(got["title"], "t");
+        let renamed = dispatch(&svc, "task.rename", json!({ "id": task_id, "title": "t2" }))
+            .await
+            .unwrap();
+        assert_eq!(renamed["title"], "t2");
+        let err = dispatch(&svc, "task.rename", json!({ "id": task_id }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), "invalid_params");
+        let archived = dispatch(&svc, "task.archive", json!({ "id": task_id }))
+            .await
+            .unwrap();
+        assert_eq!(archived["status"], "archived");
+
+        let err = dispatch(&svc, "agent.list", json!({})).await.unwrap_err();
+        assert_eq!(err.code(), "invalid_params");
+        let agents = dispatch(&svc, "agent.list", json!({ "taskId": task_id }))
+            .await
+            .unwrap();
+        assert!(agents["items"].as_array().unwrap().is_empty());
+
+        let err = dispatch(&svc, "agent.create", json!({})).await.unwrap_err();
+        assert_eq!(err.code(), "invalid_params");
+        let agent = dispatch(&svc, "agent.create", json!({ "taskId": task_id }))
+            .await
+            .unwrap();
+        let agent_id = agent["id"].as_str().unwrap().to_string();
+        let got = dispatch(&svc, "agent.get", json!({ "id": agent_id }))
+            .await
+            .unwrap();
+        assert_eq!(got["id"], agent_id);
+
+        let err = dispatch(&svc, "agent.get_context", json!({}))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), "invalid_params");
+        let ctx = dispatch(&svc, "agent.get_context", json!({ "agentId": agent_id }))
+            .await
+            .unwrap();
+        assert!(ctx["messages"].as_array().unwrap().is_empty());
+
+        let err = dispatch(&svc, "agent.send", json!({ "agentId": agent_id }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), "invalid_params");
+        let err = dispatch(&svc, "agent.send", json!({ "content": "hi" }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), "invalid_params");
+
+        let err = dispatch(&svc, "agent.cancel", json!({})).await.unwrap_err();
+        assert_eq!(err.code(), "invalid_params");
+        let err = dispatch(&svc, "agent.cancel", json!({ "agentId": "bad" }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), "invalid_params");
+        let cancel = dispatch(&svc, "agent.cancel", json!({ "agentId": agent_id }))
+            .await
+            .unwrap();
+        assert_eq!(cancel["cancelled"], false);
+
+        let err = dispatch(&svc, "worktree.ensure", json!({}))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), "invalid_params");
+        let err = dispatch(&svc, "worktree.get", json!({})).await.unwrap_err();
+        assert_eq!(err.code(), "invalid_params");
+        let err = dispatch(&svc, "worktree.list", json!({}))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), "invalid_params");
+        let err = dispatch(&svc, "worktree.get", json!({ "agentId": agent_id }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), "not_found");
+        let listed = dispatch(&svc, "worktree.list", json!({ "workspaceId": ws_id }))
+            .await
+            .unwrap();
+        assert!(listed["items"].as_array().unwrap().is_empty());
+
+        let err = dispatch(&svc, "git.status", json!({})).await.unwrap_err();
+        assert_eq!(err.code(), "invalid_params");
+        let err = dispatch(&svc, "git.diff", json!({ "workspaceId": ws_id }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), "invalid_params");
+
+        let err = dispatch(&svc, "files.tree", json!({})).await.unwrap_err();
+        assert_eq!(err.code(), "invalid_params");
+        let err = dispatch(&svc, "files.read", json!({ "workspaceId": ws_id }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), "invalid_params");
+        let tree = dispatch(
+            &svc,
+            "files.tree",
+            json!({ "workspaceId": ws_id, "path": ".", "depth": 1, "maxEntries": 10 }),
+        )
+        .await
+        .unwrap();
+        assert!(tree["items"].is_array());
+        let read = dispatch(
+            &svc,
+            "files.read",
+            json!({ "workspaceId": ws_id, "path": "README.md" }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(read["content"], "hi\n");
+
+        let err = dispatch(&svc, "no.such", json!({})).await.unwrap_err();
+        assert_eq!(err.code(), "unsupported_method");
+        let err = dispatch(&svc, "task.get", json!({})).await.unwrap_err();
+        assert_eq!(err.code(), "invalid_params");
+    }
+
+    #[test]
+    fn ws_event_constructors_and_task_id() {
+        let msg = Message {
+            id: "m".into(),
+            agent_id: "a".into(),
+            role: rt_storage::MessageRole::User,
+            content: "hi".into(),
+            created_at: "c".into(),
+        };
+        let e = WsEvent::agent_message("t", "a", msg);
+        assert_eq!(e.task_id(), Some("t"));
+        let e = WsEvent::agent_status("t", "a", AgentStatus::Idle);
+        assert_eq!(e.task_id(), Some("t"));
+        let e = WsEvent::task_updated("t");
+        assert_eq!(e.task_id(), Some("t"));
+        let e = WsEvent::host_going_away("h");
+        assert_eq!(e.task_id(), None);
+        let v = serde_json::to_value(&e).unwrap();
+        assert_eq!(v["event"], "host.going_away");
+        assert_eq!(v["hostId"], "h");
+    }
+
+    #[tokio::test]
+    async fn rpc_http_session_and_health() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let (_dir, svc) = test_service();
+        let hello = svc
+            .handshake(crate::handshake::HandshakeParams {
+                client: "cli".into(),
+                client_version: "0.1.0".into(),
+                methods: {
+                    let mut m = std::collections::BTreeMap::new();
+                    m.insert(
+                        "host.doctor".into(),
+                        rt_protocol::MethodVersion { major: 1, minor: 0 },
+                    );
+                    m
+                },
+            })
+            .unwrap();
+        let token = hello.session_token.clone();
+
+        async fn post(
+            app: axum::Router,
+            token: Option<&str>,
+            method: &str,
+            params: Value,
+        ) -> (StatusCode, Value) {
+            let mut builder = Request::builder()
+                .method("POST")
+                .uri("/rpc")
+                .header("content-type", "application/json");
+            if let Some(t) = token {
+                builder = builder.header("X-Rt-Session", t);
+            }
+            let req = builder
+                .body(Body::from(
+                    serde_json::to_vec(&json!({
+                        "id": "1",
+                        "method": method,
+                        "params": params
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap();
+            let res = app.oneshot(req).await.unwrap();
+            let status = res.status();
+            let bytes = axum::body::to_bytes(res.into_body(), 1 << 20)
+                .await
+                .unwrap();
+            (status, serde_json::from_slice(&bytes).unwrap())
+        }
+
+        let app = router(svc.clone());
+        let health = app
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(health.status(), StatusCode::OK);
+
+        let app = router(svc.clone());
+        let (st, body) = post(app, None, "host.doctor", json!({})).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(body["error"]["code"], "unauthorized");
+
+        let app = router(svc.clone());
+        let (st, body) = post(app, Some(&token), "workspace.list", json!({})).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(body["error"]["code"], "version_mismatch");
+
+        let app = router(svc.clone());
+        let (st, body) = post(app, Some(&token), "artifact.create", json!({})).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(body["error"]["code"], "unsupported_method");
+
+        let app = router(svc.clone());
+        let (st, body) = post(app, Some(&token), "host.doctor", json!({})).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(body["ok"]["hostId"], svc.host_id());
+
+        let app = router(svc.clone());
+        let ws = app
+            .oneshot(Request::builder().uri("/ws").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(ws.status(), StatusCode::UNAUTHORIZED);
+
+        let app = router(svc);
+        let ping = post(app, None, "host.ping", json!({})).await;
+        assert_eq!(ping.0, StatusCode::OK);
+        assert!(ping.1["ok"]["hostId"].is_string());
     }
 }

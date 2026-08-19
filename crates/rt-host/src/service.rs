@@ -972,4 +972,131 @@ mod tests {
         );
         svc.inflight.abort_all();
     }
+    #[test]
+    fn handshake_rejects_unknown_client() {
+        let (dir, svc) = setup_with(Arc::new(InstantBackend));
+        let err = svc
+            .handshake(HandshakeParams {
+                client: "web".into(),
+                client_version: "0.1.0".into(),
+                methods: BTreeMap::new(),
+            })
+            .unwrap_err();
+        assert_eq!(err.code(), "invalid_params");
+        let hello = svc
+            .handshake(HandshakeParams {
+                client: "gui".into(),
+                client_version: "0.1.0".into(),
+                methods: BTreeMap::new(),
+            })
+            .unwrap();
+        assert!(!hello.session_token.is_empty());
+        assert!(svc.session_valid(&hello.session_token).unwrap());
+        assert!(!svc.session_valid("nope").unwrap());
+        assert_eq!(
+            svc.session_accepts(&hello.session_token, "host.ping")
+                .unwrap(),
+            Some(false)
+        );
+        assert_eq!(svc.session_accepts("nope", "host.ping").unwrap(), None);
+        let _ = dir;
+    }
+
+    #[test]
+    fn workspace_and_task_error_edges() {
+        let (dir, svc) = setup_with(Arc::new(InstantBackend));
+        assert!(svc.workspace_list().unwrap().is_empty());
+        assert_eq!(svc.workspace_add("").unwrap_err().code(), "invalid_params");
+        assert_eq!(
+            svc.workspace_add("/no/such/dir-0024").unwrap_err().code(),
+            "workspace_path_invalid"
+        );
+        let file = dir.path().join("not-dir");
+        std::fs::write(&file, b"x").unwrap();
+        assert_eq!(
+            svc.workspace_add(file.to_str().unwrap())
+                .unwrap_err()
+                .code(),
+            "workspace_path_invalid"
+        );
+
+        let ws_dir = dir.path().join("ws-edges");
+        std::fs::create_dir(&ws_dir).unwrap();
+        let ws = svc.workspace_add(ws_dir.to_str().unwrap()).unwrap();
+        assert_eq!(svc.workspace_list().unwrap().len(), 1);
+
+        assert_eq!(
+            svc.task_create("", &ws.id).unwrap_err().code(),
+            "invalid_params"
+        );
+        assert_eq!(
+            svc.task_create(&"a".repeat(201), &ws.id)
+                .unwrap_err()
+                .code(),
+            "invalid_params"
+        );
+        assert_eq!(
+            svc.task_create("ok", "").unwrap_err().code(),
+            "invalid_params"
+        );
+        let task = svc.task_create("t", &ws.id).unwrap();
+        assert_eq!(svc.task_list("open").unwrap().len(), 1);
+        assert!(svc.task_list("archived").unwrap().is_empty());
+        assert_eq!(svc.task_list("all").unwrap().len(), 1);
+        assert_eq!(
+            svc.task_list("closed").unwrap_err().code(),
+            "invalid_params"
+        );
+        assert_eq!(svc.task_get("missing").unwrap_err().code(), "not_found");
+        let renamed = svc.task_rename(&task.id, "renamed").unwrap();
+        assert_eq!(renamed.title, "renamed");
+        let archived = svc.task_archive(&task.id).unwrap();
+        assert_eq!(archived.status, TaskStatus::Archived);
+        let again = svc.task_archive(&task.id).unwrap();
+        assert_eq!(again.status, TaskStatus::Archived);
+        assert_eq!(svc.agent_list("missing").unwrap_err().code(), "not_found");
+        assert!(svc.agent_list(&task.id).unwrap().is_empty());
+        assert_eq!(
+            svc.agent_create("missing", Some("cli.generic"))
+                .unwrap_err()
+                .code(),
+            "not_found"
+        );
+        assert_eq!(svc.agent_get("missing").unwrap_err().code(), "not_found");
+        assert_eq!(svc.get_context("missing").unwrap_err().code(), "not_found");
+        let ping = svc.ping();
+        assert_eq!(ping.host_id, svc.host_id());
+        let doc = svc.doctor().unwrap();
+        assert_eq!(doc.host_id, svc.host_id());
+        assert!(doc.db_ok);
+        assert_eq!(doc.workspace_count, 1);
+        svc.going_away();
+        let _ = svc.subscribe_events();
+    }
+
+    #[test]
+    fn send_empty_content_and_missing_agent() {
+        let (dir, svc) = setup_with(Arc::new(InstantBackend));
+        let agent_id = seed_agent(&svc, &dir);
+        assert_eq!(
+            svc.send(&agent_id, "").unwrap_err().code(),
+            "invalid_params"
+        );
+        assert_eq!(
+            svc.send("0191f0c6-7c2a-7c11-8000-6f0c1a2b3c4d", "hi")
+                .unwrap_err()
+                .code(),
+            "not_found"
+        );
+        assert_eq!(
+            svc.cancel("not-a-uuid").unwrap_err().code(),
+            "invalid_params"
+        );
+        assert_eq!(
+            svc.cancel("0191f0c6-7c2a-7c11-8000-6f0c1a2b3c4d")
+                .unwrap_err()
+                .code(),
+            "not_found"
+        );
+    }
 }

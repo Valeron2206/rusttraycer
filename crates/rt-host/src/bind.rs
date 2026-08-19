@@ -232,4 +232,49 @@ mod tests {
         assert_eq!(v["rpcUrl"], "http://127.0.0.1:1234");
         assert_eq!(v["wsUrl"], "ws://127.0.0.1:1234/ws");
     }
+    #[test]
+    fn resolve_product_home_respects_env() {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _g = LOCK.lock().unwrap();
+        let prev = std::env::var("RUSTTRAYCER_HOME").ok();
+        std::env::set_var("RUSTTRAYCER_HOME", "/tmp/rt-home-0024");
+        assert_eq!(resolve_product_home(), PathBuf::from("/tmp/rt-home-0024"));
+        assert_eq!(resolve_data_dir(), PathBuf::from("/tmp/rt-home-0024/host"));
+        std::env::set_var("RUSTTRAYCER_HOME", "   ");
+        let fallback = resolve_product_home();
+        assert!(fallback.ends_with(".rusttraycer"), "{fallback:?}");
+        match prev {
+            Some(v) => std::env::set_var("RUSTTRAYCER_HOME", v),
+            None => std::env::remove_var("RUSTTRAYCER_HOME"),
+        }
+    }
+
+    #[test]
+    fn pid_zero_is_not_alive() {
+        assert!(!is_pid_alive(0));
+        assert!(is_pid_alive(std::process::id()));
+        assert_eq!(db_path(Path::new("/d")), PathBuf::from("/d/host.db"));
+        assert_eq!(log_path(Path::new("/d")), PathBuf::from("/d/host.log"));
+    }
+
+    #[test]
+    fn remove_pid_file_missing_and_foreign() {
+        let dir = tempdir().unwrap();
+        remove_pid_file_if_ours(dir.path(), 1).unwrap();
+        let info = PidFile::new("h".into(), 1, 9);
+        write_pid_file(dir.path(), &info).unwrap();
+        remove_pid_file_if_ours(dir.path(), 99).unwrap();
+        assert!(pid_path(dir.path()).exists());
+        remove_pid_file_if_ours(dir.path(), 1).unwrap();
+        assert!(!pid_path(dir.path()).exists());
+    }
+
+    #[test]
+    fn read_pid_file_missing_and_malformed() {
+        let dir = tempdir().unwrap();
+        assert!(read_pid_file(dir.path()).unwrap().is_none());
+        std::fs::write(pid_path(dir.path()), b"{\"pid\":1}").unwrap();
+        let err = read_pid_file(dir.path()).unwrap_err();
+        assert_eq!(err.code(), "internal");
+    }
 }

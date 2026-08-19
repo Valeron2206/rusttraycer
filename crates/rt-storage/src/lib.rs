@@ -1258,4 +1258,231 @@ mod tests {
         assert_eq!(v["agentId"], agent.id);
         assert!(v.get("workspace_id").is_none());
     }
+    #[test]
+    fn error_codes_and_display() {
+        assert_eq!(StorageError::NotFound.code(), "not_found");
+        assert_eq!(
+            StorageError::WorkspacePathInvalid("x".into()).code(),
+            "workspace_path_invalid"
+        );
+        assert_eq!(
+            StorageError::InvalidParams("bad".into()).code(),
+            "invalid_params"
+        );
+        assert_eq!(
+            StorageError::UnsupportedSchema("9".into()).code(),
+            "internal"
+        );
+        let db = StorageError::Database(rusqlite::Error::InvalidQuery);
+        assert_eq!(db.code(), "internal");
+        assert!(db.to_string().contains("database"));
+        let io = StorageError::Io(std::io::Error::other("boom"));
+        assert_eq!(io.code(), "internal");
+        assert!(StorageError::NotFound.to_string().contains("not found"));
+    }
+
+    #[test]
+    fn status_role_parse_and_as_str() {
+        assert_eq!(TaskStatus::Open.as_str(), "open");
+        assert_eq!(TaskStatus::Archived.as_str(), "archived");
+        assert_eq!(TaskStatus::parse("open").unwrap(), TaskStatus::Open);
+        assert_eq!(TaskStatus::parse("archived").unwrap(), TaskStatus::Archived);
+        let err = TaskStatus::parse("done").unwrap_err();
+        assert_eq!(err.code(), "invalid_params");
+
+        assert_eq!(AgentStatus::Idle.as_str(), "idle");
+        assert_eq!(AgentStatus::Running.as_str(), "running");
+        assert_eq!(AgentStatus::Error.as_str(), "error");
+        assert_eq!(AgentStatus::parse("idle").unwrap(), AgentStatus::Idle);
+        assert_eq!(AgentStatus::parse("running").unwrap(), AgentStatus::Running);
+        assert_eq!(AgentStatus::parse("error").unwrap(), AgentStatus::Error);
+        assert_eq!(
+            AgentStatus::parse("zzz").unwrap_err().code(),
+            "invalid_params"
+        );
+
+        assert_eq!(MessageRole::User.as_str(), "user");
+        assert_eq!(MessageRole::Assistant.as_str(), "assistant");
+        assert_eq!(MessageRole::System.as_str(), "system");
+        assert_eq!(MessageRole::Tool.as_str(), "tool");
+        assert_eq!(MessageRole::parse("user").unwrap(), MessageRole::User);
+        assert_eq!(
+            MessageRole::parse("assistant").unwrap(),
+            MessageRole::Assistant
+        );
+        assert_eq!(MessageRole::parse("system").unwrap(), MessageRole::System);
+        assert_eq!(MessageRole::parse("tool").unwrap(), MessageRole::Tool);
+        assert_eq!(
+            MessageRole::parse("narrator").unwrap_err().code(),
+            "invalid_params"
+        );
+    }
+
+    #[test]
+    fn harness_id_traits() {
+        let a = HarnessId::cli_generic();
+        assert_eq!(a.as_str(), HarnessId::CLI_GENERIC);
+        assert_eq!(a.as_ref(), "cli.generic");
+        assert_eq!(a.to_string(), "cli.generic");
+        assert_eq!(a, "cli.generic");
+        assert_eq!(a, HarnessId::CLI_GENERIC);
+        assert_eq!(
+            HarnessId::from("cli.claude".to_string()).as_str(),
+            "cli.claude"
+        );
+        assert_eq!(HarnessId::from("cli.codex"), HarnessId::new("cli.codex"));
+        assert_eq!(format!("{a}"), "cli.generic");
+    }
+
+    #[test]
+    fn host_get_not_found_and_store_debug() {
+        let (_tmp, store) = open_store();
+        let err = store.host_get().unwrap_err();
+        assert_eq!(err.code(), "not_found");
+        let dbg = format!("{store:?}");
+        assert!(dbg.contains("Store"));
+        assert!(dbg.contains("path"));
+        assert!(store.path().ends_with("host.db"));
+        assert!(store.integrity_ok().unwrap());
+        assert_eq!(store.recover_running().unwrap(), 0);
+    }
+
+    #[test]
+    fn task_list_filters_rename_touch_and_missing() {
+        let (_tmp, store) = open_store();
+        store.host_insert_if_absent(&new_id(), "h").unwrap();
+        let ws = store.workspace_add("/p", "p").unwrap();
+        assert!(store.workspace_get("nope").unwrap().is_none());
+        assert_eq!(store.workspace_get(&ws.id).unwrap().unwrap().id, ws.id);
+
+        let t1 = store.task_create("alpha", &ws.id).unwrap();
+        let t2 = store.task_create("beta", &ws.id).unwrap();
+        store.task_archive(&t2.id).unwrap();
+
+        let open = store.task_list(TaskFilter::Open).unwrap();
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].id, t1.id);
+        let archived = store.task_list(TaskFilter::Archived).unwrap();
+        assert_eq!(archived.len(), 1);
+        assert_eq!(archived[0].id, t2.id);
+        let all = store.task_list(TaskFilter::All).unwrap();
+        assert_eq!(all.len(), 2);
+
+        assert!(store.task_get("missing").unwrap().is_none());
+        store.task_rename(&t1.id, "alpha-2").unwrap();
+        assert_eq!(store.task_get(&t1.id).unwrap().unwrap().title, "alpha-2");
+        assert_eq!(
+            store.task_rename("missing", "x").unwrap_err().code(),
+            "not_found"
+        );
+        store.task_touch(&t1.id).unwrap();
+        assert_eq!(store.task_touch("missing").unwrap_err().code(), "not_found");
+        assert_eq!(
+            store.task_archive("missing").unwrap_err().code(),
+            "not_found"
+        );
+
+        let counts = store.counts().unwrap();
+        assert_eq!(counts.workspace_count, 1);
+        assert_eq!(counts.task_count, 2);
+        assert_eq!(counts.agent_count, 0);
+    }
+
+    #[test]
+    fn agent_and_message_missing_edges() {
+        let (_tmp, store) = open_store();
+        let host_id = new_id();
+        store.host_insert_if_absent(&host_id, "h").unwrap();
+        let ws = store.workspace_add("/p", "p").unwrap();
+        let task = store.task_create("t", &ws.id).unwrap();
+        assert!(store.agent_list(&task.id).unwrap().is_empty());
+        assert_eq!(
+            store
+                .agent_create("missing-task", &host_id, "cli.generic")
+                .unwrap_err()
+                .code(),
+            "not_found"
+        );
+        let agent = store
+            .agent_create(&task.id, &host_id, "cli.generic")
+            .unwrap();
+        assert!(store.agent_get("nope").unwrap().is_none());
+        assert_eq!(
+            store
+                .agent_set_status("nope", AgentStatus::Error)
+                .unwrap_err()
+                .code(),
+            "not_found"
+        );
+        store
+            .agent_set_status(&agent.id, AgentStatus::Error)
+            .unwrap();
+        assert_eq!(
+            store.agent_get(&agent.id).unwrap().unwrap().status,
+            AgentStatus::Error
+        );
+
+        assert_eq!(
+            store
+                .message_append("nope", MessageRole::User, "x")
+                .unwrap_err()
+                .code(),
+            "not_found"
+        );
+        assert!(store.last_message_at(&agent.id).unwrap().is_none());
+        let sys = store
+            .message_append(&agent.id, MessageRole::System, "sys")
+            .unwrap();
+        let tool = store
+            .message_append(&agent.id, MessageRole::Tool, "tool")
+            .unwrap();
+        let last = store.last_message_at(&agent.id).unwrap().unwrap();
+        assert_eq!(last, tool.created_at);
+        let msgs = store.message_list(&agent.id).unwrap();
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0].role, MessageRole::System);
+        assert_eq!(msgs[0].id, sys.id);
+        assert_eq!(msgs[1].role, MessageRole::Tool);
+    }
+
+    #[test]
+    fn worktree_insert_missing_and_bad_run_location() {
+        let (_tmp, store) = open_store();
+        let host_id = new_id();
+        store.host_insert_if_absent(&host_id, "h").unwrap();
+        let ws = store.workspace_add("/p", "p").unwrap();
+        let task = store.task_create("t", &ws.id).unwrap();
+        let agent = store
+            .agent_create(&task.id, &host_id, "cli.generic")
+            .unwrap();
+        assert_eq!(
+            store
+                .worktree_insert("no-ws", &agent.id, "/wt", "rt/x")
+                .unwrap_err()
+                .code(),
+            "not_found"
+        );
+        assert_eq!(
+            store
+                .worktree_insert(&ws.id, "no-agent", "/wt", "rt/x")
+                .unwrap_err()
+                .code(),
+            "not_found"
+        );
+        assert_eq!(
+            store
+                .agent_set_run_location(&agent.id, "remote")
+                .unwrap_err()
+                .code(),
+            "invalid_params"
+        );
+        assert_eq!(
+            store
+                .agent_set_run_location("nope", "local")
+                .unwrap_err()
+                .code(),
+            "not_found"
+        );
+        store.agent_set_run_location(&agent.id, "local").unwrap();
+    }
 }
