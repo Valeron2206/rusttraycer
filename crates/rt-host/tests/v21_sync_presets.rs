@@ -3,7 +3,6 @@
 
 use std::path::Path;
 use std::pin::Pin;
-use std::sync::Mutex;
 
 use futures::Stream;
 use rt_runtime::{AgentBackend, Availability, TurnEvent, TurnRequest};
@@ -208,11 +207,6 @@ fn assert_no_secret_columns(db: &Path) {
     }
 }
 
-fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: Mutex<()> = Mutex::new(());
-    LOCK.lock().unwrap_or_else(|e| e.into_inner())
-}
-
 struct ClearSyncSecret;
 
 impl Drop for ClearSyncSecret {
@@ -223,20 +217,17 @@ impl Drop for ClearSyncSecret {
 
 #[tokio::test(flavor = "current_thread")]
 async fn push_no_secret_rewrites_host_id_then_conflict() {
-    let _lock = env_lock();
     let _clear = ClearSyncSecret;
     std::env::remove_var("RUSTTRAYCER_SYNC_SECRET");
 
     let dir_a = tempfile::tempdir().unwrap();
     let dir_b = tempfile::tempdir().unwrap();
-    let (addr_a, tx_a, join_a, host_a) =
-        rt_host::spawn_test_host(dir_a.path(), Some(backends()))
-            .await
-            .unwrap();
-    let (addr_b, tx_b, join_b, host_b) =
-        rt_host::spawn_test_host(dir_b.path(), Some(backends()))
-            .await
-            .unwrap();
+    let (addr_a, tx_a, join_a, host_a) = rt_host::spawn_test_host(dir_a.path(), Some(backends()))
+        .await
+        .unwrap();
+    let (addr_b, tx_b, join_b, host_b) = rt_host::spawn_test_host(dir_b.path(), Some(backends()))
+        .await
+        .unwrap();
     assert_eq!(addr_a.ip().to_string(), "127.0.0.1");
     assert_eq!(addr_b.ip().to_string(), "127.0.0.1");
     let base_a = format!("http://127.0.0.1:{}", addr_a.port());
@@ -373,14 +364,7 @@ async fn push_no_secret_rewrites_host_id_then_conflict() {
     )
     .await;
     let task_b_id = rpc_id(&task_b, "id");
-    let ws_a_list = rpc(
-        &client,
-        &base_a,
-        Some(&tok_a),
-        "workspace.list",
-        json!({}),
-    )
-    .await;
+    let ws_a_list = rpc(&client, &base_a, Some(&tok_a), "workspace.list", json!({})).await;
     let ws_a_id = ws_a_list["ok"]["items"][0]["id"].as_str().unwrap();
     let pulled_ok = rpc(
         &client,
@@ -413,7 +397,6 @@ async fn push_no_secret_rewrites_host_id_then_conflict() {
     let _ = join_b.await;
 }
 
-
 #[tokio::test]
 async fn handshake_1_9_accepts_new_methods_1_8_keeps_export_import() {
     let dir = tempfile::tempdir().unwrap();
@@ -426,9 +409,18 @@ async fn handshake_1_9_accepts_new_methods_1_8_keeps_export_import() {
     let (_, hs19) = handshake(&client, &base, client_1_9_methods()).await;
     assert_eq!(hs19["ok"]["accepted"]["sync.push"]["minor"], 9, "{hs19}");
     assert_eq!(hs19["ok"]["accepted"]["sync.pull"]["minor"], 9, "{hs19}");
-    assert_eq!(hs19["ok"]["accepted"]["preset.create"]["minor"], 9, "{hs19}");
-    assert_eq!(hs19["ok"]["accepted"]["preset.update"]["minor"], 9, "{hs19}");
-    assert_eq!(hs19["ok"]["accepted"]["preset.delete"]["minor"], 9, "{hs19}");
+    assert_eq!(
+        hs19["ok"]["accepted"]["preset.create"]["minor"], 9,
+        "{hs19}"
+    );
+    assert_eq!(
+        hs19["ok"]["accepted"]["preset.update"]["minor"], 9,
+        "{hs19}"
+    );
+    assert_eq!(
+        hs19["ok"]["accepted"]["preset.delete"]["minor"], 9,
+        "{hs19}"
+    );
     assert_eq!(hs19["ok"]["accepted"]["sync.export"]["minor"], 8, "{hs19}");
     assert_eq!(hs19["ok"]["accepted"]["sync.import"]["minor"], 8, "{hs19}");
 
@@ -437,9 +429,18 @@ async fn handshake_1_9_accepts_new_methods_1_8_keeps_export_import() {
     assert_eq!(hs18["ok"]["accepted"]["sync.import"]["minor"], 8, "{hs18}");
     assert!(hs18["ok"]["accepted"].get("sync.push").is_none(), "{hs18}");
     assert!(hs18["ok"]["accepted"].get("sync.pull").is_none(), "{hs18}");
-    assert!(hs18["ok"]["accepted"].get("preset.create").is_none(), "{hs18}");
-    assert!(hs18["ok"]["accepted"].get("preset.update").is_none(), "{hs18}");
-    assert!(hs18["ok"]["accepted"].get("preset.delete").is_none(), "{hs18}");
+    assert!(
+        hs18["ok"]["accepted"].get("preset.create").is_none(),
+        "{hs18}"
+    );
+    assert!(
+        hs18["ok"]["accepted"].get("preset.update").is_none(),
+        "{hs18}"
+    );
+    assert!(
+        hs18["ok"]["accepted"].get("preset.delete").is_none(),
+        "{hs18}"
+    );
 
     let dir_b = tempfile::tempdir().unwrap();
     let (addr_b, tx_b, join_b, _) = rt_host::spawn_test_host(dir_b.path(), Some(backends()))
@@ -447,7 +448,8 @@ async fn handshake_1_9_accepts_new_methods_1_8_keeps_export_import() {
         .unwrap();
     let base_b = format!("http://{addr_b}");
     let (token_b, _) = handshake(&client, &base_b, client_1_8_methods()).await;
-    let (ws_a, task_id) = seed_ws_task(&client, &base, &token18, &dir.path().join("ws18"), "c18").await;
+    let (ws_a, task_id) =
+        seed_ws_task(&client, &base, &token18, &dir.path().join("ws18"), "c18").await;
     let exported = rpc(
         &client,
         &base,
@@ -457,7 +459,14 @@ async fn handshake_1_9_accepts_new_methods_1_8_keeps_export_import() {
     )
     .await;
     assert!(exported.get("error").is_none(), "{exported}");
-    let (ws_b, _) = seed_ws_task(&client, &base_b, &token_b, &dir_b.path().join("ws18b"), "ph").await;
+    let (ws_b, _) = seed_ws_task(
+        &client,
+        &base_b,
+        &token_b,
+        &dir_b.path().join("ws18b"),
+        "ph",
+    )
+    .await;
     let imported = rpc(
         &client,
         &base_b,
@@ -487,7 +496,6 @@ async fn handshake_1_9_accepts_new_methods_1_8_keeps_export_import() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn sync_secret_mismatch_is_auth_required_match_succeeds() {
-    let _lock = env_lock();
     let _clear = ClearSyncSecret;
     std::env::set_var("RUSTTRAYCER_SYNC_SECRET", "c58-test-secret");
 
@@ -498,7 +506,8 @@ async fn sync_secret_mismatch_is_auth_required_match_succeeds() {
     let base = format!("http://{addr}");
     let client = reqwest::Client::new();
     let (token, _) = handshake(&client, &base, client_1_9_methods()).await;
-    let (_ws, task_id) = seed_ws_task(&client, &base, &token, &dir.path().join("ws"), "secret").await;
+    let (_ws, task_id) =
+        seed_ws_task(&client, &base, &token, &dir.path().join("ws"), "secret").await;
 
     let missing = client
         .post(format!("{base}/sync/v1/export"))
@@ -626,7 +635,10 @@ async fn preset_crud_lists_builtins_plus_user_survives_restart() {
         json!({ "id": "planning" }),
     )
     .await;
-    assert_eq!(builtin_del["error"]["code"], "invalid_params", "{builtin_del}");
+    assert_eq!(
+        builtin_del["error"]["code"], "invalid_params",
+        "{builtin_del}"
+    );
     let builtin_upd = rpc(
         &client,
         &base,
@@ -635,7 +647,10 @@ async fn preset_crud_lists_builtins_plus_user_survives_restart() {
         json!({ "id": "planning", "name": "nope" }),
     )
     .await;
-    assert_eq!(builtin_upd["error"]["code"], "invalid_params", "{builtin_upd}");
+    assert_eq!(
+        builtin_upd["error"]["code"], "invalid_params",
+        "{builtin_upd}"
+    );
 
     let reserved = rpc(
         &client,
