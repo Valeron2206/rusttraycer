@@ -8,6 +8,7 @@ mod ladder;
 mod rpc;
 mod screens;
 mod state;
+mod terminal;
 mod ws;
 
 use app::RtGuiApp;

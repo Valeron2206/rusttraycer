@@ -7,6 +7,11 @@ use crate::ladder::{
 };
 use crate::rpc::HarnessCapsView;
 use crate::state::{AgentStatus, AppState, FileKind, FilePreview};
+use crate::terminal::{
+    self, AgentInterface, AgentView, AGENT_IS_CHAT, CHAT_TAB, CLOSE_TERMINAL, INTERFACE_LABEL,
+    NEW_TERMINAL, NO_LIVE_SHELL, OPEN_PTY, PTY_HINT, PTY_INPUT_HINT, PTY_SUBMIT, SHELL_HINT,
+    TERMINALS_PANE, TERMINAL_DISABLED_CAPS, TERMINAL_TAB, TERMINAL_UNAVAILABLE,
+};
 
 pub fn show(ctx: &egui::Context, state: &mut AppState) {
     if state.selected_task_id.is_none() && state.open_task_ids.is_empty() {
@@ -152,7 +157,7 @@ fn show_pane(
     });
     ui.separator();
     match kind {
-        PaneKind::Canvas => show_chat(ui, state),
+        PaneKind::Canvas => show_agent_panel(ui, state),
         PaneKind::Git => show_git(ui, state),
         PaneKind::Files => {
             show_file_tree(ui, state);
@@ -161,6 +166,7 @@ fn show_pane(
             show_preview(ui, ctx, state);
         }
         PaneKind::Host => crate::screens::host::show_body(ui, state),
+        PaneKind::Terminal => show_shells(ui, state),
     }
 }
 
@@ -253,23 +259,32 @@ fn show_agents(ui: &mut egui::Ui, state: &mut AppState) {
     ui.heading("Агенты");
     ui.add_space(4.0);
     show_provider_picker(ui, state);
+    ui.add_space(6.0);
+    show_interface_picker(ui, state);
     ui.add_space(8.0);
     show_policy_controls(ui, state);
     ui.add_space(8.0);
     ui.separator();
     ui.add_space(6.0);
 
-    let agents: Vec<(String, String, AgentStatus)> = state
+    let agents: Vec<(String, String, AgentStatus, String)> = state
         .agents_for_selected_task()
         .into_iter()
-        .map(|a| (a.id.clone(), a.provider.clone(), a.status))
+        .map(|a| {
+            (
+                a.id.clone(),
+                a.provider.clone(),
+                a.status,
+                a.interface.clone(),
+            )
+        })
         .collect();
     let selected = state.selected_agent().map(|a| a.id.clone());
 
     if agents.is_empty() {
         ui.label("Агента ещё нет.");
     } else {
-        for (id, provider, status) in &agents {
+        for (id, provider, status, interface) in &agents {
             let is_sel = selected.as_deref() == Some(id.as_str());
             let resp = egui::Frame::new()
                 .fill(if is_sel {
@@ -282,6 +297,7 @@ fn show_agents(ui: &mut egui::Ui, state: &mut AppState) {
                 .show(ui, |ui| {
                     ui.strong(provider);
                     ui.label(format!("статус: {}", status.label_ru()));
+                    ui.weak(AgentInterface::from_wire(interface).label_ru());
                     ui.weak(id);
                     ui.weak("нажмите, чтобы выбрать");
                 });
@@ -704,12 +720,194 @@ fn show_preview(ui: &mut egui::Ui, ctx: &egui::Context, state: &mut AppState) {
     }
 }
 
+fn show_interface_picker(ui: &mut egui::Ui, state: &mut AppState) {
+    ui.label(INTERFACE_LABEL);
+    let current = state.picker_interface;
+    let pty_ok = state.picker_allows_terminal();
+    ui.horizontal(|ui| {
+        if ui
+            .selectable_label(current == AgentInterface::Chat, CHAT_TAB)
+            .clicked()
+        {
+            state.set_picker_interface(AgentInterface::Chat);
+        }
+        ui.add_enabled_ui(pty_ok, |ui| {
+            if ui
+                .selectable_label(current == AgentInterface::Terminal, TERMINAL_TAB)
+                .clicked()
+            {
+                state.set_picker_interface(AgentInterface::Terminal);
+            }
+        });
+    });
+    if !pty_ok {
+        ui.weak(TERMINAL_DISABLED_CAPS);
+    }
+}
+
+fn show_agent_panel(ui: &mut egui::Ui, state: &mut AppState) {
+    ui.horizontal(|ui| {
+        let view = state.agent_view;
+        if ui
+            .selectable_label(view == AgentView::Chat, CHAT_TAB)
+            .clicked()
+        {
+            state.set_agent_view(AgentView::Chat);
+        }
+        if ui
+            .selectable_label(view == AgentView::Terminal, TERMINAL_TAB)
+            .clicked()
+        {
+            state.set_agent_view(AgentView::Terminal);
+        }
+    });
+    ui.add_space(4.0);
+    match state.agent_view {
+        AgentView::Chat => show_chat(ui, state),
+        AgentView::Terminal => show_agent_terminal(ui, state),
+    }
+}
+
+fn show_agent_terminal(ui: &mut egui::Ui, state: &mut AppState) {
+    ui.heading(TERMINAL_TAB);
+    ui.weak(PTY_HINT);
+    if let Some(status) = state.terminal_status.clone() {
+        ui.weak(status);
+    }
+    let is_terminal = state.selected_agent().is_some_and(|a| a.is_terminal());
+    if state.selected_agent().is_none() {
+        ui.weak("сначала создайте агента");
+        return;
+    }
+    if !is_terminal {
+        ui.weak(AGENT_IS_CHAT);
+        return;
+    }
+    if !state.terminal_host_ok() {
+        ui.weak(TERMINAL_UNAVAILABLE);
+        return;
+    }
+    if state.selected_agent_pty_id().is_none() {
+        if ui.button(OPEN_PTY).clicked() {
+            state.ensure_agent_pty();
+        }
+        return;
+    }
+    if let Some(pty_id) = state.selected_agent_pty_id().map(str::to_owned) {
+        show_pty_view(ui, state, &pty_id);
+    }
+}
+
+fn show_shells(ui: &mut egui::Ui, state: &mut AppState) {
+    ui.heading(TERMINALS_PANE);
+    ui.weak(SHELL_HINT);
+    ui.weak(PTY_HINT);
+    if let Some(status) = state.terminal_status.clone() {
+        ui.weak(status);
+    } else if !state.terminal_host_ok() && state.can_rpc() {
+        ui.weak(TERMINAL_UNAVAILABLE);
+    }
+    ui.add_space(4.0);
+    ui.add_enabled_ui(state.can_create_shell() && state.terminal_host_ok(), |ui| {
+        if ui
+            .add_sized(
+                [ui.available_width(), 28.0],
+                egui::Button::new(NEW_TERMINAL),
+            )
+            .clicked()
+        {
+            state.create_shell();
+        }
+    });
+    if state.selected_task_id.is_none() {
+        ui.weak(terminal::NEED_TASK);
+    } else if !state.terminal_host_ok() && state.can_rpc() {
+        ui.weak(TERMINAL_UNAVAILABLE);
+    }
+    ui.add_space(6.0);
+    let shells: Vec<(String, String)> = state
+        .shells
+        .iter()
+        .map(|s| {
+            let cwd = if s.cwd.is_empty() {
+                s.id.clone()
+            } else {
+                format!("{} · {}", s.id, s.cwd)
+            };
+            (s.id.clone(), cwd)
+        })
+        .collect();
+    let selected = state.selected_shell_id.clone();
+    if shells.is_empty() {
+        ui.weak(NO_LIVE_SHELL);
+    } else {
+        for (id, label) in &shells {
+            if ui
+                .selectable_label(selected.as_deref() == Some(id.as_str()), label)
+                .clicked()
+            {
+                state.select_shell(id.clone());
+            }
+        }
+        ui.add_space(4.0);
+        if ui.button(CLOSE_TERMINAL).clicked() {
+            state.close_selected_shell();
+        }
+    }
+    ui.add_space(8.0);
+    ui.separator();
+    if state.selected_shell().is_some() && state.selected_shell_pty_id().is_none() {
+        state.ensure_shell_pty();
+    }
+    if let Some(pty_id) = state.selected_shell_pty_id().map(str::to_owned) {
+        show_pty_view(ui, state, &pty_id);
+    }
+}
+
+fn show_pty_view(ui: &mut egui::Ui, state: &mut AppState, pty_id: &str) {
+    let avail = ui.available_size();
+    let (cols, rows) = terminal::estimate_pty_size(avail.x, (avail.y - 52.0).max(32.0));
+    state.maybe_resize_pty(pty_id, cols, rows);
+    let scrollback = state.pty_scrollback(pty_id).to_string();
+    let input_h = 52.0;
+    let view_h = (ui.available_height() - input_h).max(80.0);
+    egui::ScrollArea::vertical()
+        .max_height(view_h)
+        .auto_shrink([false, false])
+        .stick_to_bottom(true)
+        .show(ui, |ui| {
+            if scrollback.is_empty() {
+                ui.weak("PTY scrollback пуст. Это не чат и не messages.");
+            } else {
+                ui.add(
+                    egui::Label::new(egui::RichText::new(scrollback).monospace())
+                        .wrap()
+                        .selectable(true),
+                );
+            }
+        });
+    ui.separator();
+    ui.horizontal(|ui| {
+        let resp = ui.add(
+            egui::TextEdit::singleline(&mut state.pty_input)
+                .desired_width(ui.available_width() - 72.0)
+                .hint_text(PTY_INPUT_HINT)
+                .font(egui::TextStyle::Monospace),
+        );
+        let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        if ui.button(PTY_SUBMIT).clicked() || enter {
+            state.submit_pty_input(pty_id);
+            resp.request_focus();
+        }
+    });
+}
+
 fn show_chat(ui: &mut egui::Ui, state: &mut AppState) {
     let composer_h = 88.0;
     let avail = ui.available_height();
     let transcript_h = (avail - composer_h).max(80.0);
 
-    ui.heading("Чат");
+    ui.heading(CHAT_TAB);
     ui.add_space(4.0);
 
     egui::ScrollArea::vertical()

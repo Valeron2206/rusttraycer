@@ -123,6 +123,7 @@ pub enum PaneKind {
     Git,
     Files,
     Host,
+    Terminal,
 }
 
 impl PaneKind {
@@ -132,6 +133,7 @@ impl PaneKind {
             Self::Git => "git",
             Self::Files => "files",
             Self::Host => "host",
+            Self::Terminal => "terminal",
         }
     }
 
@@ -141,6 +143,7 @@ impl PaneKind {
             "git" => Some(Self::Git),
             "files" => Some(Self::Files),
             "host" => Some(Self::Host),
+            "terminal" => Some(Self::Terminal),
             _ => None,
         }
     }
@@ -151,10 +154,17 @@ impl PaneKind {
             Self::Git => "Git",
             Self::Files => "Файлы",
             Self::Host => "Host",
+            Self::Terminal => crate::terminal::TERMINALS_PANE,
         }
     }
 
-    pub const ALL: [Self; 4] = [Self::Canvas, Self::Git, Self::Files, Self::Host];
+    pub const ALL: [Self; 5] = [
+        Self::Canvas,
+        Self::Git,
+        Self::Files,
+        Self::Host,
+        Self::Terminal,
+    ];
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -267,6 +277,9 @@ mod tests {
         let bad = SplitLayout::from_json(r#"{"left":"search","right":"tiles"}"#);
         assert_eq!(bad.left, PaneKind::Canvas);
         assert_eq!(bad.right, PaneKind::Git);
+        assert_eq!(PaneKind::from_id("terminal"), Some(PaneKind::Terminal));
+        assert_eq!(PaneKind::Terminal.as_id(), "terminal");
+        assert_eq!(PaneKind::Terminal.label_ru(), "Терминалы");
     }
 
     #[test]

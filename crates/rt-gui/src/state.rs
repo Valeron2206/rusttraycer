@@ -13,6 +13,10 @@ use crate::ladder::{
 use crate::rpc::{
     CancelOk, ConnectError, DoctorOk, DoctorProvider, GitDiffOk, GitStatusOk, Worktree,
 };
+use crate::terminal::{
+    self, AgentInterface, AgentView, ShellStub, DEFAULT_COLS, DEFAULT_ROWS, NEED_TASK,
+    TERMINAL_UNAVAILABLE,
+};
 use crate::ws::{self, ApplyOutcome, WsBridge, WsIncoming};
 
 enum RpcIncoming {
@@ -158,6 +162,17 @@ pub struct AgentStub {
     pub task_id: String,
     pub provider: String,
     pub status: AgentStatus,
+    pub interface: String,
+}
+
+impl AgentStub {
+    pub fn is_terminal(&self) -> bool {
+        AgentInterface::from_wire(&self.interface) == AgentInterface::Terminal
+    }
+
+    pub fn interface_kind(&self) -> AgentInterface {
+        AgentInterface::from_wire(&self.interface)
+    }
 }
 
 impl From<rt_protocol::Agent> for AgentStub {
@@ -167,6 +182,11 @@ impl From<rt_protocol::Agent> for AgentStub {
             task_id: agent.task_id,
             provider: agent.provider,
             status: AgentStatus::from_wire(&agent.status),
+            interface: if agent.interface.is_empty() {
+                "chat".into()
+            } else {
+                agent.interface
+            },
         }
     }
 }
@@ -279,6 +299,17 @@ pub struct AppState {
     pub pending_approvals: HashMap<String, PendingApproval>,
     pub show_yolo_confirm: bool,
     pub ladder_status: Option<String>,
+    pub picker_interface: AgentInterface,
+    pub agent_view: AgentView,
+    pub shells: Vec<ShellStub>,
+    pub selected_shell_id: Option<String>,
+    pub pty_buffers: HashMap<String, String>,
+    pub agent_pty: HashMap<String, String>,
+    pub shell_pty: HashMap<String, String>,
+    pub pty_size: HashMap<String, (u16, u16)>,
+    pub pty_alive: HashSet<String>,
+    pub pty_input: String,
+    pub terminal_status: Option<String>,
     pending_cancel: Option<String>,
     rpc_tx: Sender<RpcIncoming>,
     rpc_rx: Receiver<RpcIncoming>,
@@ -348,6 +379,17 @@ impl AppState {
             pending_approvals: HashMap::new(),
             show_yolo_confirm: false,
             ladder_status: None,
+            picker_interface: AgentInterface::Chat,
+            agent_view: AgentView::Chat,
+            shells: Vec::new(),
+            selected_shell_id: None,
+            pty_buffers: HashMap::new(),
+            agent_pty: HashMap::new(),
+            shell_pty: HashMap::new(),
+            pty_size: HashMap::new(),
+            pty_alive: HashSet::new(),
+            pty_input: String::new(),
+            terminal_status: None,
             pending_cancel: None,
             rpc_tx,
             rpc_rx,
@@ -368,6 +410,7 @@ impl AppState {
             task_id: "demo-task-1".into(),
             provider: "cli.generic".into(),
             status: AgentStatus::Idle,
+            interface: "chat".into(),
         });
         self.file_tree = vec![
             FileNode {
@@ -505,6 +548,7 @@ impl AppState {
                         self.last_rpc = Some(Instant::now());
                         self.ws_banner = None;
                         self.refresh_doctor();
+                        self.refresh_terminal_capability();
                         self.refresh_tasks_catalog();
                         if self.screen == Screen::Canvas {
                             self.refresh_canvas_after_reconnect();
@@ -571,6 +615,15 @@ impl AppState {
     }
 
     fn apply_ws_event(&mut self, event: ws::WsEvent) {
+        if let ws::WsEvent::PtyData { pty_id, data } = &event {
+            self.append_pty_output(pty_id, data);
+            return;
+        }
+        if let ws::WsEvent::PtyExit { pty_id, code } = &event {
+            self.pty_alive.remove(pty_id);
+            self.terminal_status = Some(format!("PTY завершился ({code})"));
+            return;
+        }
         if let ws::WsEvent::AgentApproval {
             approval_id,
             agent_id,
@@ -628,7 +681,9 @@ impl AppState {
             ApplyOutcome::Appended
             | ApplyOutcome::Deduped
             | ApplyOutcome::Ignored
-            | ApplyOutcome::Approval => {}
+            | ApplyOutcome::Approval
+            | ApplyOutcome::PtyData
+            | ApplyOutcome::PtyExit => {}
         }
     }
 
@@ -640,6 +695,7 @@ impl AppState {
 
     /// Host restart / WS reconnect: refetch and REPLACE canvas data. Never append.
     fn refresh_canvas_after_reconnect(&mut self) {
+        self.clear_live_pty();
         if let Some(id) = self.selected_task_id.clone() {
             self.reload_canvas(&id);
             self.ws_subscribe(&id);
@@ -807,6 +863,12 @@ impl AppState {
     }
 
     pub fn composer_enabled(&self) -> bool {
+        if self
+            .selected_agent()
+            .is_some_and(|a| a.interface_kind() == AgentInterface::Terminal)
+        {
+            return false;
+        }
         ws::composer_allowed(
             self.can_rpc(),
             self.selected_agent().map(|a| a.status.as_wire()),
@@ -833,6 +895,9 @@ impl AppState {
         }
         if self.selected_agent().is_none() {
             return Some("сначала создайте агента");
+        }
+        if self.selected_agent().is_some_and(|a| a.is_terminal()) {
+            return Some(terminal::TERMINAL_AGENT_COMPOSER);
         }
         Some("агент работает")
     }
@@ -902,6 +967,7 @@ impl AppState {
         self.file_tree_truncated = false;
         self.reload_agents(task_id);
         self.load_selected_agent();
+        self.refresh_shells();
         self.load_file_tree_root();
         self.canvas_loaded_for = Some(task_id.to_string());
     }
@@ -968,6 +1034,17 @@ impl AppState {
         }
         self.load_policy_for(&agent_id);
         self.load_git_panel();
+        if self
+            .agents
+            .iter()
+            .find(|a| a.id == agent_id)
+            .is_some_and(|a| a.is_terminal())
+        {
+            self.agent_view = AgentView::Terminal;
+            self.ensure_agent_pty();
+        } else {
+            self.agent_view = AgentView::Chat;
+        }
     }
 
     fn load_file_tree_root(&mut self) {
@@ -1012,19 +1089,36 @@ impl AppState {
             self.toast = Some(PICKER_EMPTY.into());
             return;
         }
+        if self.picker_interface == AgentInterface::Terminal && !self.picker_allows_terminal() {
+            self.toast = Some(terminal::TERMINAL_DISABLED_CAPS.into());
+            return;
+        }
         let Some(session) = self.session.clone() else {
             return;
         };
-        match session.agent_create(&task_id, &provider) {
+        if self.picker_interface == AgentInterface::Terminal && !session.terminal_accepted() {
+            self.surface_terminal_error_label(TERMINAL_UNAVAILABLE);
+            return;
+        }
+        let interface = self.picker_interface.as_wire();
+        let created = if interface == "chat" {
+            session.agent_create(&task_id, &provider)
+        } else {
+            session.agent_create_with_interface(&task_id, &provider, interface)
+        };
+        match created {
             Ok(agent) => {
                 let stub = AgentStub::from(agent);
+                if interface == "terminal" && !stub.is_terminal() {
+                    self.surface_terminal_error_label(TERMINAL_UNAVAILABLE);
+                }
                 self.selected_agent_id = Some(stub.id.clone());
                 self.remember_selected_agent();
                 self.agents.push(stub);
                 self.load_selected_agent();
             }
             Err(err) => {
-                self.toast = Some(err.as_label());
+                self.surface_terminal_or_rpc(err);
             }
         }
     }
@@ -1041,7 +1135,376 @@ impl AppState {
     pub fn set_picker_provider(&mut self, id: String) {
         if self.providers.iter().any(|p| p.id == id) {
             self.picker_provider = Some(id);
+            if !self.picker_allows_terminal() && self.picker_interface == AgentInterface::Terminal {
+                self.picker_interface = AgentInterface::Chat;
+            }
         }
+    }
+
+    pub fn set_picker_interface(&mut self, interface: AgentInterface) {
+        if interface == AgentInterface::Terminal && !self.picker_allows_terminal() {
+            return;
+        }
+        self.picker_interface = interface;
+    }
+
+    pub fn picker_allows_terminal(&self) -> bool {
+        self.selected_provider()
+            .and_then(|p| p.caps.as_ref())
+            .map(|c| c.pty)
+            .unwrap_or(false)
+    }
+
+    pub fn set_agent_view(&mut self, view: AgentView) {
+        self.agent_view = view;
+        if view == AgentView::Terminal {
+            self.ensure_agent_pty();
+        }
+    }
+
+    pub fn terminal_host_ok(&self) -> bool {
+        self.session
+            .as_ref()
+            .map(|s| s.terminal_accepted())
+            .unwrap_or(false)
+    }
+
+    pub fn can_create_shell(&self) -> bool {
+        self.can_rpc() && self.selected_task_id.is_some() && self.has_workspace()
+    }
+
+    pub fn create_shell(&mut self) {
+        if self.selected_task_id.is_none() {
+            self.toast = Some(NEED_TASK.into());
+            self.terminal_status = Some(NEED_TASK.into());
+            return;
+        }
+        if !self.has_workspace() {
+            self.toast = Some("нет workspace".into());
+            return;
+        }
+        if !self.can_rpc() {
+            return;
+        }
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        if !session.terminal_accepted() {
+            self.surface_terminal_error_label(TERMINAL_UNAVAILABLE);
+            return;
+        }
+        let Some(task_id) = self.selected_task_id.clone() else {
+            self.toast = Some(NEED_TASK.into());
+            return;
+        };
+        let Some(workspace_id) = self.workspace_id.clone() else {
+            return;
+        };
+        let wt = self.worktree_id().map(|s| s.to_string());
+        let agents_before = self.agents.len();
+        match session.shell_create(
+            &task_id,
+            &workspace_id,
+            wt.as_deref(),
+            DEFAULT_COLS,
+            DEFAULT_ROWS,
+        ) {
+            Ok(ok) => {
+                if self.agents.len() != agents_before {
+                    self.agents.truncate(agents_before);
+                }
+                let stub = ShellStub {
+                    id: ok.shell_id.clone(),
+                    pty_id: Some(ok.pty_id.clone()),
+                    cwd: ok.cwd,
+                };
+                self.shell_pty
+                    .insert(ok.shell_id.clone(), ok.pty_id.clone());
+                self.pty_alive.insert(ok.pty_id.clone());
+                self.pty_size
+                    .insert(ok.pty_id.clone(), (DEFAULT_COLS, DEFAULT_ROWS));
+                self.pty_buffers.entry(ok.pty_id).or_default();
+                self.selected_shell_id = Some(ok.shell_id.clone());
+                if !self.shells.iter().any(|s| s.id == stub.id) {
+                    self.shells.push(stub);
+                }
+                self.terminal_status = None;
+            }
+            Err(err) => self.surface_terminal_or_rpc(err),
+        }
+    }
+
+    pub fn close_selected_shell(&mut self) {
+        let Some(shell_id) = self.selected_shell_id.clone() else {
+            return;
+        };
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        if !session.terminal_accepted() {
+            self.surface_terminal_error_label(TERMINAL_UNAVAILABLE);
+            return;
+        }
+        if let Some(pty_id) = self.shell_pty.remove(&shell_id) {
+            let _ = session.pty_close(&pty_id);
+            self.pty_alive.remove(&pty_id);
+            self.pty_buffers.remove(&pty_id);
+            self.pty_size.remove(&pty_id);
+        }
+        match session.shell_close(&shell_id) {
+            Ok(_) => {
+                self.shells.retain(|s| s.id != shell_id);
+                self.selected_shell_id = self.shells.last().map(|s| s.id.clone());
+            }
+            Err(err) => self.surface_terminal_or_rpc(err),
+        }
+    }
+
+    pub fn select_shell(&mut self, id: String) {
+        self.selected_shell_id = Some(id);
+    }
+
+    pub fn selected_shell(&self) -> Option<&ShellStub> {
+        let id = self.selected_shell_id.as_ref()?;
+        self.shells.iter().find(|s| &s.id == id)
+    }
+
+    pub fn ensure_shell_pty(&mut self) {
+        let (shell_id, existing) = match self.selected_shell() {
+            Some(s) => (s.id.clone(), s.pty_id.clone()),
+            None => return,
+        };
+        if self.shell_pty.contains_key(&shell_id) || existing.is_some() {
+            if let Some(pty) = existing {
+                self.shell_pty.entry(shell_id).or_insert(pty);
+            }
+            return;
+        }
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        if !session.terminal_accepted() {
+            self.terminal_status = Some(TERMINAL_UNAVAILABLE.into());
+            return;
+        }
+        match session.pty_open_shell(&shell_id, DEFAULT_COLS, DEFAULT_ROWS) {
+            Ok(ok) => {
+                self.shell_pty.insert(shell_id, ok.pty_id.clone());
+                self.pty_alive.insert(ok.pty_id.clone());
+                self.pty_size
+                    .insert(ok.pty_id.clone(), (DEFAULT_COLS, DEFAULT_ROWS));
+                self.pty_buffers.entry(ok.pty_id).or_default();
+                let _ = ok.resumed;
+            }
+            Err(err) => self.surface_terminal_or_rpc(err),
+        }
+    }
+
+    pub fn selected_agent_pty_id(&self) -> Option<&str> {
+        let agent_id = self.selected_agent()?.id.as_str();
+        self.agent_pty.get(agent_id).map(String::as_str)
+    }
+
+    pub fn selected_shell_pty_id(&self) -> Option<&str> {
+        let shell_id = self.selected_shell_id.as_ref()?;
+        self.shell_pty
+            .get(shell_id)
+            .map(String::as_str)
+            .or_else(|| {
+                self.shells
+                    .iter()
+                    .find(|s| &s.id == shell_id)
+                    .and_then(|s| s.pty_id.as_deref())
+            })
+    }
+
+    pub fn pty_scrollback(&self, pty_id: &str) -> &str {
+        self.pty_buffers
+            .get(pty_id)
+            .map(String::as_str)
+            .unwrap_or("")
+    }
+
+    pub fn ensure_agent_pty(&mut self) {
+        let Some(agent) = self.selected_agent() else {
+            return;
+        };
+        if !agent.is_terminal() {
+            return;
+        }
+        let agent_id = agent.id.clone();
+        if self.agent_pty.contains_key(&agent_id) {
+            return;
+        }
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        if !session.terminal_accepted() {
+            self.terminal_status = Some(TERMINAL_UNAVAILABLE.into());
+            return;
+        }
+        match session.pty_open_agent(&agent_id, DEFAULT_COLS, DEFAULT_ROWS) {
+            Ok(ok) => {
+                self.agent_pty.insert(agent_id, ok.pty_id.clone());
+                self.pty_alive.insert(ok.pty_id.clone());
+                self.pty_size
+                    .insert(ok.pty_id.clone(), (DEFAULT_COLS, DEFAULT_ROWS));
+                self.pty_buffers.entry(ok.pty_id.clone()).or_default();
+                self.terminal_status = if ok.resumed {
+                    Some("PTY resume (provider session)".into())
+                } else {
+                    None
+                };
+            }
+            Err(err) => self.surface_terminal_or_rpc(err),
+        }
+    }
+
+    pub fn submit_pty_input(&mut self, pty_id: &str) {
+        let raw = std::mem::take(&mut self.pty_input);
+        if raw.is_empty() {
+            return;
+        }
+        let mut bytes = raw.into_bytes();
+        if !bytes.ends_with(b"\n") {
+            bytes.push(b'\n');
+        }
+        self.write_pty_bytes(pty_id, &bytes);
+    }
+
+    pub fn write_pty_bytes(&mut self, pty_id: &str, data: &[u8]) {
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        if !session.terminal_accepted() {
+            self.surface_terminal_error_label(TERMINAL_UNAVAILABLE);
+            return;
+        }
+        match session.pty_write(pty_id, data) {
+            Ok(_) => {
+                self.terminal_status = None;
+            }
+            Err(err) => self.surface_terminal_or_rpc(err),
+        }
+    }
+
+    pub fn maybe_resize_pty(&mut self, pty_id: &str, cols: u16, rows: u16) {
+        let next = (cols, rows);
+        if self.pty_size.get(pty_id) == Some(&next) {
+            return;
+        }
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        if !session.terminal_accepted() {
+            return;
+        }
+        match session.pty_resize(pty_id, cols, rows) {
+            Ok(_) => {
+                self.pty_size.insert(pty_id.to_string(), next);
+            }
+            Err(err) => self.surface_terminal_or_rpc(err),
+        }
+    }
+
+    fn refresh_shells(&mut self) {
+        let Some(task_id) = self.selected_task_id.clone() else {
+            self.shells.clear();
+            self.selected_shell_id = None;
+            return;
+        };
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        if !session.terminal_accepted() {
+            return;
+        }
+        match session.shell_list(&task_id) {
+            Ok(items) => {
+                let mut shells = Vec::new();
+                for s in items {
+                    if let Some(pty) = s.pty_id.clone() {
+                        self.shell_pty.insert(s.shell_id.clone(), pty.clone());
+                        self.pty_alive.insert(pty);
+                    }
+                    shells.push(ShellStub {
+                        id: s.shell_id,
+                        pty_id: s.pty_id,
+                        cwd: s.cwd,
+                    });
+                }
+                self.shells = shells;
+                if let Some(id) = &self.selected_shell_id {
+                    if !self.shells.iter().any(|s| &s.id == id) {
+                        self.selected_shell_id = None;
+                    }
+                }
+                if self.selected_shell_id.is_none() {
+                    self.selected_shell_id = self.shells.first().map(|s| s.id.clone());
+                }
+            }
+            Err(err) => self.surface_terminal_or_rpc(err),
+        }
+    }
+
+    fn refresh_terminal_capability(&mut self) {
+        match &self.session {
+            Some(s) if s.terminal_accepted() => {
+                if self.terminal_status.as_deref() == Some(TERMINAL_UNAVAILABLE) {
+                    self.terminal_status = None;
+                }
+            }
+            Some(s) if s.terminal_rejected() => {
+                self.terminal_status = Some(TERMINAL_UNAVAILABLE.into());
+            }
+            Some(_) => {
+                self.terminal_status = Some(TERMINAL_UNAVAILABLE.into());
+            }
+            None => {}
+        }
+    }
+
+    fn clear_live_pty(&mut self) {
+        self.pty_buffers.clear();
+        self.agent_pty.clear();
+        self.shell_pty.clear();
+        self.pty_size.clear();
+        self.pty_alive.clear();
+        self.shells.clear();
+        self.selected_shell_id = None;
+    }
+
+    fn append_pty_output(&mut self, pty_id: &str, data_b64: &str) {
+        let chunk = terminal::decode_pty_data(data_b64);
+        if chunk.is_empty() && data_b64.is_empty() {
+            return;
+        }
+        let buf = self.pty_buffers.entry(pty_id.to_string()).or_default();
+        terminal::append_scrollback(buf, &chunk);
+        self.pty_alive.insert(pty_id.to_string());
+    }
+
+    fn surface_terminal_error_label(&mut self, label: &str) {
+        self.terminal_status = Some(label.to_string());
+        self.toast = Some(label.to_string());
+    }
+
+    fn surface_terminal_or_rpc(&mut self, err: ConnectError) {
+        if err.is_pty_unsupported() {
+            self.surface_terminal_error_label(TERMINAL_UNAVAILABLE);
+            return;
+        }
+        if err.is_not_pty() {
+            self.surface_terminal_error_label(terminal::TERMINAL_DISABLED_CAPS);
+            return;
+        }
+        if err.is_pty_dead() {
+            self.surface_terminal_error_label(&err.as_label());
+            return;
+        }
+        let label = err.as_label();
+        self.terminal_status = Some(label.clone());
+        self.toast = Some(label);
     }
 
     pub fn cancel_running_agent(&mut self) {
@@ -1240,6 +1703,7 @@ impl AppState {
         self.workspace_id = None;
         self.workspace_path = None;
         self.tasks.clear();
+        self.clear_live_pty();
     }
 
     pub fn set_workspace_path(&mut self, path: String) {
@@ -1757,6 +2221,11 @@ impl AppState {
             }
         }
     }
+
+    #[cfg(test)]
+    pub fn test_apply_ws_event(&mut self, event: crate::ws::WsEvent) {
+        self.apply_ws_event(event);
+    }
 }
 
 /// Retry/reconnect: replace transcript from `agent.get_context`. Never merge.
@@ -2087,6 +2556,7 @@ mod tests {
             task_id: "task-1".into(),
             provider: "cli.generic".into(),
             status: AgentStatus::Idle,
+            interface: "chat".into(),
         });
         state
     }
@@ -2342,6 +2812,7 @@ mod tests {
             task_id: "task-1".into(),
             provider: "cli.generic".into(),
             status: AgentStatus::Idle,
+            interface: "chat".into(),
         });
         assert!(!state.show_stop_button());
         state.agents[0].status = AgentStatus::Error;
@@ -2869,6 +3340,7 @@ mod tests {
             task_id: "task-1".into(),
             provider: "byoa.foo".into(),
             status: AgentStatus::Idle,
+            interface: "chat".into(),
         });
         assert!(!state.yolo_on());
         state.request_yolo_on();
@@ -3022,12 +3494,14 @@ mod tests {
             task_id: "task-1".into(),
             provider: "byoa.foo".into(),
             status: AgentStatus::Idle,
+            interface: "chat".into(),
         });
         state.agents.push(AgentStub {
             id: "ag-9".into(),
             task_id: "task-2".into(),
             provider: "cli.claude".into(),
             status: AgentStatus::Idle,
+            interface: "chat".into(),
         });
         state.open_task("task-1".into());
         state.select_agent("ag-1".into());
@@ -3334,5 +3808,192 @@ mod tests {
             message: "no 1.2".into(),
         });
         assert_eq!(unsupported, crate::ladder::WRITE_UNAVAILABLE);
+    }
+
+    fn offline_session_without_1_3() -> crate::rpc::Session {
+        use std::collections::BTreeMap;
+        let mut rejected = BTreeMap::new();
+        for name in crate::rpc::PTY_METHODS {
+            rejected.insert((*name).to_string(), "unsupported".into());
+        }
+        crate::rpc::Session {
+            host_id: "host-a".into(),
+            host_version: "0.1.0".into(),
+            session_token: "tok-1".into(),
+            rpc_url: "http://127.0.0.1:1".into(),
+            ws_url: None,
+            accepted: BTreeMap::new(),
+            rejected,
+        }
+    }
+
+    fn start_pty_state_mock() -> SliceMock {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(Mutex::new(Vec::new()));
+        let hits_t = hits.clone();
+        thread::spawn(move || {
+            for stream in listener.incoming().take(24) {
+                let Ok(mut stream) = stream else { break };
+                let (headers, body) = read_http_request(&mut stream);
+                let parsed: Value = serde_json::from_slice(&body).unwrap_or(json!({}));
+                let method = if headers.starts_with("GET /health") {
+                    "GET /health".to_string()
+                } else {
+                    parsed
+                        .get("method")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("other")
+                        .to_string()
+                };
+                let params = parsed.get("params").cloned().unwrap_or(json!({}));
+                hits_t.lock().unwrap().push(RpcHit {
+                    method: method.clone(),
+                    params,
+                });
+                let mut accepted = serde_json::Map::new();
+                for name in crate::rpc::PTY_METHODS {
+                    accepted.insert(name.to_string(), json!({"major": 1, "minor": 3}));
+                }
+                let body = match method.as_str() {
+                    "GET /health" => json!({"ok": true, "hostId": "host-a"}).to_string(),
+                    "handshake" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "hostId": "host-a",
+                            "hostVersion": "0.1.0",
+                            "sessionToken": "tok-1",
+                            "accepted": accepted,
+                            "rejected": {}
+                        }
+                    })
+                    .to_string(),
+                    "host.ping" => json!({
+                        "id": "echo",
+                        "ok": { "hostId": "host-a", "now": "2026-08-17T12:00:00Z" }
+                    })
+                    .to_string(),
+                    "shell.create" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "shellId": "sh-1",
+                            "ptyId": "pty-shell-1",
+                            "cwd": "/tmp/proj"
+                        }
+                    })
+                    .to_string(),
+                    "shell.list" => json!({
+                        "id": "echo",
+                        "ok": { "items": [] }
+                    })
+                    .to_string(),
+                    "pty.write" | "pty.resize" | "pty.open" | "pty.close" | "shell.close" => {
+                        json!({ "id": "echo", "ok": { "ptyId": "pty-shell-1", "resumed": false } })
+                            .to_string()
+                    }
+                    _ => json!({
+                        "id": "echo",
+                        "error": { "code": "unsupported_method", "message": "no" }
+                    })
+                    .to_string(),
+                };
+                write_http_json(&mut stream, &body);
+            }
+        });
+        SliceMock {
+            origin: format!("http://{addr}"),
+            hits,
+        }
+    }
+
+    #[test]
+    fn no_task_cannot_start_shell() {
+        let mut state = AppState::new();
+        state.pending_discover = false;
+        state.demo = false;
+        state.host_status = HostStatus::Online;
+        state.session = Some(offline_session_without_1_3());
+        state.workspace_id = Some("ws-1".into());
+        state.workspaces.push(rt_protocol::Workspace {
+            id: "ws-1".into(),
+            host_id: "host-a".into(),
+            path: "/tmp/proj".into(),
+            name: "proj".into(),
+            created_at: "t".into(),
+        });
+        assert!(state.selected_task_id.is_none());
+        state.create_shell();
+        assert_eq!(state.toast.as_deref(), Some(NEED_TASK));
+        assert!(state.shells.is_empty());
+        assert!(state.agents.is_empty());
+    }
+
+    #[test]
+    fn old_host_terminal_toasts_and_does_not_panic() {
+        let mut state = AppState::new();
+        state.pending_discover = false;
+        state.demo = false;
+        state.host_status = HostStatus::Online;
+        state.session = Some(offline_session_without_1_3());
+        state.workspace_id = Some("ws-1".into());
+        state.workspaces.push(rt_protocol::Workspace {
+            id: "ws-1".into(),
+            host_id: "host-a".into(),
+            path: "/tmp/proj".into(),
+            name: "proj".into(),
+            created_at: "t".into(),
+        });
+        state.selected_task_id = Some("task-1".into());
+        state.create_shell();
+        assert_eq!(state.toast.as_deref(), Some(TERMINAL_UNAVAILABLE));
+        assert_eq!(state.terminal_status.as_deref(), Some(TERMINAL_UNAVAILABLE));
+        assert!(state.shells.is_empty());
+        state.write_pty_bytes("pty-1", b"x");
+        assert_eq!(state.toast.as_deref(), Some(TERMINAL_UNAVAILABLE));
+    }
+
+    #[test]
+    fn new_terminal_creates_shell_not_agent() {
+        let mock = start_pty_state_mock();
+        let session = connect(&pid(&mock.origin)).expect("online");
+        assert!(session.terminal_accepted());
+        let mut state = online_state(session);
+        state.workspaces.push(rt_protocol::Workspace {
+            id: "ws-1".into(),
+            host_id: "host-a".into(),
+            path: "/tmp/proj".into(),
+            name: "proj".into(),
+            created_at: "t".into(),
+        });
+        let agents_before = state.agents.len();
+        state.create_shell();
+        assert_eq!(state.shells.len(), 1);
+        assert_eq!(state.shells[0].id, "sh-1");
+        assert_eq!(state.shells[0].pty_id.as_deref(), Some("pty-shell-1"));
+        assert_eq!(state.selected_shell_id.as_deref(), Some("sh-1"));
+        assert_eq!(state.agents.len(), agents_before);
+        assert!(state.agents.iter().all(|a| a.id != "sh-1"));
+        let hits = mock.hits.lock().unwrap().clone();
+        assert!(hits.iter().any(|h| h.method == "shell.create"));
+        assert!(!hits.iter().any(|h| h.method == "agent.create"));
+    }
+
+    #[test]
+    fn pty_output_stays_out_of_chat_messages() {
+        let mut state = AppState::new();
+        state.pending_discover = false;
+        state.demo = false;
+        state.messages.push(ChatMessage {
+            id: "chat-1".into(),
+            role: "user".into(),
+            content: "hi".into(),
+        });
+        let ev = crate::ws::parse_event(r#"{"type":"pty.data","ptyId":"pty-1","data":"bHMK"}"#)
+            .expect("parse");
+        state.test_apply_ws_event(ev);
+        assert_eq!(state.messages.len(), 1);
+        assert_eq!(state.messages[0].content, "hi");
+        assert_eq!(state.pty_scrollback("pty-1"), "ls\n");
+        assert!(!state.messages.iter().any(|m| m.content.contains("ls")));
     }
 }
