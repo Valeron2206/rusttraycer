@@ -1,13 +1,26 @@
 #!/usr/bin/env bash
 # Pack Linux amd64 AppImage + .deb from already-built binaries.
-# Usage: pack-linux.sh <version> <dest-dir> <bin-dir>
+# Usage: pack-linux.sh [--dry-run] <version> <dest-dir> <bin-dir>
+#        PACK_DRY_RUN=1 pack-linux.sh <version> <dest-dir> <bin-dir>
+# --dry-run / PACK_DRY_RUN=1: parse args, check binaries via need(), print
+# what would be packed, exit 0 without mkdir dest, dpkg-deb, downloads, or artifacts.
 set -eu
+DRY_RUN=0
+if [ "${1:-}" = "--dry-run" ]; then
+  DRY_RUN=1
+  shift
+fi
+if [ "${PACK_DRY_RUN:-}" = "1" ]; then
+  DRY_RUN=1
+fi
 VERSION="${1:?version}"
 DEST="${2:?dest dir}"
 BIN="${3:?bin dir}"
 VERSION="${VERSION#v}"
 TAG="v${VERSION}"
 NAME="rusttraycer-${TAG}-linux-x86_64"
+DEB_NAME="rusttraycer_${VERSION}_amd64.deb"
+APPIMAGE_NAME="rusttraycer-${TAG}-linux-x86_64.AppImage"
 
 need() {
   local p="${BIN}/$1"
@@ -19,6 +32,14 @@ need() {
 need rt-host
 need rt-cli
 need rt-gui
+
+if [ "${DRY_RUN}" = "1" ]; then
+  echo "dry-run: would pack ${DEB_NAME}"
+  echo "dry-run: would pack ${APPIMAGE_NAME}"
+  echo "dry-run: dest=${DEST}"
+  echo "dry-run: bin=${BIN}"
+  exit 0
+fi
 
 mkdir -p "${DEST}"
 DEST="$(cd "${DEST}" && pwd)"
@@ -46,7 +67,6 @@ Architecture: amd64
 Maintainer: RustTraycer <noreply@localhost>
 Description: Local-first RustTraycer desktop (host, CLI, GUI)
 CTL
-DEB_NAME="rusttraycer_${VERSION}_amd64.deb"
 dpkg-deb --build --root-owner-group "${DEB_ROOT}" "${DEST}/${DEB_NAME}" >/dev/null
 
 APPDIR="${WORKDIR}/RustTraycer.AppDir"
@@ -70,7 +90,7 @@ exec "${HERE}/usr/bin/rt-gui" "$@"
 RUN
 chmod 0755 "${APPDIR}/AppRun"
 
-APPIMAGE="${DEST}/rusttraycer-${TAG}-linux-x86_64.AppImage"
+APPIMAGE="${DEST}/${APPIMAGE_NAME}"
 if [ "${PACK_SKIP_APPIMAGE:-}" = "1" ]; then
   echo "skip AppImage (PACK_SKIP_APPIMAGE=1)"
 else
