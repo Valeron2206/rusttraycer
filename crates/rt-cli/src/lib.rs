@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use serde_json::{json, Value};
 
-pub const PROTOCOL_CRATE: &str = "1.0.0";
+pub const PROTOCOL_CRATE: &str = "2.0.0";
 const SESSION_HEADER: &str = "X-Rt-Session";
 const STOP_WAIT: Duration = Duration::from_secs(2);
 
