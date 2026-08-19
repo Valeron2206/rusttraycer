@@ -207,6 +207,9 @@ fn assert_no_secret_columns(db: &Path) {
     }
 }
 
+static SYNC_SECRET_ENV: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
 struct ClearSyncSecret;
 
 impl Drop for ClearSyncSecret {
@@ -217,6 +220,7 @@ impl Drop for ClearSyncSecret {
 
 #[tokio::test(flavor = "current_thread")]
 async fn push_no_secret_rewrites_host_id_then_conflict() {
+    let _env_guard = SYNC_SECRET_ENV.lock().await;
     let _clear = ClearSyncSecret;
     std::env::remove_var("RUSTTRAYCER_SYNC_SECRET");
 
@@ -496,6 +500,7 @@ async fn handshake_1_9_accepts_new_methods_1_8_keeps_export_import() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn sync_secret_mismatch_is_auth_required_match_succeeds() {
+    let _env_guard = SYNC_SECRET_ENV.lock().await;
     let _clear = ClearSyncSecret;
     std::env::set_var("RUSTTRAYCER_SYNC_SECRET", "c58-test-secret");
 
