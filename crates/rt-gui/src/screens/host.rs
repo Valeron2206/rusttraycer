@@ -1,5 +1,8 @@
 use crate::discovery;
 use crate::state::AppState;
+use crate::workspace_ux::{
+    GLOBAL_GUIDE_HINT, GLOBAL_GUIDE_LABEL, GLOBAL_GUIDE_SAVE, WORKSPACE_UNAVAILABLE,
+};
 
 pub fn show(ctx: &egui::Context, state: &mut AppState) {
     egui::CentralPanel::default().show(ctx, |ui| {
@@ -144,6 +147,29 @@ pub fn show_body(ui: &mut egui::Ui, state: &mut AppState) {
         }
     }
 
+    ui.add_space(16.0);
+    ui.separator();
+    ui.add_space(8.0);
+    ui.heading(GLOBAL_GUIDE_LABEL);
+    state.ensure_settings_guide();
+    let host_ok = state.workspace_host_ok();
+    if state.can_rpc() && !host_ok {
+        ui.weak(WORKSPACE_UNAVAILABLE);
+    }
+    ui.add_enabled_ui(host_ok, |ui| {
+        if !state.settings_guide_path.is_empty() {
+            ui.weak(&state.settings_guide_path);
+        }
+        ui.add(
+            egui::TextEdit::multiline(&mut state.settings_guide_draft)
+                .desired_width(ui.available_width())
+                .desired_rows(8)
+                .hint_text(GLOBAL_GUIDE_HINT),
+        );
+        if ui.button(GLOBAL_GUIDE_SAVE).clicked() {
+            state.save_settings_guide();
+        }
+    });
     ui.add_space(16.0);
     ui.separator();
     ui.add_space(8.0);

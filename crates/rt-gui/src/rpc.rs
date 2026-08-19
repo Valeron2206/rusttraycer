@@ -110,6 +110,20 @@ pub const MODEL_METHODS: &[&str] = &[
     METHOD_PREFS_GET,
 ];
 
+pub const METHOD_WORKSPACE_GUIDES_GET: &str = "workspace.guides.get";
+pub const METHOD_SETTINGS_GUIDE_GET: &str = "settings.guide.get";
+pub const METHOD_SETTINGS_GUIDE_SET: &str = "settings.guide.set";
+pub const METHOD_PRESET_LIST: &str = "preset.list";
+pub const METHOD_AGENT_UPDATE: &str = "agent.update";
+
+pub const WORKSPACE_METHODS: &[&str] = &[
+    METHOD_WORKSPACE_GUIDES_GET,
+    METHOD_SETTINGS_GUIDE_GET,
+    METHOD_SETTINGS_GUIDE_SET,
+    METHOD_PRESET_LIST,
+    METHOD_AGENT_UPDATE,
+];
+
 #[derive(Debug, Clone)]
 pub struct Session {
     pub host_id: String,
@@ -178,6 +192,10 @@ impl ConnectError {
     }
 
     pub fn is_model_ux_unsupported(&self) -> bool {
+        self.is_unsupported_method() || self.is_version_mismatch()
+    }
+
+    pub fn is_workspace_unsupported(&self) -> bool {
         self.is_unsupported_method() || self.is_version_mismatch()
     }
 
@@ -293,6 +311,9 @@ fn hello_methods() -> Value {
     }
     for name in MODEL_METHODS {
         map.insert(name.to_string(), json!({ "major": 1, "minor": 6 }));
+    }
+    for name in WORKSPACE_METHODS {
+        map.insert(name.to_string(), json!({ "major": 1, "minor": 7 }));
     }
     Value::Object(map)
 }
@@ -442,6 +463,7 @@ pub fn connect(info: &PidInfo) -> Result<Session, ConnectError> {
 pub struct TasksCatalog {
     pub workspaces: Vec<rt_protocol::Workspace>,
     pub tasks: Vec<rt_protocol::Task>,
+    pub task_presets: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -455,6 +477,52 @@ fn parse_ok<T: DeserializeOwned>(ok: Value) -> Result<T, ConnectError> {
 
 fn parse_items<T: DeserializeOwned>(ok: Value) -> Result<Vec<T>, ConnectError> {
     Ok(parse_ok::<ItemList<T>>(ok)?.items)
+}
+
+fn extract_opt_str(ok: &Value, key: &str) -> Option<String> {
+    ok.get(key)
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+fn parse_tasks_with_presets(
+    ok: Value,
+) -> Result<(Vec<rt_protocol::Task>, BTreeMap<String, String>), ConnectError> {
+    let items = ok
+        .get("items")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut tasks = Vec::new();
+    let mut presets = BTreeMap::new();
+    for item in items {
+        let preset = extract_opt_str(&item, "preset");
+        let task: rt_protocol::Task = parse_ok(item)?;
+        if let Some(preset) = preset {
+            presets.insert(task.id.clone(), preset);
+        }
+        tasks.push(task);
+    }
+    Ok((tasks, presets))
+}
+
+fn parse_agents_with_roles(
+    ok: Value,
+) -> Result<Vec<(rt_protocol::Agent, Option<String>)>, ConnectError> {
+    let items = ok
+        .get("items")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut out = Vec::new();
+    for item in items {
+        let role = extract_opt_str(&item, "role");
+        let agent: rt_protocol::Agent = parse_ok(item)?;
+        out.push((agent, role));
+    }
+    Ok(out)
 }
 
 /// Make `path` absolute without walking the tree or requiring it to exist.
@@ -499,10 +567,20 @@ impl Session {
         title: &str,
         workspace_id: &str,
     ) -> Result<rt_protocol::Task, ConnectError> {
-        parse_ok(self.call(
-            rt_protocol::METHOD_TASK_CREATE,
-            json!({ "title": title, "workspaceId": workspace_id }),
-        )?)
+        self.task_create_with_preset(title, workspace_id, None)
+    }
+
+    pub fn task_create_with_preset(
+        &self,
+        title: &str,
+        workspace_id: &str,
+        preset: Option<&str>,
+    ) -> Result<rt_protocol::Task, ConnectError> {
+        let mut params = json!({ "title": title, "workspaceId": workspace_id });
+        if let Some(preset) = preset {
+            params["preset"] = json!(preset);
+        }
+        parse_ok(self.call(rt_protocol::METHOD_TASK_CREATE, params)?)
     }
 
     pub fn task_rename(&self, id: &str, title: &str) -> Result<rt_protocol::Task, ConnectError> {
@@ -519,12 +597,20 @@ impl Session {
     /// `workspace.list`, then `task.list` with `status` if a workspace exists.
     pub fn refresh_tasks_catalog(&self, status: &str) -> Result<TasksCatalog, ConnectError> {
         let workspaces = self.workspace_list()?;
-        let tasks = if workspaces.is_empty() {
-            Vec::new()
-        } else {
-            self.task_list(status)?
-        };
-        Ok(TasksCatalog { workspaces, tasks })
+        if workspaces.is_empty() {
+            return Ok(TasksCatalog {
+                workspaces,
+                tasks: Vec::new(),
+                task_presets: BTreeMap::new(),
+            });
+        }
+        let ok = self.call(rt_protocol::METHOD_TASK_LIST, json!({ "status": status }))?;
+        let (tasks, task_presets) = parse_tasks_with_presets(ok)?;
+        Ok(TasksCatalog {
+            workspaces,
+            tasks,
+            task_presets,
+        })
     }
 
     pub fn agent_list(&self, task_id: &str) -> Result<Vec<rt_protocol::Agent>, ConnectError> {
@@ -1238,6 +1324,101 @@ impl Session {
     pub fn prefs_get(&self) -> Result<Vec<PrefsItem>, ConnectError> {
         parse_items(self.call(METHOD_PREFS_GET, json!({}))?)
     }
+
+    pub fn workspace_accepted(&self) -> bool {
+        fn ok(map: &BTreeMap<String, rt_protocol::MethodVersion>, name: &str) -> bool {
+            map.get(name)
+                .map(|v| v.major == 1 && v.minor >= 7)
+                .unwrap_or(false)
+        }
+        WORKSPACE_METHODS
+            .iter()
+            .all(|name| ok(&self.accepted, name))
+    }
+
+    pub fn workspace_rejected(&self) -> bool {
+        WORKSPACE_METHODS
+            .iter()
+            .any(|name| self.rejected.contains_key(*name))
+    }
+
+    pub fn workspace_guides_get(
+        &self,
+        workspace_id: &str,
+    ) -> Result<WorkspaceGuides, ConnectError> {
+        parse_ok(self.call(
+            METHOD_WORKSPACE_GUIDES_GET,
+            json!({ "workspaceId": workspace_id }),
+        )?)
+    }
+
+    pub fn settings_guide_get(&self) -> Result<SettingsGuide, ConnectError> {
+        parse_ok(self.call(METHOD_SETTINGS_GUIDE_GET, json!({}))?)
+    }
+
+    pub fn settings_guide_set(&self, content: &str) -> Result<SettingsGuide, ConnectError> {
+        parse_ok(self.call(METHOD_SETTINGS_GUIDE_SET, json!({ "content": content }))?)
+    }
+
+    pub fn preset_list(&self) -> Result<Vec<PresetItem>, ConnectError> {
+        parse_items(self.call(METHOD_PRESET_LIST, json!({}))?)
+    }
+
+    pub fn agent_update_role(
+        &self,
+        agent_id: &str,
+        role: &str,
+    ) -> Result<(rt_protocol::Agent, Option<String>), ConnectError> {
+        let ok = self.call(
+            METHOD_AGENT_UPDATE,
+            json!({ "agentId": agent_id, "role": role }),
+        )?;
+        let role = extract_opt_str(&ok, "role").or_else(|| Some(role.to_string()));
+        let agent = parse_ok::<rt_protocol::Agent>(ok)?;
+        Ok((agent, role))
+    }
+
+    pub fn agent_list_with_roles(
+        &self,
+        task_id: &str,
+    ) -> Result<Vec<(rt_protocol::Agent, Option<String>)>, ConnectError> {
+        parse_agents_with_roles(
+            self.call(rt_protocol::METHOD_AGENT_LIST, json!({ "taskId": task_id }))?,
+        )
+    }
+
+    pub fn agent_create_with_role(
+        &self,
+        task_id: &str,
+        provider: &str,
+        interface: &str,
+        params: &crate::model_ux::ModelParams,
+        role: Option<&str>,
+    ) -> Result<(rt_protocol::Agent, Option<String>), ConnectError> {
+        let mut body = json!({
+            "taskId": task_id,
+            "provider": provider,
+        });
+        if interface != "chat" {
+            body["interface"] = json!(interface);
+        }
+        if let Some(model) = params.model.as_deref() {
+            body["model"] = json!(model);
+        }
+        if let Some(effort) = params.effort.as_deref() {
+            body["effort"] = json!(effort);
+        }
+        if params.fast {
+            body["fast"] = json!(true);
+        }
+        if let Some(role) = role {
+            body["role"] = json!(role);
+        }
+        let ok = self.call(rt_protocol::METHOD_AGENT_CREATE, body)?;
+        let role = extract_opt_str(&ok, "role");
+        let agent = parse_ok::<rt_protocol::Agent>(ok)?;
+        Ok((agent, role))
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1245,6 +1426,41 @@ impl Session {
 pub struct CancelOk {
     pub agent_id: String,
     pub cancelled: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GuideFile {
+    pub path: String,
+    pub content: String,
+    #[serde(default)]
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceGuides {
+    pub agents_md: Option<GuideFile>,
+    pub workspace_guide: Option<GuideFile>,
+    pub global_guide: Option<GuideFile>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsGuide {
+    pub path: String,
+    #[serde(default)]
+    pub content: String,
+    #[serde(default)]
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PresetItem {
+    pub id: String,
+    pub title: String,
+    pub default_role: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -3564,6 +3780,31 @@ mod tests {
         assert_eq!(hs.params["methods"]["agent.create"]["minor"], 0);
     }
 
+    #[test]
+    fn handshake_advertises_workspace_methods_1_7() {
+        let mock = start_catalog_mock("host-a", "tok-1");
+        let _session = connect(&pid("host-a", &mock.origin)).expect("online");
+        let hs = mock
+            .hits
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|h| h.method == "handshake")
+            .cloned()
+            .expect("handshake");
+        for name in WORKSPACE_METHODS {
+            assert_eq!(hs.params["methods"][name]["major"], 1, "{name}");
+            assert_eq!(hs.params["methods"][name]["minor"], 7, "{name}");
+        }
+        assert_eq!(hs.params["methods"]["workspace.guides.get"]["minor"], 7);
+        assert_eq!(hs.params["methods"]["settings.guide.get"]["minor"], 7);
+        assert_eq!(hs.params["methods"]["settings.guide.set"]["minor"], 7);
+        assert_eq!(hs.params["methods"]["preset.list"]["minor"], 7);
+        assert_eq!(hs.params["methods"]["agent.update"]["minor"], 7);
+        assert_eq!(hs.params["methods"]["agent.switch"]["minor"], 6);
+        assert_eq!(hs.params["methods"]["agent.create"]["minor"], 0);
+    }
+
     fn start_artifacts_rpc_mock() -> CatalogMock {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
@@ -4053,5 +4294,240 @@ mod tests {
         assert!(hits.iter().any(|h| h.method == "profile.list"));
         assert!(hits.iter().any(|h| h.method == "profile.get"));
         assert!(hits.iter().any(|h| h.method == "prefs.get"));
+    }
+
+    fn workspace_accepted_map() -> serde_json::Map<String, Value> {
+        let mut accepted = serde_json::Map::new();
+        for name in WORKSPACE_METHODS {
+            accepted.insert(name.to_string(), json!({"major": 1, "minor": 7}));
+        }
+        accepted
+    }
+
+    fn sample_agent_role(id: &str, role: &str) -> Value {
+        json!({
+            "id": id,
+            "taskId": "task-1",
+            "hostId": "host-a",
+            "parentId": null,
+            "interface": "chat",
+            "provider": "cli.generic",
+            "status": "idle",
+            "runLocation": "local",
+            "createdAt": "2026-08-19T11:00:00Z",
+            "role": role
+        })
+    }
+
+    fn start_workspace_rpc_mock() -> CatalogMock {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(Mutex::new(Vec::new()));
+        let hits_t = hits.clone();
+        thread::spawn(move || {
+            for stream in listener.incoming().take(24) {
+                let Ok(mut stream) = stream else { break };
+                let (headers, body) = read_http_request(&mut stream);
+                let has_session = headers.to_ascii_lowercase().contains("x-rt-session:");
+                let parsed: Value = serde_json::from_slice(&body).unwrap_or(json!({}));
+                let method = if headers.starts_with("GET /health") {
+                    "GET /health".to_string()
+                } else {
+                    parsed
+                        .get("method")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("other")
+                        .to_string()
+                };
+                let params = parsed.get("params").cloned().unwrap_or(json!({}));
+                hits_t.lock().unwrap().push(RpcHit {
+                    method: method.clone(),
+                    params: params.clone(),
+                    has_session,
+                });
+                let body = match method.as_str() {
+                    "GET /health" => json!({"ok": true, "hostId": "host-a"}).to_string(),
+                    "handshake" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "hostId": "host-a",
+                            "hostVersion": "0.1.0",
+                            "sessionToken": "tok-1",
+                            "accepted": workspace_accepted_map(),
+                            "rejected": {}
+                        }
+                    })
+                    .to_string(),
+                    "host.ping" => json!({
+                        "id": "echo",
+                        "ok": { "hostId": "host-a", "now": "2026-08-19T11:00:00Z" }
+                    })
+                    .to_string(),
+                    "workspace.guides.get" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "agentsMd": {
+                                "path": "/ws/AGENTS.md",
+                                "content": "use the planner",
+                                "truncated": false
+                            },
+                            "workspaceGuide": null,
+                            "globalGuide": {
+                                "path": "/data/agent-selection-guide.md",
+                                "content": "prefer cli.codex",
+                                "truncated": false
+                            }
+                        }
+                    })
+                    .to_string(),
+                    "settings.guide.get" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "path": "/data/agent-selection-guide.md",
+                            "content": "prefer cli.codex",
+                            "truncated": false
+                        }
+                    })
+                    .to_string(),
+                    "settings.guide.set" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "path": "/data/agent-selection-guide.md",
+                            "content": params.get("content").cloned().unwrap_or(json!("")),
+                            "truncated": false
+                        }
+                    })
+                    .to_string(),
+                    "preset.list" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "items": [
+                                { "id": "planning", "title": "Planning", "defaultRole": "planner" },
+                                { "id": "review", "title": "Review", "defaultRole": "reviewer" },
+                                { "id": "debug", "title": "Debug", "defaultRole": "debugger" },
+                                { "id": "document", "title": "Document", "defaultRole": "documenter" }
+                            ]
+                        }
+                    })
+                    .to_string(),
+                    "agent.update" => {
+                        let role = params.get("role").and_then(|v| v.as_str()).unwrap_or("coder");
+                        json!({
+                            "id": "echo",
+                            "ok": sample_agent_role("ag-1", role)
+                        })
+                        .to_string()
+                    }
+                    "agent.create" => {
+                        let role = params.get("role").and_then(|v| v.as_str()).unwrap_or("coder");
+                        json!({
+                            "id": "echo",
+                            "ok": sample_agent_role("ag-new", role)
+                        })
+                        .to_string()
+                    }
+                    "task.create" => {
+                        let title = params.get("title").and_then(|v| v.as_str()).unwrap_or("");
+                        let ws = params
+                            .get("workspaceId")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("ws-1");
+                        let mut task = sample_task("task-new", title, "open", ws);
+                        if let Some(preset) = params.get("preset") {
+                            task["preset"] = preset.clone();
+                        }
+                        json!({ "id": "echo", "ok": task }).to_string()
+                    }
+                    _ => json!({
+                        "id": "echo",
+                        "error": { "code": "unsupported_method", "message": "no" }
+                    })
+                    .to_string(),
+                };
+                write_http_json(&mut stream, &body);
+            }
+        });
+        CatalogMock {
+            origin: format!("http://{addr}"),
+            hits,
+        }
+    }
+
+    #[test]
+    fn workspace_guides_get_uses_rpc_not_filesystem_path() {
+        let mock = start_workspace_rpc_mock();
+        let session = connect(&pid("host-a", &mock.origin)).expect("online");
+        assert!(session.workspace_accepted());
+        let guides = session.workspace_guides_get("ws-1").expect("guides");
+        assert_eq!(
+            guides.agents_md.as_ref().map(|f| f.path.as_str()),
+            Some("/ws/AGENTS.md")
+        );
+        assert_eq!(
+            guides.agents_md.as_ref().map(|f| f.content.as_str()),
+            Some("use the planner")
+        );
+        assert!(guides.workspace_guide.is_none());
+        let hits = mock.hits.lock().unwrap().clone();
+        let get = hits
+            .iter()
+            .find(|h| h.method == "workspace.guides.get")
+            .cloned()
+            .expect("workspace.guides.get");
+        assert_eq!(get.params["workspaceId"], "ws-1");
+        assert!(get.params.get("path").is_none());
+        assert!(hits.iter().all(|h| h.method != "files.tree"));
+        assert!(hits.iter().all(|h| h.method != "files.read"));
+        assert!(!hits.iter().any(|h| {
+            h.params
+                .get("path")
+                .and_then(|v| v.as_str())
+                .is_some_and(|p| p.contains("AGENTS.md"))
+        }));
+    }
+
+    #[test]
+    fn agent_update_sends_role_method() {
+        let mock = start_workspace_rpc_mock();
+        let session = connect(&pid("host-a", &mock.origin)).expect("online");
+        let (agent, role) = session
+            .agent_update_role("ag-1", "reviewer")
+            .expect("update");
+        assert_eq!(agent.id, "ag-1");
+        assert_eq!(role.as_deref(), Some("reviewer"));
+        let hit = mock
+            .hits
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|h| h.method == "agent.update")
+            .cloned()
+            .expect("agent.update");
+        assert_eq!(hit.params["agentId"], "ag-1");
+        assert_eq!(hit.params["role"], "reviewer");
+        assert!(hit.params.get("token").is_none());
+        assert!(hit.params.get("apiKey").is_none());
+    }
+
+    #[test]
+    fn task_create_preset_sends_one_of_four_names() {
+        let mock = start_workspace_rpc_mock();
+        let session = connect(&pid("host-a", &mock.origin)).expect("online");
+        for name in ["planning", "review", "debug", "document"] {
+            let created = session
+                .task_create_with_preset("Plan", "ws-1", Some(name))
+                .expect(name);
+            assert_eq!(created.title, "Plan");
+        }
+        let hits = mock.hits.lock().unwrap().clone();
+        let presets: Vec<String> = hits
+            .iter()
+            .filter(|h| h.method == "task.create")
+            .map(|h| h.params["preset"].as_str().expect("preset").to_string())
+            .collect();
+        assert_eq!(presets, vec!["planning", "review", "debug", "document"]);
+        for name in &presets {
+            assert!(["planning", "review", "debug", "document"].contains(&name.as_str()));
+        }
     }
 }

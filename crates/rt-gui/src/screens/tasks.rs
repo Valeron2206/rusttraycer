@@ -1,4 +1,7 @@
 use crate::state::{AppState, TaskFilter, TaskStatus};
+use crate::workspace_ux::{
+    preset_label_ru, role_label_ru, PRESET_LABEL, PRESET_NONE, WORKSPACE_UNAVAILABLE,
+};
 
 pub fn show(ctx: &egui::Context, state: &mut AppState) {
     egui::CentralPanel::default().show(ctx, |ui| {
@@ -255,6 +258,45 @@ pub fn show_new_task_dialog(ctx: &egui::Context, state: &mut AppState) {
                     .desired_width(320.0)
                     .hint_text("Например, починить логин"),
             );
+            ui.add_space(6.0);
+            ui.label(PRESET_LABEL);
+            let host_ok = state.workspace_host_ok();
+            ui.add_enabled_ui(host_ok, |ui| {
+                let mut preset = state.new_task_preset.clone();
+                let selected = preset
+                    .as_deref()
+                    .and_then(|id| {
+                        state.presets.iter().find(|item| item.id == id).map(|item| {
+                            format!(
+                                "{} · {} → {}",
+                                preset_label_ru(&item.id),
+                                item.title,
+                                role_label_ru(&item.default_role)
+                            )
+                        })
+                    })
+                    .unwrap_or_else(|| PRESET_NONE.to_string());
+                egui::ComboBox::from_id_salt("task_preset")
+                    .selected_text(selected)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut preset, None, PRESET_NONE);
+                        for item in &state.presets {
+                            let label = format!(
+                                "{} · {} → {}",
+                                preset_label_ru(&item.id),
+                                item.title,
+                                role_label_ru(&item.default_role)
+                            );
+                            ui.selectable_value(&mut preset, Some(item.id.clone()), label);
+                        }
+                    });
+                if preset != state.new_task_preset {
+                    state.set_new_task_preset(preset);
+                }
+            });
+            if state.can_rpc() && !host_ok {
+                ui.weak(WORKSPACE_UNAVAILABLE);
+            }
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 let can = state.can_create_task() && !state.new_task_title.trim().is_empty();

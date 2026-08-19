@@ -12,6 +12,7 @@ mod rpc;
 mod screens;
 mod state;
 mod terminal;
+mod workspace_ux;
 mod ws;
 
 use app::RtGuiApp;

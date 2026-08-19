@@ -18,12 +18,13 @@ use crate::ladder::{
 use crate::model_ux::{self, ModelParams, ModelPrefs, MODEL_UNAVAILABLE, PROFILE_NAME_BAD};
 use crate::rpc::{
     AgentModelView, CancelOk, ConnectError, DoctorOk, DoctorProvider, GitDiffOk, GitStatusOk,
-    PrefsItem, ProfileOk, Worktree,
+    PrefsItem, PresetItem, ProfileOk, SettingsGuide, WorkspaceGuides, Worktree,
 };
 use crate::terminal::{
     self, AgentInterface, AgentView, ShellStub, DEFAULT_COLS, DEFAULT_ROWS, NEED_TASK,
     TERMINAL_UNAVAILABLE,
 };
+use crate::workspace_ux::{self, GUIDE_TOO_LONG, ROLE_CODER, WORKSPACE_UNAVAILABLE};
 use crate::ws::{self, ApplyOutcome, WsBridge, WsIncoming};
 
 enum RpcIncoming {
@@ -356,6 +357,17 @@ pub struct AppState {
     pub profile_name_draft: String,
     pub host_prefs: Vec<PrefsItem>,
     pub model_status: Option<String>,
+    pub new_task_preset: Option<String>,
+    pub picker_role: String,
+    pub agent_roles: HashMap<String, String>,
+    pub task_presets: HashMap<String, String>,
+    pub workspace_guides: Option<WorkspaceGuides>,
+    pub settings_guide_draft: String,
+    pub settings_guide_path: String,
+    pub settings_guide_truncated: bool,
+    pub settings_guide_loaded: bool,
+    pub presets: Vec<PresetItem>,
+    pub workspace_status: Option<String>,
     pending_cancel: Option<String>,
     rpc_tx: Sender<RpcIncoming>,
     rpc_rx: Receiver<RpcIncoming>,
@@ -473,6 +485,17 @@ impl AppState {
             profile_name_draft: String::new(),
             host_prefs: Vec::new(),
             model_status: None,
+            new_task_preset: None,
+            picker_role: ROLE_CODER.into(),
+            agent_roles: HashMap::new(),
+            task_presets: HashMap::new(),
+            workspace_guides: None,
+            settings_guide_draft: String::new(),
+            settings_guide_path: String::new(),
+            settings_guide_truncated: false,
+            settings_guide_loaded: false,
+            presets: workspace_ux::builtin_presets(),
+            workspace_status: None,
             pending_cancel: None,
             rpc_tx,
             rpc_rx,
@@ -637,6 +660,7 @@ impl AppState {
                         self.refresh_artifacts_capability();
                         self.refresh_a2a_capability();
                         self.refresh_model_capability();
+                        self.refresh_workspace_capability();
                         self.refresh_tasks_catalog();
                         if self.screen == Screen::Canvas {
                             self.refresh_canvas_after_reconnect();
@@ -1119,6 +1143,7 @@ impl AppState {
         self.refresh_shells();
         self.load_file_tree_root();
         self.load_artifacts();
+        self.load_workspace_guides();
         self.canvas_loaded_for = Some(task_id.to_string());
     }
 
@@ -1126,10 +1151,28 @@ impl AppState {
         let Some(session) = self.session.clone() else {
             return;
         };
-        match session.agent_list(task_id) {
+        let listed = if self.workspace_host_ok() {
+            session.agent_list_with_roles(task_id).map(|items| {
+                items
+                    .into_iter()
+                    .map(|(agent, role)| {
+                        let stub = AgentStub::from(agent);
+                        if let Some(role) = role {
+                            self.agent_roles.insert(stub.id.clone(), role);
+                        }
+                        stub
+                    })
+                    .collect::<Vec<_>>()
+            })
+        } else {
+            session
+                .agent_list(task_id)
+                .map(|items| items.into_iter().map(AgentStub::from).collect())
+        };
+        match listed {
             Ok(items) => {
                 self.agents.retain(|a| a.task_id != task_id);
-                self.agents.extend(items.into_iter().map(AgentStub::from));
+                self.agents.extend(items);
                 let still_valid = self
                     .selected_agent_id
                     .as_ref()
@@ -1253,23 +1296,39 @@ impl AppState {
         }
         let interface = self.picker_interface.as_wire();
         let params = self.picker_params();
-        let created = if self.model_ux_host_ok() {
-            session.agent_create_with_model(
-                &task_id,
-                &provider,
-                interface,
-                params.model.as_deref(),
-                params.effort.as_deref(),
-                Some(params.fast),
-            )
-        } else if interface == "chat" {
-            session.agent_create(&task_id, &provider)
+        let role = if self.workspace_host_ok() {
+            Some(self.picker_role.clone())
         } else {
-            session.agent_create_with_interface(&task_id, &provider, interface)
+            None
+        };
+        let created = if self.workspace_host_ok() {
+            session.agent_create_with_role(&task_id, &provider, interface, &params, role.as_deref())
+        } else if self.model_ux_host_ok() {
+            session
+                .agent_create_with_model(
+                    &task_id,
+                    &provider,
+                    interface,
+                    params.model.as_deref(),
+                    params.effort.as_deref(),
+                    Some(params.fast),
+                )
+                .map(|agent| (agent, None))
+        } else if interface == "chat" {
+            session
+                .agent_create(&task_id, &provider)
+                .map(|agent| (agent, None))
+        } else {
+            session
+                .agent_create_with_interface(&task_id, &provider, interface)
+                .map(|agent| (agent, None))
         };
         match created {
-            Ok(agent) => {
+            Ok((agent, got_role)) => {
                 let stub = AgentStub::from(agent);
+                if let Some(role) = got_role.or(role) {
+                    self.agent_roles.insert(stub.id.clone(), role);
+                }
                 if interface == "terminal" && !stub.is_terminal() {
                     self.surface_terminal_error_label(TERMINAL_UNAVAILABLE);
                 }
@@ -1291,6 +1350,7 @@ impl AppState {
             return;
         }
         self.selected_agent_id = Some(id);
+        self.sync_picker_role_from_selected();
         self.remember_selected_agent();
         self.load_selected_agent();
     }
@@ -1855,10 +1915,15 @@ impl AppState {
             self.workspace_path = Some(ws.path.clone());
             self.workspace_path_draft = ws.path;
             self.tasks = catalog.tasks.into_iter().map(TaskStub::from).collect();
+            self.task_presets = catalog.task_presets.into_iter().collect();
+            self.load_workspace_guides();
+            self.load_presets();
         } else {
             self.workspace_id = None;
             self.workspace_path = None;
             self.tasks.clear();
+            self.task_presets.clear();
+            self.workspace_guides = None;
         }
     }
 
@@ -1920,15 +1985,41 @@ impl AppState {
         let Some(session) = self.session.clone() else {
             return;
         };
-        match session.task_create(&title, &workspace_id) {
+        let preset = self
+            .new_task_preset
+            .clone()
+            .filter(|p| workspace_ux::valid_preset(p));
+        if preset.is_some() && !self.workspace_host_ok() {
+            self.surface_workspace_unavailable();
+        }
+        let send_preset = if self.workspace_host_ok() {
+            preset.as_deref()
+        } else {
+            None
+        };
+        let created = if let Some(preset) = send_preset {
+            session.task_create_with_preset(&title, &workspace_id, Some(preset))
+        } else {
+            session.task_create(&title, &workspace_id)
+        };
+        match created {
             Ok(task) => {
+                if let Some(preset) = send_preset {
+                    self.task_presets
+                        .insert(task.id.clone(), preset.to_string());
+                }
                 self.new_task_title.clear();
+                self.new_task_preset = None;
                 self.show_new_task_dialog = false;
                 self.refresh_tasks_catalog();
                 self.open_task(task.id);
             }
             Err(err) => {
-                self.toast = Some(err.as_label());
+                if err.is_workspace_unsupported() {
+                    self.surface_workspace_error(err);
+                } else {
+                    self.toast = Some(err.as_label());
+                }
             }
         }
     }
@@ -3448,6 +3539,225 @@ impl AppState {
             Err(_) => {
                 // Keep the local transcript. Host owns it; GUI must not wipe.
             }
+        }
+    }
+
+    pub fn workspace_host_ok(&self) -> bool {
+        self.session
+            .as_ref()
+            .map(|s| s.workspace_accepted() && !s.workspace_rejected())
+            .unwrap_or(false)
+    }
+
+    fn refresh_workspace_capability(&mut self) {
+        match &self.session {
+            Some(s) if s.workspace_accepted() && !s.workspace_rejected() => {
+                if self.workspace_status.as_deref() == Some(WORKSPACE_UNAVAILABLE) {
+                    self.workspace_status = None;
+                }
+            }
+            Some(_) | None => {
+                if self.can_rpc() {
+                    self.workspace_status = Some(WORKSPACE_UNAVAILABLE.into());
+                }
+            }
+        }
+    }
+
+    fn surface_workspace_unavailable(&mut self) {
+        self.workspace_status = Some(WORKSPACE_UNAVAILABLE.into());
+        self.toast = Some(WORKSPACE_UNAVAILABLE.into());
+    }
+
+    fn surface_workspace_error(&mut self, err: ConnectError) {
+        if err.is_workspace_unsupported() {
+            self.surface_workspace_unavailable();
+        } else {
+            let label = err.as_label();
+            self.workspace_status = Some(label.clone());
+            self.toast = Some(label);
+        }
+    }
+
+    pub fn selected_task_preset(&self) -> Option<&str> {
+        let id = self.selected_task_id.as_ref()?;
+        self.task_presets.get(id).map(String::as_str)
+    }
+
+    pub fn selected_agent_role(&self) -> &str {
+        self.selected_agent_id
+            .as_ref()
+            .and_then(|id| self.agent_roles.get(id))
+            .map(String::as_str)
+            .unwrap_or(self.picker_role.as_str())
+    }
+
+    fn sync_picker_role_from_selected(&mut self) {
+        if let Some(id) = self.selected_agent_id.clone() {
+            if let Some(role) = self.agent_roles.get(&id).cloned() {
+                self.picker_role = role;
+                return;
+            }
+        }
+        if let Some(preset) = self.selected_task_preset() {
+            self.picker_role = workspace_ux::default_role_for_preset(preset).to_string();
+        }
+    }
+
+    pub fn set_new_task_preset(&mut self, preset: Option<String>) {
+        match preset {
+            Some(name) if workspace_ux::valid_preset(&name) => {
+                let role = self
+                    .presets
+                    .iter()
+                    .find(|item| item.id == name)
+                    .map(|item| item.default_role.clone())
+                    .filter(|role| workspace_ux::valid_role(role))
+                    .unwrap_or_else(|| workspace_ux::default_role_for_preset(&name).to_string());
+                self.new_task_preset = Some(name);
+                self.picker_role = role;
+            }
+            _ => self.new_task_preset = None,
+        }
+    }
+
+    pub fn set_picker_role(&mut self, role: String) {
+        if !workspace_ux::valid_role(&role) {
+            return;
+        }
+        if self.picker_role == role {
+            return;
+        }
+        self.picker_role = role;
+        if self.selected_agent_id.is_some() {
+            self.update_selected_agent_role();
+        }
+    }
+
+    pub fn update_selected_agent_role(&mut self) {
+        if !self.workspace_host_ok() {
+            self.surface_workspace_unavailable();
+            return;
+        }
+        let Some(agent_id) = self.selected_agent_id.clone() else {
+            return;
+        };
+        let role = self.picker_role.clone();
+        if !workspace_ux::valid_role(&role) {
+            return;
+        }
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        match session.agent_update_role(&agent_id, &role) {
+            Ok((agent, got_role)) => {
+                if let Some(stub) = self.agents.iter_mut().find(|a| a.id == agent_id) {
+                    *stub = AgentStub::from(agent);
+                }
+                let stored = got_role.unwrap_or(role);
+                self.agent_roles.insert(agent_id, stored);
+            }
+            Err(err) => self.surface_workspace_error(err),
+        }
+    }
+
+    pub fn load_workspace_guides(&mut self) {
+        if !self.workspace_host_ok() {
+            if self.can_rpc() {
+                self.workspace_status = Some(WORKSPACE_UNAVAILABLE.into());
+            }
+            return;
+        }
+        let Some(workspace_id) = self.workspace_id.clone() else {
+            self.workspace_guides = None;
+            return;
+        };
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        match session.workspace_guides_get(&workspace_id) {
+            Ok(guides) => {
+                if self.workspace_status.as_deref() == Some(WORKSPACE_UNAVAILABLE) {
+                    self.workspace_status = None;
+                }
+                if !self.settings_guide_loaded {
+                    if let Some(global) = guides.global_guide.as_ref() {
+                        self.settings_guide_path = global.path.clone();
+                        self.settings_guide_draft = global.content.clone();
+                        self.settings_guide_truncated = global.truncated;
+                    }
+                }
+                self.workspace_guides = Some(guides);
+            }
+            Err(err) => self.surface_workspace_error(err),
+        }
+    }
+
+    pub fn load_presets(&mut self) {
+        if !self.workspace_host_ok() {
+            self.presets = workspace_ux::builtin_presets();
+            return;
+        }
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        match session.preset_list() {
+            Ok(items) if !items.is_empty() => self.presets = items,
+            Ok(_) => self.presets = workspace_ux::builtin_presets(),
+            Err(err) => {
+                self.presets = workspace_ux::builtin_presets();
+                if err.is_workspace_unsupported() {
+                    self.surface_workspace_error(err);
+                }
+            }
+        }
+    }
+
+    pub fn ensure_settings_guide(&mut self) {
+        if self.settings_guide_loaded {
+            return;
+        }
+        self.load_settings_guide();
+    }
+
+    pub fn load_settings_guide(&mut self) {
+        if !self.workspace_host_ok() {
+            if self.can_rpc() {
+                self.workspace_status = Some(WORKSPACE_UNAVAILABLE.into());
+            }
+            return;
+        }
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        match session.settings_guide_get() {
+            Ok(guide) => self.apply_settings_guide(guide),
+            Err(err) => self.surface_workspace_error(err),
+        }
+    }
+
+    fn apply_settings_guide(&mut self, guide: SettingsGuide) {
+        self.settings_guide_path = guide.path;
+        self.settings_guide_draft = guide.content;
+        self.settings_guide_truncated = guide.truncated;
+        self.settings_guide_loaded = true;
+    }
+
+    pub fn save_settings_guide(&mut self) {
+        if !self.workspace_host_ok() {
+            self.surface_workspace_unavailable();
+            return;
+        }
+        if !workspace_ux::guide_content_fits(&self.settings_guide_draft) {
+            self.toast = Some(GUIDE_TOO_LONG.into());
+            return;
+        }
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        match session.settings_guide_set(&self.settings_guide_draft) {
+            Ok(guide) => self.apply_settings_guide(guide),
+            Err(err) => self.surface_workspace_error(err),
         }
     }
 }
@@ -6433,6 +6743,293 @@ mod tests {
         let _ = state.terminal_host_ok();
         let _ = state.artifacts_host_ok();
         let _ = state.a2a_host_ok();
+        assert_eq!(state.agents.len(), 1);
+        assert_eq!(state.selected_agent_id.as_deref(), Some("ag-1"));
+    }
+
+    fn workspace_accepted_map() -> serde_json::Map<String, Value> {
+        let mut accepted = serde_json::Map::new();
+        for name in crate::rpc::WORKSPACE_METHODS {
+            accepted.insert(name.to_string(), json!({"major": 1, "minor": 7}));
+        }
+        accepted
+    }
+
+    fn session_without_1_7() -> crate::rpc::Session {
+        use std::collections::BTreeMap;
+        let mut rejected = BTreeMap::new();
+        for name in crate::rpc::WORKSPACE_METHODS {
+            rejected.insert((*name).to_string(), "unsupported".into());
+        }
+        crate::rpc::Session {
+            host_id: "host-a".into(),
+            host_version: "0.1.0".into(),
+            session_token: "tok-1".into(),
+            rpc_url: "http://127.0.0.1:1".into(),
+            ws_url: None,
+            accepted: BTreeMap::new(),
+            rejected,
+        }
+    }
+
+    fn start_workspace_state_mock() -> SliceMock {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(Mutex::new(Vec::new()));
+        let hits_t = hits.clone();
+        thread::spawn(move || {
+            for stream in listener.incoming().take(48) {
+                let Ok(mut stream) = stream else { break };
+                let (headers, body) = read_http_request(&mut stream);
+                let parsed: Value = serde_json::from_slice(&body).unwrap_or(json!({}));
+                let method = if headers.starts_with("GET /health") {
+                    "GET /health".to_string()
+                } else {
+                    parsed
+                        .get("method")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("other")
+                        .to_string()
+                };
+                let params = parsed.get("params").cloned().unwrap_or(json!({}));
+                hits_t.lock().unwrap().push(RpcHit {
+                    method: method.clone(),
+                    params: params.clone(),
+                });
+                let body = match method.as_str() {
+                    "GET /health" => json!({"ok": true, "hostId": "host-a"}).to_string(),
+                    "handshake" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "hostId": "host-a",
+                            "hostVersion": "0.1.0",
+                            "sessionToken": "tok-1",
+                            "accepted": workspace_accepted_map(),
+                            "rejected": {}
+                        }
+                    })
+                    .to_string(),
+                    "host.ping" => json!({
+                        "id": "echo",
+                        "ok": { "hostId": "host-a", "now": "2026-08-19T11:00:00Z" }
+                    })
+                    .to_string(),
+                    "workspace.guides.get" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "agentsMd": {
+                                "path": "/ws/AGENTS.md",
+                                "content": "from rpc",
+                                "truncated": false
+                            },
+                            "workspaceGuide": null,
+                            "globalGuide": null
+                        }
+                    })
+                    .to_string(),
+                    "preset.list" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "items": [
+                                { "id": "planning", "title": "Planning", "defaultRole": "planner" },
+                                { "id": "review", "title": "Review", "defaultRole": "reviewer" },
+                                { "id": "debug", "title": "Debug", "defaultRole": "debugger" },
+                                { "id": "document", "title": "Document", "defaultRole": "documenter" }
+                            ]
+                        }
+                    })
+                    .to_string(),
+                    "agent.update" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "id": params.get("agentId").cloned().unwrap_or(json!("ag-1")),
+                            "taskId": "task-1",
+                            "hostId": "host-a",
+                            "parentId": null,
+                            "interface": "chat",
+                            "provider": "cli.generic",
+                            "status": "idle",
+                            "runLocation": "local",
+                            "createdAt": "2026-08-19T11:00:00Z",
+                            "role": params.get("role").cloned().unwrap_or(json!("coder"))
+                        }
+                    })
+                    .to_string(),
+                    "task.create" => {
+                        let title = params.get("title").and_then(|v| v.as_str()).unwrap_or("");
+                        json!({
+                            "id": "echo",
+                            "ok": {
+                                "id": "task-new",
+                                "title": title,
+                                "status": "open",
+                                "createdAt": "2026-08-19T11:00:00Z",
+                                "updatedAt": "2026-08-19T11:00:00Z",
+                                "workspaceIds": ["ws-1"],
+                                "preset": params.get("preset").cloned().unwrap_or(Value::Null)
+                            }
+                        })
+                        .to_string()
+                    }
+                    "workspace.list" => json!({
+                        "id": "echo",
+                        "ok": { "items": [] }
+                    })
+                    .to_string(),
+                    "task.list" => json!({
+                        "id": "echo",
+                        "ok": { "items": [] }
+                    })
+                    .to_string(),
+                    _ => json!({
+                        "id": "echo",
+                        "error": { "code": "unsupported_method", "message": "no" }
+                    })
+                    .to_string(),
+                };
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(resp.as_bytes());
+            }
+        });
+        SliceMock {
+            origin: format!("http://{addr}"),
+            hits,
+        }
+    }
+
+    #[test]
+    fn guide_load_uses_guides_get_not_fs_walk() {
+        let mock = start_workspace_state_mock();
+        let session = connect(&pid(&mock.origin)).expect("online");
+        let mut state = online_state(session);
+        state.load_workspace_guides();
+        assert!(state.workspace_guides.is_some());
+        assert_eq!(
+            workspace_ux::agents_md_chip(state.workspace_guides.as_ref()),
+            workspace_ux::AGENTS_MD_PRESENT
+        );
+        let hits = mock.hits.lock().unwrap().clone();
+        assert!(hits.iter().any(|h| h.method == "workspace.guides.get"));
+        assert!(hits.iter().all(|h| h.method != "files.tree"));
+        assert!(hits.iter().all(|h| h.method != "files.read"));
+        let get = hits
+            .iter()
+            .find(|h| h.method == "workspace.guides.get")
+            .expect("guides");
+        assert_eq!(get.params["workspaceId"], "ws-1");
+        assert!(get.params.get("path").is_none());
+    }
+
+    #[test]
+    fn role_set_sends_agent_update() {
+        let mock = start_workspace_state_mock();
+        let session = connect(&pid(&mock.origin)).expect("online");
+        let mut state = online_state(session);
+        state.selected_agent_id = Some("ag-1".into());
+        state.agents.push(AgentStub {
+            id: "ag-1".into(),
+            task_id: "task-1".into(),
+            parent_id: None,
+            provider: "cli.generic".into(),
+            status: AgentStatus::Idle,
+            interface: "chat".into(),
+        });
+        state.set_picker_role("reviewer".into());
+        assert_eq!(
+            state.agent_roles.get("ag-1").map(String::as_str),
+            Some("reviewer")
+        );
+        let hit = mock
+            .hits
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|h| h.method == "agent.update")
+            .cloned()
+            .expect("agent.update");
+        assert_eq!(hit.params["agentId"], "ag-1");
+        assert_eq!(hit.params["role"], "reviewer");
+    }
+
+    #[test]
+    fn preset_set_sends_one_of_four_names() {
+        let mock = start_workspace_state_mock();
+        let session = connect(&pid(&mock.origin)).expect("online");
+        let mut state = online_state(session);
+        state.workspaces.push(rt_protocol::Workspace {
+            id: "ws-1".into(),
+            host_id: "host-a".into(),
+            path: "/tmp/proj".into(),
+            name: "proj".into(),
+            created_at: "2026-08-19T11:00:00Z".into(),
+        });
+        state.new_task_title = "Plan login".into();
+        state.set_new_task_preset(Some("planning".into()));
+        assert!(state.can_create_task());
+        state.create_task();
+        let hit = mock
+            .hits
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|h| h.method == "task.create")
+            .cloned()
+            .expect("task.create");
+        let preset = hit.params["preset"].as_str().expect("preset");
+        assert!(
+            ["planning", "review", "debug", "document"].contains(&preset),
+            "{preset}"
+        );
+        assert_eq!(preset, "planning");
+    }
+
+    #[test]
+    fn old_host_workspace_toasts_and_does_not_panic() {
+        let mut state = AppState::new();
+        state.pending_discover = false;
+        state.demo = false;
+        state.host_status = HostStatus::Online;
+        state.session = Some(session_without_1_7());
+        state.workspace_id = Some("ws-1".into());
+        state.selected_task_id = Some("task-1".into());
+        state.selected_agent_id = Some("ag-1".into());
+        state.agents.push(AgentStub {
+            id: "ag-1".into(),
+            task_id: "task-1".into(),
+            parent_id: None,
+            provider: "cli.generic".into(),
+            status: AgentStatus::Idle,
+            interface: "chat".into(),
+        });
+        state.messages.push(ChatMessage {
+            id: "keep-1".into(),
+            role: "user".into(),
+            content: "stay".into(),
+        });
+        state.load_workspace_guides();
+        assert_eq!(
+            state.workspace_status.as_deref(),
+            Some(WORKSPACE_UNAVAILABLE)
+        );
+        state.set_picker_role("planner".into());
+        assert_eq!(state.toast.as_deref(), Some(WORKSPACE_UNAVAILABLE));
+        assert_eq!(
+            WORKSPACE_UNAVAILABLE,
+            "воркспейс-гайд недоступен: host без 1.7"
+        );
+        state.save_settings_guide();
+        assert_eq!(state.toast.as_deref(), Some(WORKSPACE_UNAVAILABLE));
+        let _ = state.composer_enabled();
+        let _ = state.write_ready();
+        let _ = state.terminal_host_ok();
+        let _ = state.artifacts_host_ok();
+        let _ = state.a2a_host_ok();
+        let _ = state.model_ux_host_ok();
+        assert_eq!(state.messages.len(), 1);
+        assert_eq!(state.messages[0].id, "keep-1");
         assert_eq!(state.agents.len(), 1);
         assert_eq!(state.selected_agent_id.as_deref(), Some("ag-1"));
     }

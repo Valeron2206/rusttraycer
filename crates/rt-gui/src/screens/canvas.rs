@@ -29,6 +29,10 @@ use crate::terminal::{
     NEW_TERMINAL, NO_LIVE_SHELL, OPEN_PTY, PTY_HINT, PTY_INPUT_HINT, PTY_SUBMIT, SHELL_HINT,
     TERMINALS_PANE, TERMINAL_DISABLED_CAPS, TERMINAL_TAB, TERMINAL_UNAVAILABLE,
 };
+use crate::workspace_ux::{
+    self, agents_md_chip, guide_preview, role_label_ru, workspace_guide_chip, GUIDE_PANE,
+    ROLE_CHOICES, ROLE_LABEL, WORKSPACE_UNAVAILABLE,
+};
 
 pub fn show(ctx: &egui::Context, state: &mut AppState) {
     if state.selected_task_id.is_none() && state.open_task_ids.is_empty() {
@@ -48,27 +52,36 @@ pub fn show(ctx: &egui::Context, state: &mut AppState) {
             ui.horizontal_centered(|ui| {
                 let title = state.selected_task_title().unwrap_or("Task").to_string();
                 ui.strong(title);
+                if let Some(preset) = state.selected_task_preset() {
+                    ui.weak(workspace_ux::preset_label_ru(preset));
+                }
                 ui.separator();
                 ui.weak(format!("host {}", state.host_id_prefix()));
                 ui.separator();
+                ui.weak(agents_md_chip(state.workspace_guides.as_ref()));
+                ui.weak(workspace_guide_chip(state.workspace_guides.as_ref()));
+                ui.separator();
                 match state.selected_agent() {
                     Some(agent) => {
+                        let role = workspace_ux::role_label_ru(state.selected_agent_role());
                         let model = state
                             .selected_agent_params()
                             .and_then(|p| p.model.clone())
                             .filter(|m| !m.is_empty());
                         if let Some(model) = model {
                             ui.label(format!(
-                                "агент: {} · {} · {}",
+                                "агент: {} · {} · {} · {}",
                                 agent.status.label_ru(),
                                 agent.provider,
+                                role,
                                 model
                             ));
                         } else {
                             ui.label(format!(
-                                "агент: {} · {}",
+                                "агент: {} · {} · {}",
                                 agent.status.label_ru(),
-                                agent.provider
+                                agent.provider,
+                                role
                             ));
                         }
                     }
@@ -320,7 +333,11 @@ fn show_approval_card(ctx: &egui::Context, state: &mut AppState) {
 fn show_agents(ui: &mut egui::Ui, state: &mut AppState) {
     ui.heading("Агенты");
     ui.add_space(4.0);
+    show_workspace_guides(ui, state);
+    ui.add_space(6.0);
     show_provider_picker(ui, state);
+    ui.add_space(6.0);
+    show_role_picker(ui, state);
     ui.add_space(6.0);
     show_model_ux(ui, state);
     ui.add_space(6.0);
@@ -566,6 +583,53 @@ fn show_loop(ui: &mut egui::Ui, state: &mut AppState) {
         if let Some(reason) = &loop_state.reason {
             ui.weak(reason);
         }
+    }
+}
+
+fn show_workspace_guides(ui: &mut egui::Ui, state: &mut AppState) {
+    ui.label(GUIDE_PANE);
+    ui.horizontal(|ui| {
+        ui.weak(agents_md_chip(state.workspace_guides.as_ref()));
+        ui.weak(workspace_guide_chip(state.workspace_guides.as_ref()));
+    });
+    if state.can_rpc() && !state.workspace_host_ok() {
+        ui.weak(WORKSPACE_UNAVAILABLE);
+    }
+    if let Some(status) = state.workspace_status.clone() {
+        if status != WORKSPACE_UNAVAILABLE {
+            ui.weak(status);
+        }
+    }
+    if let Some(content) = guide_preview(
+        state
+            .workspace_guides
+            .as_ref()
+            .and_then(|g| g.agents_md.as_ref()),
+    ) {
+        if !content.is_empty() {
+            ui.add(egui::Label::new(content).wrap());
+        }
+    }
+}
+
+fn show_role_picker(ui: &mut egui::Ui, state: &mut AppState) {
+    let host_ok = state.workspace_host_ok();
+    ui.add_enabled_ui(host_ok, |ui| {
+        ui.label(ROLE_LABEL);
+        let mut role = state.picker_role.clone();
+        egui::ComboBox::from_id_salt("agent_role")
+            .selected_text(role_label_ru(&role))
+            .show_ui(ui, |ui| {
+                for choice in ROLE_CHOICES {
+                    ui.selectable_value(&mut role, (*choice).to_string(), role_label_ru(choice));
+                }
+            });
+        if role != state.picker_role {
+            state.set_picker_role(role);
+        }
+    });
+    if state.can_rpc() && !host_ok {
+        ui.weak(WORKSPACE_UNAVAILABLE);
     }
 }
 
