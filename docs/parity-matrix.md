@@ -64,11 +64,11 @@ Sources (live, 2026-08-19):
 | C49 | Named model profiles (harness+params) | directive E7; ADR-0007 | missing | E7 | Ф5 | 8 |
 | C50 | Remembered model / effort / fast per harness | changelog | missing | E7 | Ф5 | 8 |
 | C51 | Multi-account per provider (switch per conversation) | changelog; [e7-model-ux-v2](e7-model-ux-v2.md) | missing | E7 | later | 8 |
-| C52 | Agent roles | changelog; CLI; [e6-a2a-v2](e6-a2a-v2.md); [e7-model-ux-v2](e7-model-ux-v2.md) | missing | E8 | Ф5 | 4 |
+| C52 | Agent roles | changelog; CLI; [e8-workspace-v2](e8-workspace-v2.md) | missing | E8 | Ф5 | 4 |
 | C53 | Mid-turn steer (⌘Enter) | changelog; 1.1.9; [e7-model-ux-v2](e7-model-ux-v2.md) | missing | E7 | later | — |
-| C54 | Read workspace `AGENTS.md` | brief №14; extension page (Desktop uses settings) | missing | E8 | Ф5 | 14 |
-| C55 | Agent-selection guide (global + optional `.traycer/…`) | settings/agents; ADR-0004 | missing | E8 | Ф5 | 14 |
-| C56 | Local workflow presets planning/review/debug/document | directive E8; ADR-0004 | missing | E8 | Ф5 | 14, 16 |
+| C54 | Read workspace `AGENTS.md` | brief №14; [e8-workspace-v2](e8-workspace-v2.md) | missing | E8 | Ф5 | 14 |
+| C55 | Agent-selection guide (global + optional `.traycer/…`) | settings/agents; ADR-0004; [e8-workspace-v2](e8-workspace-v2.md) | missing | E8 | Ф5 | 14 |
+| C56 | Local workflow presets planning/review/debug/document | directive E8; ADR-0004; [e8-workspace-v2](e8-workspace-v2.md) | missing | E8 | Ф5 | 14, 16 |
 | C57 | Export/import durable entities (clone-not-migrate) | directive E9; ADR-0003 | missing | E9 | Ф6 | 2, 3 |
 | C58 | Self-hosted `rt-sync` | directive E9; ADR-0003 | missing | E9 | Ф6 | 2 |
 | C59 | `GET /metrics` (loopback only) | directive E10; ADR-0008 (not vendor) | missing | E10 | Ф6 | — |
@@ -108,7 +108,7 @@ Sources (live, 2026-08-19):
 | 11 | Three version planes | handshake tests (C14). New fields **minor bump** (ADR-0007). |
 | 12 | No CRDT unless live collab | **ADR-0003** (never in v2). |
 | 13 | Terminal resume via session id | **needs test in E4** (C35, C36). |
-| 14 | AGENTS.md + selection guide | **needs test in E8**; shape **ADR-0004**. |
+| 14 | AGENTS.md + selection guide | shape **[e8-workspace-v2](e8-workspace-v2.md)** / ADR-0004; **needs test** after code STAR. |
 | 15 | Permission ladder every edit/exec turn | **needs test in E2** (C23–C25). C26 oos. |
 | 16 | We say Task, not epic | **ADR-0004**; no Epic Mode. |
 
