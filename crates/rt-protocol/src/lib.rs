@@ -118,6 +118,9 @@ pub const METHOD_ACCOUNT_LIST: &str = "account.list";
 pub const METHOD_ACCOUNT_CREATE: &str = "account.create";
 pub const METHOD_AGENT_STEER: &str = "agent.steer";
 pub const METHOD_PR_GET: &str = "pr.get";
+pub const METHOD_STASH_LIST: &str = "stash.list";
+pub const METHOD_STASH_ADD: &str = "stash.add";
+pub const METHOD_STASH_DELETE: &str = "stash.delete";
 
 pub const EXPORT_KIND: &str = "rusttraycer.export";
 pub const EXPORT_VERSION: u32 = 1;
@@ -200,6 +203,9 @@ pub const TRADABLE_METHODS: &[&str] = &[
     METHOD_ACCOUNT_CREATE,
     METHOD_AGENT_STEER,
     METHOD_PR_GET,
+    METHOD_STASH_LIST,
+    METHOD_STASH_ADD,
+    METHOD_STASH_DELETE,
 ];
 
 pub fn host_method_version() -> MethodVersion {
@@ -216,7 +222,8 @@ pub fn host_method_version() -> MethodVersion {
 /// workspace/guides/preset/`agent.update` methods are 1.7;
 /// `sync.export`/`sync.import` are 1.8; `artifact.export`, `search.query`,
 /// `worktree.gc`, `agent.create`, `shell.create`, `account.list`,
-/// `account.create`, `agent.steer`, and `pr.get` are 1.9; all other
+/// `account.create`, `agent.steer`, `pr.get`, and `stash.list`/`stash.add`/
+/// `stash.delete` are 1.9; all other
 /// tradable methods stay 1.0 (`HOST_METHOD_MINOR` is not bumped).
 /// Unknown names return `None`.
 pub fn method_version(name: &str) -> Option<MethodVersion> {
@@ -250,7 +257,10 @@ pub fn method_version(name: &str) -> Option<MethodVersion> {
         | METHOD_ACCOUNT_LIST
         | METHOD_ACCOUNT_CREATE
         | METHOD_AGENT_STEER
-        | METHOD_PR_GET => Some(MethodVersion { major: 1, minor: 9 }),
+        | METHOD_PR_GET
+        | METHOD_STASH_LIST
+        | METHOD_STASH_ADD
+        | METHOD_STASH_DELETE => Some(MethodVersion { major: 1, minor: 9 }),
         METHOD_A2A_TRANSCRIPT
         | METHOD_A2A_DELIVER
         | METHOD_LOOP_START
@@ -1278,6 +1288,42 @@ pub struct PrGetOk {
     pub diff: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StashItem {
+    pub id: String,
+    pub body: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_path: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StashListOk {
+    pub items: Vec<StashItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StashAddParams {
+    pub body: String,
+    #[serde(default)]
+    pub image_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StashDeleteParams {
+    pub stash_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StashDeleteOk {
+    pub deleted: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1415,7 +1461,7 @@ mod tests {
         assert_eq!(error_codes::CONFLICT, "conflict");
         assert_eq!(error_codes::NOT_SUPPORTED, "not_supported");
         assert_eq!(error_codes::AUTH_REQUIRED, "auth_required");
-        assert_eq!(TRADABLE_METHODS.len(), 75);
+        assert_eq!(TRADABLE_METHODS.len(), 78);
         assert!(TRADABLE_METHODS.contains(&METHOD_POLICY_GET));
         assert!(TRADABLE_METHODS.contains(&METHOD_POLICY_SET));
         assert!(TRADABLE_METHODS.contains(&METHOD_APPROVAL_RESPOND));
@@ -1474,6 +1520,22 @@ mod tests {
             Some(MethodVersion { major: 1, minor: 9 })
         );
         assert!(TRADABLE_METHODS.contains(&METHOD_PR_GET));
+        assert!(TRADABLE_METHODS.contains(&METHOD_STASH_LIST));
+        assert!(TRADABLE_METHODS.contains(&METHOD_STASH_ADD));
+        assert!(TRADABLE_METHODS.contains(&METHOD_STASH_DELETE));
+        assert!(!TRADABLE_METHODS.iter().any(|m| m.starts_with("hooks.")));
+        assert_eq!(
+            method_version(METHOD_STASH_LIST),
+            Some(MethodVersion { major: 1, minor: 9 })
+        );
+        assert_eq!(
+            method_version(METHOD_STASH_ADD),
+            Some(MethodVersion { major: 1, minor: 9 })
+        );
+        assert_eq!(
+            method_version(METHOD_STASH_DELETE),
+            Some(MethodVersion { major: 1, minor: 9 })
+        );
         assert_eq!(
             method_version(METHOD_AGENT_SWITCH),
             Some(MethodVersion { major: 1, minor: 6 })
@@ -2206,7 +2268,7 @@ mod tests {
         );
         assert!(TRADABLE_METHODS.contains(&METHOD_AGENT_SWITCH));
         assert!(TRADABLE_METHODS.contains(&METHOD_PREFS_GET));
-        assert_eq!(TRADABLE_METHODS.len(), 75);
+        assert_eq!(TRADABLE_METHODS.len(), 78);
 
         let sw: AgentSwitchParams = serde_json::from_str(
             r#"{"agentId":"a1","provider":"cli.codex","model":"o3","effort":"high","fast":false}"#,
@@ -2313,7 +2375,7 @@ mod tests {
             method_version(METHOD_HOST_PING),
             Some(MethodVersion { major: 1, minor: 0 })
         );
-        assert_eq!(TRADABLE_METHODS.len(), 75);
+        assert_eq!(TRADABLE_METHODS.len(), 78);
         assert!(TRADABLE_METHODS.contains(&METHOD_WORKSPACE_GUIDES_GET));
         assert!(TRADABLE_METHODS.contains(&METHOD_AGENT_UPDATE));
         assert!(!TRADABLE_METHODS
@@ -2448,7 +2510,7 @@ mod tests {
             Some(MethodVersion { major: 1, minor: 0 })
         );
         assert_eq!(host_method_version(), MethodVersion { major: 1, minor: 0 });
-        assert_eq!(TRADABLE_METHODS.len(), 75);
+        assert_eq!(TRADABLE_METHODS.len(), 78);
         assert!(TRADABLE_METHODS.contains(&METHOD_SYNC_EXPORT));
         assert!(TRADABLE_METHODS.contains(&METHOD_SYNC_IMPORT));
         assert_eq!(EXPORT_KIND, "rusttraycer.export");
@@ -2748,5 +2810,77 @@ mod tests {
             method_version(METHOD_PR_GET),
             Some(MethodVersion { major: 1, minor: 9 })
         );
+    }
+
+    #[test]
+    fn stash_types_camel_case_and_versions() {
+        assert_eq!(
+            method_version(METHOD_STASH_LIST),
+            Some(MethodVersion { major: 1, minor: 9 })
+        );
+        assert_eq!(
+            method_version(METHOD_STASH_ADD),
+            Some(MethodVersion { major: 1, minor: 9 })
+        );
+        assert_eq!(
+            method_version(METHOD_STASH_DELETE),
+            Some(MethodVersion { major: 1, minor: 9 })
+        );
+        assert!(TRADABLE_METHODS.contains(&METHOD_STASH_LIST));
+        assert!(TRADABLE_METHODS.contains(&METHOD_STASH_ADD));
+        assert!(TRADABLE_METHODS.contains(&METHOD_STASH_DELETE));
+        assert!(!TRADABLE_METHODS.iter().any(|m| m.starts_with("hooks.")));
+
+        let add: StashAddParams =
+            serde_json::from_str(r#"{"body":"hello","imagePath":"/tmp/shot.png"}"#).unwrap();
+        assert_eq!(add.body, "hello");
+        assert_eq!(add.image_path.as_deref(), Some("/tmp/shot.png"));
+        let av = serde_json::to_value(&add).unwrap();
+        assert_eq!(av["body"], "hello");
+        assert_eq!(av["imagePath"], "/tmp/shot.png");
+        assert!(av.get("image_path").is_none());
+
+        let bare: StashAddParams = serde_json::from_str(r#"{"body":"only"}"#).unwrap();
+        assert_eq!(bare.body, "only");
+        assert!(bare.image_path.is_none());
+
+        let del: StashDeleteParams = serde_json::from_str(r#"{"stashId":"s1"}"#).unwrap();
+        assert_eq!(del.stash_id, "s1");
+        let dv = serde_json::to_value(&del).unwrap();
+        assert_eq!(dv["stashId"], "s1");
+        assert!(dv.get("stash_id").is_none());
+
+        let item = StashItem {
+            id: "s1".into(),
+            body: "hello".into(),
+            image_path: Some("/tmp/shot.png".into()),
+            created_at: "2026-08-19T00:00:00.000Z".into(),
+        };
+        let v = serde_json::to_value(&item).unwrap();
+        assert_eq!(v["id"], "s1");
+        assert_eq!(v["body"], "hello");
+        assert_eq!(v["imagePath"], "/tmp/shot.png");
+        assert_eq!(v["createdAt"], "2026-08-19T00:00:00.000Z");
+        assert!(v.get("image_path").is_none());
+        assert!(v.get("created_at").is_none());
+        assert!(v.get("token").is_none());
+        assert!(v.get("pat").is_none());
+        let item2: StashItem = serde_json::from_value(v).unwrap();
+        assert_eq!(item2.image_path.as_deref(), Some("/tmp/shot.png"));
+
+        let plain = StashItem {
+            id: "s2".into(),
+            body: "plain".into(),
+            image_path: None,
+            created_at: "t".into(),
+        };
+        let v = serde_json::to_value(&plain).unwrap();
+        assert!(v.get("imagePath").is_none(), "{v}");
+        let list = StashListOk {
+            items: vec![item, plain],
+        };
+        let v = serde_json::to_value(&list).unwrap();
+        assert_eq!(v["items"][0]["imagePath"], "/tmp/shot.png");
+        assert_eq!(v["items"][1]["body"], "plain");
     }
 }

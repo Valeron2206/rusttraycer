@@ -11,7 +11,7 @@ use rt_protocol::{
     PolicyScope, PolicySetParams, PolicySource, PolicyView, PrefsGetOk, PrefsItem, PresetListOk,
     Profile, ProfileCreateParams, ProfileDeleteParams, ProfileGetParams, ProfileListOk,
     ProfileUpdateParams, ProviderAccount, SearchItem, SearchKind, SearchQueryOk, SearchQueryParams,
-    SettingsGuide, WorkspaceGuidesOk,
+    SettingsGuide, StashDeleteOk, StashItem, StashListOk, WorkspaceGuidesOk,
 };
 use rt_runtime::{AgentBackend, TurnRequest, WireMessage, WireRole};
 use rt_storage::{
@@ -32,6 +32,15 @@ use crate::{HostError, Result};
 
 const MAX_CONTENT: usize = 1024 * 1024;
 const MAX_TITLE_CHARS: usize = 200;
+
+fn stash_item_from_row(row: rt_storage::PromptStash) -> StashItem {
+    StashItem {
+        id: row.id,
+        body: row.body,
+        image_path: row.image_path,
+        created_at: row.created_at,
+    }
+}
 
 #[derive(Clone)]
 struct Session {
@@ -759,6 +768,25 @@ rusttraycer_tasks{{status="archived"}} {archived}
             })
             .collect();
         Ok(AccountListOk { items })
+    }
+
+    pub fn stash_list(&self) -> Result<StashListOk> {
+        let items = self
+            .store
+            .stash_list()?
+            .into_iter()
+            .map(stash_item_from_row)
+            .collect();
+        Ok(StashListOk { items })
+    }
+
+    pub fn stash_add(&self, body: &str, image_path: Option<&str>) -> Result<StashItem> {
+        Ok(stash_item_from_row(self.store.stash_add(body, image_path)?))
+    }
+
+    pub fn stash_delete(&self, stash_id: &str) -> Result<StashDeleteOk> {
+        self.store.stash_delete(stash_id)?;
+        Ok(StashDeleteOk { deleted: true })
     }
 
     pub fn agent_steer(&self, agent_id: &str, content: &str) -> Result<AgentSteerOk> {

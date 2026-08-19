@@ -752,6 +752,19 @@ async fn dispatch_method(
                 .map_err(|e| HostError::InvalidParams(e.to_string()))?;
             Ok(serde_json::to_value(svc.pr_get(&p)?)?)
         }
+        "stash.list" => Ok(serde_json::to_value(svc.stash_list()?)?),
+        "stash.add" => {
+            let p: rt_protocol::StashAddParams = serde_json::from_value(params)
+                .map_err(|e| HostError::InvalidParams(e.to_string()))?;
+            Ok(serde_json::to_value(
+                svc.stash_add(&p.body, p.image_path.as_deref())?,
+            )?)
+        }
+        "stash.delete" => {
+            let p: rt_protocol::StashDeleteParams = serde_json::from_value(params)
+                .map_err(|e| HostError::InvalidParams(e.to_string()))?;
+            Ok(serde_json::to_value(svc.stash_delete(&p.stash_id)?)?)
+        }
         other => Err(HostError::UnsupportedMethod(other.to_string())),
     };
     match &result {

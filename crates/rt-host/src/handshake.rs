@@ -1,4 +1,4 @@
-//! Per-method {major,minor} negotiation. Existing methods stay 1.0; policy.* is 1.1; write/git mutate is 1.2; shell/pty are 1.3; artifacts/comments/clear_transcript are 1.4; a2a/loop are 1.5; agent.switch/profile.*/prefs.get are 1.6; workspace.guides/settings.guide/preset.list/agent.update are 1.7; sync.export/import are 1.8; artifact.export/search.query/worktree.gc/agent.create/shell.create/account.list/account.create/agent.steer/pr.get are 1.9.
+//! Per-method {major,minor} negotiation. Existing methods stay 1.0; policy.* is 1.1; write/git mutate is 1.2; shell/pty are 1.3; artifacts/comments/clear_transcript are 1.4; a2a/loop are 1.5; agent.switch/profile.*/prefs.get are 1.6; workspace.guides/settings.guide/preset.list/agent.update are 1.7; sync.export/import are 1.8; artifact.export/search.query/worktree.gc/agent.create/shell.create/account.list/account.create/agent.steer/pr.get/stash.list/stash.add/stash.delete are 1.9.
 
 use std::collections::BTreeMap;
 
@@ -582,5 +582,44 @@ mod tests {
         assert!(rej.is_empty(), "{rej:?}");
         assert!(acc.contains_key("agent.send"));
         assert!(!acc.contains_key("pr.get"));
+    }
+
+    #[test]
+    fn stash_methods_accepted_at_1_9_absent_on_1_8_client() {
+        let mut client = BTreeMap::new();
+        client.insert("stash.list".into(), MethodVersion { major: 1, minor: 9 });
+        client.insert("stash.add".into(), MethodVersion { major: 1, minor: 9 });
+        client.insert("stash.delete".into(), MethodVersion { major: 1, minor: 9 });
+        client.insert("agent.send".into(), MethodVersion { major: 1, minor: 0 });
+        client.insert("sync.export".into(), MethodVersion { major: 1, minor: 8 });
+        let (acc, rej) = negotiate(&client);
+        assert!(rej.is_empty(), "{rej:?}");
+        assert_eq!(acc["stash.list"], MethodVersion { major: 1, minor: 9 });
+        assert_eq!(acc["stash.add"], MethodVersion { major: 1, minor: 9 });
+        assert_eq!(acc["stash.delete"], MethodVersion { major: 1, minor: 9 });
+        assert_eq!(
+            host_methods()["stash.list"],
+            MethodVersion { major: 1, minor: 9 }
+        );
+        assert_eq!(
+            host_methods()["stash.add"],
+            MethodVersion { major: 1, minor: 9 }
+        );
+        assert_eq!(
+            host_methods()["stash.delete"],
+            MethodVersion { major: 1, minor: 9 }
+        );
+        assert!(!host_knows("hooks.list"));
+        assert!(!supported_methods().iter().any(|m| m.starts_with("hooks.")));
+
+        let mut older = BTreeMap::new();
+        older.insert("agent.send".into(), MethodVersion { major: 1, minor: 0 });
+        older.insert("sync.export".into(), MethodVersion { major: 1, minor: 8 });
+        let (acc, rej) = negotiate(&older);
+        assert!(rej.is_empty(), "{rej:?}");
+        assert!(acc.contains_key("agent.send"));
+        assert!(!acc.contains_key("stash.list"));
+        assert!(!acc.contains_key("stash.add"));
+        assert!(!acc.contains_key("stash.delete"));
     }
 }
