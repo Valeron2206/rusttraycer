@@ -850,6 +850,17 @@ impl Store {
         })
     }
 
+    /// True if any stored policy row has yolo enabled (agent or workspace).
+    pub fn policy_any_yolo(&self) -> Result<bool> {
+        let conn = self.lock()?;
+        let found: Option<i64> = conn
+            .query_row("SELECT 1 FROM policies WHERE yolo = 1 LIMIT 1", [], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        Ok(found.is_some())
+    }
+
     pub fn worktree_get_by_agent(&self, agent_id: &str) -> Result<Option<Worktree>> {
         let conn = self.lock()?;
         conn.query_row(
@@ -1728,6 +1739,40 @@ mod tests {
         assert_eq!(ws_row.mode, "deny");
         let got_ws = store.policy_get_for_workspace(&ws.id).unwrap().unwrap();
         assert_eq!(got_ws.id, ws_row.id);
+    }
+
+    #[test]
+    fn policy_any_yolo_empty_then_any_row() {
+        let (_tmp, store) = open_store();
+        let host_id = new_id();
+        store.host_insert_if_absent(&host_id, "h").unwrap();
+        let ws = store.workspace_add("/p", "p").unwrap();
+        let task = store.task_create("t", &ws.id).unwrap();
+        let agent = store
+            .agent_create(&task.id, &host_id, "cli.generic")
+            .unwrap();
+
+        assert!(!store.policy_any_yolo().unwrap());
+        store
+            .policy_upsert(Some(&agent.id), None, "ask", "agent", false)
+            .unwrap();
+        assert!(!store.policy_any_yolo().unwrap());
+        store
+            .policy_upsert(Some(&agent.id), None, "ask", "agent", true)
+            .unwrap();
+        assert!(store.policy_any_yolo().unwrap());
+        store
+            .policy_upsert(None, Some(&ws.id), "ask", "workspace", true)
+            .unwrap();
+        assert!(store.policy_any_yolo().unwrap());
+        store
+            .policy_upsert(Some(&agent.id), None, "ask", "agent", false)
+            .unwrap();
+        assert!(store.policy_any_yolo().unwrap());
+        store
+            .policy_upsert(None, Some(&ws.id), "ask", "workspace", false)
+            .unwrap();
+        assert!(!store.policy_any_yolo().unwrap());
     }
 
     #[test]

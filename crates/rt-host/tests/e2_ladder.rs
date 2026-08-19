@@ -655,6 +655,90 @@ async fn doctor_providers_include_caps() {
 }
 
 #[tokio::test]
+async fn doctor_exposes_yolo_flag() {
+    let dir = tempfile::tempdir().unwrap();
+    let (addr, shutdown, join, _) = rt_host::spawn_test_host(dir.path(), None).await.unwrap();
+    let base = format!("http://{addr}");
+    let client = reqwest::Client::new();
+    let (token, _) = handshake(&client, &base, f1_methods()).await;
+
+    let doctor = rpc(&client, &base, Some(&token), "host.doctor", json!({})).await;
+    assert_eq!(doctor["ok"]["yolo"], false, "{doctor}");
+    let providers = doctor["ok"]["providers"]
+        .as_array()
+        .unwrap_or_else(|| panic!("doctor={doctor}"));
+    assert!(!providers.is_empty(), "{doctor}");
+    for p in providers {
+        assert!(p["caps"].is_object(), "caps missing on {}: {p}", p["id"]);
+    }
+
+    let (_ws_id, _task_id, agent_id) =
+        seed_agent(&client, &base, &token, &dir.path().join("proj")).await;
+    let set = rpc(
+        &client,
+        &base,
+        Some(&token),
+        "policy.set",
+        json!({
+            "agentId": agent_id,
+            "mode": "ask",
+            "scope": "agent",
+            "yolo": true
+        }),
+    )
+    .await;
+    assert_eq!(set["ok"]["yolo"], true);
+
+    let doctor = rpc(&client, &base, Some(&token), "host.doctor", json!({})).await;
+    assert_eq!(doctor["ok"]["yolo"], true, "{doctor}");
+    let providers = doctor["ok"]["providers"]
+        .as_array()
+        .unwrap_or_else(|| panic!("doctor={doctor}"));
+    for p in providers {
+        assert!(p["caps"].is_object(), "caps missing on {}: {p}", p["id"]);
+    }
+    let got = rpc(
+        &client,
+        &base,
+        Some(&token),
+        "agent.get",
+        json!({ "id": agent_id }),
+    )
+    .await;
+    assert_eq!(got["ok"]["yolo"], true);
+
+    let clear = rpc(
+        &client,
+        &base,
+        Some(&token),
+        "policy.set",
+        json!({
+            "agentId": agent_id,
+            "mode": "ask",
+            "scope": "agent",
+            "yolo": false
+        }),
+    )
+    .await;
+    assert_eq!(clear["ok"]["yolo"], false);
+
+    let doctor = rpc(&client, &base, Some(&token), "host.doctor", json!({})).await;
+    assert_eq!(doctor["ok"]["yolo"], false, "{doctor}");
+    let got = rpc(
+        &client,
+        &base,
+        Some(&token),
+        "agent.get",
+        json!({ "id": agent_id }),
+    )
+    .await;
+    assert_eq!(got["ok"]["yolo"], false);
+
+    let _ = shutdown.send(());
+    let _ = join.await;
+}
+
+#[tokio::test]
 async fn send_while_approval_pending_is_agent_busy() {
     let dir = tempfile::tempdir().unwrap();
     let (starts, backends) = counting();
