@@ -187,8 +187,11 @@ pub async fn prepare(config: HostConfig) -> Result<RunningHost> {
     let data_dir = config.data_dir;
     std::fs::create_dir_all(&data_dir)?;
     if config.init_tracing {
-        let _ = init_tracing(&bind::log_path(&data_dir));
+        if let Err(e) = init_tracing(&bind::log_path(&data_dir)) {
+            tracing::error!(error = %e, "init_tracing failed");
+        }
     }
+    tracing::info!(data_dir = %data_dir.display(), "prepare");
 
     let db = bind::db_path(&data_dir);
     let store = Store::open(&db)?;
@@ -259,9 +262,13 @@ pub async fn serve(
     let result = axum::serve(host.listener, app)
         .with_graceful_shutdown(async move {
             shutdown.await;
+            tracing::info!("shutdown start");
             service.going_away();
             service.inflight().shutdown(Duration::from_secs(2)).await;
-            let _ = service.store.checkpoint();
+            if let Err(e) = service.store.checkpoint() {
+                tracing::error!(error = %e, "wal checkpoint failed");
+            }
+            tracing::info!("shutdown done");
         })
         .await;
 
@@ -333,4 +340,66 @@ pub async fn spawn_test_host(
         .await
     });
     Ok((addr, tx, join, host_id))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn serve_shutdown_removes_pid_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = prepare(HostConfig {
+            data_dir: dir.path().to_path_buf(),
+            init_tracing: false,
+            backends: None,
+        })
+        .await
+        .unwrap();
+        let store = host.service.store.clone();
+        let pid_path = bind::pid_path(dir.path());
+        assert!(pid_path.exists(), "prepare writes pid.json");
+
+        serve(host, std::future::ready(())).await.unwrap();
+
+        assert!(
+            !pid_path.exists(),
+            "pid.json must be gone after serve returns"
+        );
+        store
+            .checkpoint()
+            .expect("TRUNCATE checkpoint succeeds on a real store");
+    }
+
+    #[tokio::test]
+    async fn prepare_second_host_is_already_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let _host = prepare(HostConfig {
+            data_dir: dir.path().to_path_buf(),
+            init_tracing: false,
+            backends: None,
+        })
+        .await
+        .unwrap();
+
+        // First prepare wrote live pid = this process. Same-process prepare
+        // treats self as allowed, so rewrite as a live foreign pid.
+        let mut info = bind::read_pid_file(dir.path()).unwrap().unwrap();
+        assert_eq!(info.pid, std::process::id());
+        info.pid = 1; // init, always alive
+        bind::write_pid_file(dir.path(), &info).unwrap();
+
+        let err = match prepare(HostConfig {
+            data_dir: dir.path().to_path_buf(),
+            init_tracing: false,
+            backends: None,
+        })
+        .await
+        {
+            Err(e) => e,
+            Ok(_) => panic!("expected already_running"),
+        };
+        assert_eq!(err.code(), "already_running");
+        assert_eq!(err.exit_code(), 2);
+    }
 }

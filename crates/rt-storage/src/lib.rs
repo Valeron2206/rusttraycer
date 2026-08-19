@@ -315,12 +315,19 @@ impl std::fmt::Debug for Store {
 
 impl Store {
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
-        self.conn
-            .lock()
-            .map_err(|_| StorageError::InvalidParams("store mutex poisoned".into()))
+        self.conn.lock().map_err(|_| {
+            tracing::error!("store mutex poisoned");
+            StorageError::InvalidParams("store mutex poisoned".into())
+        })
     }
 
     pub fn migrate(&self) -> Result<()> {
+        self.migrate_inner().inspect_err(|e| {
+            tracing::error!(error = %e, "migrate failed");
+        })
+    }
+
+    fn migrate_inner(&self) -> Result<()> {
         let conn = self.lock()?;
         let current: Option<String> = conn
             .query_row(
@@ -849,8 +856,14 @@ impl Store {
     }
 
     pub fn checkpoint(&self) -> Result<()> {
+        self.checkpoint_inner().inspect_err(|e| {
+            tracing::error!(error = %e, "checkpoint failed");
+        })
+    }
+
+    fn checkpoint_inner(&self) -> Result<()> {
         let conn = self.lock()?;
-        conn.execute_batch("PRAGMA wal_checkpoint(PASSIVE)")?;
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
         Ok(())
     }
 }
@@ -927,6 +940,12 @@ mod tests {
         let dir = tempdir().unwrap();
         let store = Store::open(dir.path().join("host.db")).unwrap();
         (dir, store)
+    }
+
+    #[test]
+    fn checkpoint_truncate_succeeds() {
+        let (_tmp, store) = open_store();
+        store.checkpoint().unwrap();
     }
 
     #[test]
