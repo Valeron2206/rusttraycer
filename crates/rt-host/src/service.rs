@@ -101,6 +101,7 @@ pub struct DoctorResult {
     pub workspace_count: i64,
     pub task_count: i64,
     pub agent_count: i64,
+    pub yolo: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -278,6 +279,7 @@ impl HostService {
     pub fn doctor(&self) -> Result<DoctorResult> {
         let counts = self.store.counts()?;
         let db_ok = self.store.integrity_ok().unwrap_or(false);
+        let yolo = self.store.policy_any_yolo()?;
         let mut providers: Vec<ProviderInfo> = self
             .backends
             .values()
@@ -304,6 +306,7 @@ impl HostService {
             workspace_count: counts.workspace_count,
             task_count: counts.task_count,
             agent_count: counts.agent_count,
+            yolo,
         })
     }
 
