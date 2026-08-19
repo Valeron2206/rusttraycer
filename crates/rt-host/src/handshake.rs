@@ -1,4 +1,4 @@
-//! Per-method {major,minor} negotiation. Existing methods stay 1.0; policy.* is 1.1; write/git mutate is 1.2.
+//! Per-method {major,minor} negotiation. Existing methods stay 1.0; policy.* is 1.1; write/git mutate is 1.2; agent.create + shell/pty are 1.3.
 
 use std::collections::BTreeMap;
 
@@ -239,6 +239,19 @@ mod tests {
             host_methods()["files.tree"],
             MethodVersion { major: 1, minor: 0 }
         );
+
+        let mut e4 = BTreeMap::new();
+        e4.insert("agent.create".into(), MethodVersion { major: 1, minor: 3 });
+        e4.insert("pty.open".into(), MethodVersion { major: 1, minor: 3 });
+        e4.insert("shell.create".into(), MethodVersion { major: 1, minor: 3 });
+        e4.insert("files.write".into(), MethodVersion { major: 1, minor: 2 });
+        e4.insert("host.ping".into(), MethodVersion { major: 1, minor: 0 });
+        let (acc, rej) = negotiate(&e4);
+        assert!(rej.is_empty(), "{rej:?}");
+        assert_eq!(acc["agent.create"], MethodVersion { major: 1, minor: 3 });
+        assert_eq!(acc["pty.open"], MethodVersion { major: 1, minor: 3 });
+        assert_eq!(acc["files.write"], MethodVersion { major: 1, minor: 2 });
+        assert_eq!(acc["host.ping"], MethodVersion { major: 1, minor: 0 });
 
         let mut older = BTreeMap::new();
         older.insert("files.write".into(), MethodVersion { major: 1, minor: 0 });

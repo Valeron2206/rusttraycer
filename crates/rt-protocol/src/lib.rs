@@ -32,6 +32,8 @@ pub mod error_codes {
     pub const GIT_AUTH: &str = "git_auth";
     pub const GIT_CONFLICT: &str = "git_conflict";
     pub const PATCH_FAILED: &str = "patch_failed";
+    pub const NOT_PTY: &str = "not_pty";
+    pub const PTY_DEAD: &str = "pty_dead";
 }
 
 pub const METHOD_HANDSHAKE: &str = "handshake";
@@ -68,6 +70,13 @@ pub const METHOD_GIT_UNSTAGE: &str = "git.unstage";
 pub const METHOD_GIT_RESTORE: &str = "git.restore";
 pub const METHOD_GIT_COMMIT: &str = "git.commit";
 pub const METHOD_GIT_PUSH: &str = "git.push";
+pub const METHOD_SHELL_CREATE: &str = "shell.create";
+pub const METHOD_SHELL_LIST: &str = "shell.list";
+pub const METHOD_SHELL_CLOSE: &str = "shell.close";
+pub const METHOD_PTY_OPEN: &str = "pty.open";
+pub const METHOD_PTY_WRITE: &str = "pty.write";
+pub const METHOD_PTY_RESIZE: &str = "pty.resize";
+pub const METHOD_PTY_CLOSE: &str = "pty.close";
 
 /// Tradable methods (handshake itself is not included).
 pub const TRADABLE_METHODS: &[&str] = &[
@@ -104,6 +113,13 @@ pub const TRADABLE_METHODS: &[&str] = &[
     METHOD_GIT_RESTORE,
     METHOD_GIT_COMMIT,
     METHOD_GIT_PUSH,
+    METHOD_SHELL_CREATE,
+    METHOD_SHELL_LIST,
+    METHOD_SHELL_CLOSE,
+    METHOD_PTY_OPEN,
+    METHOD_PTY_WRITE,
+    METHOD_PTY_RESIZE,
+    METHOD_PTY_CLOSE,
 ];
 
 pub fn host_method_version() -> MethodVersion {
@@ -114,8 +130,9 @@ pub fn host_method_version() -> MethodVersion {
 }
 
 /// Per-method negotiated version. Policy/approval methods are 1.1; write/git
-/// mutate methods are 1.2; all other tradable methods stay 1.0. Unknown names
-/// return `None`.
+/// mutate methods are 1.2; `agent.create` and shell/pty methods are 1.3; all
+/// other tradable methods stay 1.0 (`HOST_METHOD_MINOR` is not bumped).
+/// Unknown names return `None`.
 pub fn method_version(name: &str) -> Option<MethodVersion> {
     if !TRADABLE_METHODS.iter().any(|m| *m == name) {
         return None;
@@ -127,6 +144,10 @@ pub fn method_version(name: &str) -> Option<MethodVersion> {
         METHOD_FILES_WRITE | METHOD_FILES_PATCH | METHOD_FILES_OPEN | METHOD_GIT_STAGE
         | METHOD_GIT_UNSTAGE | METHOD_GIT_RESTORE | METHOD_GIT_COMMIT | METHOD_GIT_PUSH => {
             Some(MethodVersion { major: 1, minor: 2 })
+        }
+        METHOD_AGENT_CREATE | METHOD_SHELL_CREATE | METHOD_SHELL_LIST | METHOD_SHELL_CLOSE
+        | METHOD_PTY_OPEN | METHOD_PTY_WRITE | METHOD_PTY_RESIZE | METHOD_PTY_CLOSE => {
+            Some(MethodVersion { major: 1, minor: 3 })
         }
         _ => Some(host_method_version()),
     }
@@ -230,6 +251,8 @@ pub struct Agent {
     pub status: String,
     pub run_location: String,
     pub created_at: String,
+    #[serde(default)]
+    pub provider_session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -462,6 +485,29 @@ pub struct GitPushOk {
     pub ok: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PtyOpenOk {
+    pub pty_id: String,
+    pub resumed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShellCreateOk {
+    pub shell_id: String,
+    pub pty_id: String,
+    pub cwd: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShellListItem {
+    pub shell_id: String,
+    pub pty_id: String,
+    pub cwd: String,
+}
+
 /// Wire `caps` object on `host.doctor.providers[]` (e1-canvas-v2).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -606,7 +652,9 @@ mod tests {
         assert_eq!(error_codes::GIT_AUTH, "git_auth");
         assert_eq!(error_codes::GIT_CONFLICT, "git_conflict");
         assert_eq!(error_codes::PATCH_FAILED, "patch_failed");
-        assert_eq!(TRADABLE_METHODS.len(), 33);
+        assert_eq!(error_codes::NOT_PTY, "not_pty");
+        assert_eq!(error_codes::PTY_DEAD, "pty_dead");
+        assert_eq!(TRADABLE_METHODS.len(), 40);
         assert!(TRADABLE_METHODS.contains(&METHOD_POLICY_GET));
         assert!(TRADABLE_METHODS.contains(&METHOD_POLICY_SET));
         assert!(TRADABLE_METHODS.contains(&METHOD_APPROVAL_RESPOND));
@@ -663,8 +711,42 @@ mod tests {
             method_version(METHOD_FILES_TREE),
             Some(MethodVersion { major: 1, minor: 0 })
         );
+        assert_eq!(
+            method_version(METHOD_AGENT_CREATE),
+            Some(MethodVersion { major: 1, minor: 3 })
+        );
+        assert_eq!(
+            method_version(METHOD_SHELL_CREATE),
+            Some(MethodVersion { major: 1, minor: 3 })
+        );
+        assert_eq!(
+            method_version(METHOD_SHELL_LIST),
+            Some(MethodVersion { major: 1, minor: 3 })
+        );
+        assert_eq!(
+            method_version(METHOD_SHELL_CLOSE),
+            Some(MethodVersion { major: 1, minor: 3 })
+        );
+        assert_eq!(
+            method_version(METHOD_PTY_OPEN),
+            Some(MethodVersion { major: 1, minor: 3 })
+        );
+        assert_eq!(
+            method_version(METHOD_PTY_WRITE),
+            Some(MethodVersion { major: 1, minor: 3 })
+        );
+        assert_eq!(
+            method_version(METHOD_PTY_RESIZE),
+            Some(MethodVersion { major: 1, minor: 3 })
+        );
+        assert_eq!(
+            method_version(METHOD_PTY_CLOSE),
+            Some(MethodVersion { major: 1, minor: 3 })
+        );
         assert!(TRADABLE_METHODS.contains(&METHOD_FILES_WRITE));
         assert!(TRADABLE_METHODS.contains(&METHOD_GIT_PUSH));
+        assert!(TRADABLE_METHODS.contains(&METHOD_SHELL_CREATE));
+        assert!(TRADABLE_METHODS.contains(&METHOD_PTY_OPEN));
         assert_eq!(method_version("handshake"), None);
         assert_eq!(method_version("no.such"), None);
     }
@@ -885,6 +967,7 @@ mod tests {
             status: "idle".into(),
             run_location: "local".into(),
             created_at: "c".into(),
+            provider_session_id: None,
         };
         let v = serde_json::to_value(&agent).unwrap();
         assert_eq!(v["taskId"], "t1");
@@ -892,8 +975,11 @@ mod tests {
         assert_eq!(v["parentId"], serde_json::Value::Null);
         assert_eq!(v["runLocation"], "local");
         assert_eq!(v["createdAt"], "c");
+        assert!(v["providerSessionId"].is_null());
+        assert!(v.get("provider_session_id").is_none());
         let agent2: Agent = serde_json::from_value(v).unwrap();
         assert_eq!(agent2.provider, "cli.generic");
+        assert!(agent2.provider_session_id.is_none());
 
         let msg = Message {
             id: "m".into(),
@@ -986,5 +1072,74 @@ mod tests {
         assert_eq!(error_codes::GIT_AUTH, "git_auth");
         assert_eq!(error_codes::GIT_CONFLICT, "git_conflict");
         assert_eq!(error_codes::PATCH_FAILED, "patch_failed");
+    }
+
+    #[test]
+    fn e4_pty_shell_types_and_codes_camel_case() {
+        let open = PtyOpenOk {
+            pty_id: "p1".into(),
+            resumed: true,
+        };
+        let v = serde_json::to_value(&open).unwrap();
+        assert_eq!(v["ptyId"], "p1");
+        assert_eq!(v["resumed"], true);
+        assert!(v.get("pty_id").is_none());
+        let open2: PtyOpenOk = serde_json::from_value(v).unwrap();
+        assert_eq!(open2.pty_id, "p1");
+        assert!(open2.resumed);
+
+        let created = ShellCreateOk {
+            shell_id: "s1".into(),
+            pty_id: "p2".into(),
+            cwd: "/ws".into(),
+        };
+        let v = serde_json::to_value(&created).unwrap();
+        assert_eq!(v["shellId"], "s1");
+        assert_eq!(v["ptyId"], "p2");
+        assert_eq!(v["cwd"], "/ws");
+        assert!(v.get("shell_id").is_none());
+        let created2: ShellCreateOk = serde_json::from_value(v).unwrap();
+        assert_eq!(created2.shell_id, "s1");
+
+        let item = ShellListItem {
+            shell_id: "s1".into(),
+            pty_id: "p2".into(),
+            cwd: "/ws".into(),
+        };
+        let v = serde_json::to_value(&item).unwrap();
+        assert_eq!(v["shellId"], "s1");
+        assert_eq!(v["ptyId"], "p2");
+
+        let agent = Agent {
+            id: "a".into(),
+            task_id: "t1".into(),
+            host_id: "h".into(),
+            parent_id: None,
+            interface: "terminal".into(),
+            provider: "cli.claude".into(),
+            status: "idle".into(),
+            run_location: "local".into(),
+            created_at: "c".into(),
+            provider_session_id: Some("sess-1".into()),
+        };
+        let v = serde_json::to_value(&agent).unwrap();
+        assert_eq!(v["providerSessionId"], "sess-1");
+        assert_eq!(v["interface"], "terminal");
+        assert!(v.get("provider_session_id").is_none());
+
+        assert_eq!(error_codes::NOT_PTY, "not_pty");
+        assert_eq!(error_codes::PTY_DEAD, "pty_dead");
+        assert_eq!(
+            method_version(METHOD_AGENT_CREATE),
+            Some(MethodVersion { major: 1, minor: 3 })
+        );
+        assert_eq!(
+            method_version(METHOD_HOST_PING),
+            Some(MethodVersion { major: 1, minor: 0 })
+        );
+        assert_eq!(
+            method_version(METHOD_FILES_WRITE),
+            Some(MethodVersion { major: 1, minor: 2 })
+        );
     }
 }

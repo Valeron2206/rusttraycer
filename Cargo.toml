@@ -39,3 +39,5 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "registry"] }
 ureq = { version = "2.12", default-features = false }
 uuid = { version = "1", features = ["v7", "std", "serde"] }
+portable-pty = "0.9"
+base64 = "0.22"

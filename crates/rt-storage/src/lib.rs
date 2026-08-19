@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 const MIGRATION_0001: &str = include_str!("../migrations/0001_init.sql");
 const MIGRATION_0002: &str = include_str!("../migrations/0002_worktrees.sql");
 const MIGRATION_0003: &str = include_str!("../migrations/0003_policies.sql");
+const MIGRATION_0004: &str = include_str!("../migrations/0004_terminal.sql");
 
 /// RFC3339 UTC timestamp (millis, Z suffix).
 pub fn now_rfc3339() -> String {
@@ -211,6 +212,7 @@ pub struct Agent {
     pub status: AgentStatus,
     pub run_location: String,
     pub created_at: String,
+    pub provider_session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -360,18 +362,25 @@ impl Store {
             Some("1") => {
                 conn.execute_batch(MIGRATION_0002)?;
                 conn.execute_batch(MIGRATION_0003)?;
+                conn.execute_batch(MIGRATION_0004)?;
                 Ok(())
             }
             Some("2") => {
                 conn.execute_batch(MIGRATION_0003)?;
+                conn.execute_batch(MIGRATION_0004)?;
                 Ok(())
             }
-            Some("3") => Ok(()),
+            Some("3") => {
+                conn.execute_batch(MIGRATION_0004)?;
+                Ok(())
+            }
+            Some("4") => Ok(()),
             Some(other) => Err(StorageError::UnsupportedSchema(other.to_string())),
             None => {
                 conn.execute_batch(MIGRATION_0001)?;
                 conn.execute_batch(MIGRATION_0002)?;
                 conn.execute_batch(MIGRATION_0003)?;
+                conn.execute_batch(MIGRATION_0004)?;
                 Ok(())
             }
         }
@@ -608,7 +617,7 @@ impl Store {
     pub fn agent_list(&self, task_id: &str) -> Result<Vec<Agent>> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
-            "SELECT id, task_id, host_id, parent_id, interface, provider, status, run_location, created_at \
+            "SELECT id, task_id, host_id, parent_id, interface, provider, status, run_location, created_at, provider_session_id \
              FROM agents WHERE task_id = ?1 ORDER BY created_at ASC, id ASC",
         )?;
         let rows = stmt.query_map([task_id], map_agent_tuple)?;
@@ -625,7 +634,22 @@ impl Store {
         host_id: &str,
         provider: impl Into<HarnessId>,
     ) -> Result<Agent> {
+        self.agent_create_interface(task_id, host_id, provider, "chat")
+    }
+
+    pub fn agent_create_interface(
+        &self,
+        task_id: &str,
+        host_id: &str,
+        provider: impl Into<HarnessId>,
+        interface: &str,
+    ) -> Result<Agent> {
         let provider = provider.into();
+        if interface != "chat" && interface != "terminal" {
+            return Err(StorageError::InvalidParams(format!(
+                "interface must be chat|terminal, got {interface}"
+            )));
+        }
         if self.task_get(task_id)?.is_none() {
             return Err(StorageError::NotFound);
         }
@@ -634,9 +658,9 @@ impl Store {
         {
             let conn = self.lock()?;
             conn.execute(
-                "INSERT INTO agents (id, task_id, host_id, parent_id, interface, provider, status, run_location, created_at) \
-                 VALUES (?1, ?2, ?3, NULL, 'chat', ?4, 'idle', 'local', ?5)",
-                params![id, task_id, host_id, provider.as_str(), created_at],
+                "INSERT INTO agents (id, task_id, host_id, parent_id, interface, provider, status, run_location, created_at, provider_session_id) \
+                 VALUES (?1, ?2, ?3, NULL, ?4, ?5, 'idle', 'local', ?6, NULL)",
+                params![id, task_id, host_id, interface, provider.as_str(), created_at],
             )?;
         }
         Ok(Agent {
@@ -644,11 +668,12 @@ impl Store {
             task_id: task_id.to_string(),
             host_id: host_id.to_string(),
             parent_id: None,
-            interface: "chat".into(),
+            interface: interface.to_string(),
             provider,
             status: AgentStatus::Idle,
             run_location: "local".into(),
             created_at,
+            provider_session_id: None,
         })
     }
 
@@ -656,7 +681,7 @@ impl Store {
         let conn = self.lock()?;
         let row = conn
             .query_row(
-                "SELECT id, task_id, host_id, parent_id, interface, provider, status, run_location, created_at \
+                "SELECT id, task_id, host_id, parent_id, interface, provider, status, run_location, created_at, provider_session_id \
                  FROM agents WHERE id = ?1",
                 [id],
                 map_agent_tuple,
@@ -673,6 +698,31 @@ impl Store {
         let n = conn.execute(
             "UPDATE agents SET status = ?1 WHERE id = ?2",
             params![status.as_str(), id],
+        )?;
+        if n == 0 {
+            return Err(StorageError::NotFound);
+        }
+        Ok(())
+    }
+
+    /// Persist a vendor session id. Allowed only when `interface=terminal`.
+    /// Chat agents must keep `provider_session_id` NULL (0004 CHECK).
+    pub fn agent_set_provider_session_id(&self, agent_id: &str, session_id: &str) -> Result<()> {
+        let agent = self.agent_get(agent_id)?.ok_or(StorageError::NotFound)?;
+        if agent.interface != "terminal" {
+            return Err(StorageError::InvalidParams(
+                "provider_session_id is only allowed when interface=terminal".into(),
+            ));
+        }
+        if session_id.is_empty() {
+            return Err(StorageError::InvalidParams(
+                "provider_session_id must be non-empty".into(),
+            ));
+        }
+        let conn = self.lock()?;
+        let n = conn.execute(
+            "UPDATE agents SET provider_session_id = ?1 WHERE id = ?2",
+            params![session_id, agent_id],
         )?;
         if n == 0 {
             return Err(StorageError::NotFound);
@@ -1033,6 +1083,7 @@ type AgentTuple = (
     String,
     String,
     String,
+    Option<String>,
 );
 
 fn map_agent_tuple(r: &rusqlite::Row<'_>) -> rusqlite::Result<AgentTuple> {
@@ -1046,12 +1097,23 @@ fn map_agent_tuple(r: &rusqlite::Row<'_>) -> rusqlite::Result<AgentTuple> {
         r.get(6)?,
         r.get(7)?,
         r.get(8)?,
+        r.get(9)?,
     ))
 }
 
 fn agent_from_tuple(t: AgentTuple) -> Result<Agent> {
-    let (id, task_id, host_id, parent_id, interface, provider, status, run_location, created_at) =
-        t;
+    let (
+        id,
+        task_id,
+        host_id,
+        parent_id,
+        interface,
+        provider,
+        status,
+        run_location,
+        created_at,
+        provider_session_id,
+    ) = t;
     Ok(Agent {
         id,
         task_id,
@@ -1062,6 +1124,7 @@ fn agent_from_tuple(t: AgentTuple) -> Result<Agent> {
         status: AgentStatus::parse(&status)?,
         run_location,
         created_at,
+        provider_session_id,
     })
 }
 
@@ -1206,7 +1269,7 @@ mod tests {
         {
             let conn = store.lock().unwrap();
             conn.execute(
-                "UPDATE schema_meta SET value = '4' WHERE key = 'schema'",
+                "UPDATE schema_meta SET value = '5' WHERE key = 'schema'",
                 [],
             )
             .unwrap();
@@ -1215,7 +1278,7 @@ mod tests {
         let err = Store::open(&db).unwrap_err();
         assert_eq!(err.code(), "internal");
         match &err {
-            StorageError::UnsupportedSchema(v) => assert_eq!(v, "4"),
+            StorageError::UnsupportedSchema(v) => assert_eq!(v, "5"),
             other => panic!("expected UnsupportedSchema, got {other:?}"),
         }
     }
@@ -1284,7 +1347,7 @@ mod tests {
     }
 
     #[test]
-    fn fresh_db_is_schema_three() {
+    fn fresh_db_is_schema_four() {
         let (_tmp, store) = open_store();
         let conn = rusqlite::Connection::open(store.path()).unwrap();
         let schema: String = conn
@@ -1294,7 +1357,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(schema, "3");
+        assert_eq!(schema, "4");
         let n: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'worktrees'",
@@ -1346,7 +1409,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(schema, "3");
+        assert_eq!(schema, "4");
         let n: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'worktrees'",
@@ -1678,7 +1741,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(schema, "3");
+        assert_eq!(schema, "4");
         let n: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'policies'",
@@ -1687,6 +1750,14 @@ mod tests {
             )
             .unwrap();
         assert_eq!(n, 1);
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('shells', 'pty_sessions')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 0);
     }
 
     #[test]
@@ -1839,5 +1910,107 @@ mod tests {
             [&agent.id],
         );
         assert!(dup.is_err(), "unique per agent must fail");
+    }
+    #[test]
+    fn migration_0004_matches_contract() {
+        assert!(MIGRATION_0004.contains("CHECK (interface IN ('chat', 'terminal'))"));
+        assert!(MIGRATION_0004.contains("provider_session_id"));
+        assert!(MIGRATION_0004.contains("interface != 'chat' OR provider_session_id IS NULL"));
+        assert!(MIGRATION_0004
+            .contains("INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('schema', '4')"));
+        assert!(!MIGRATION_0004.contains("CREATE TABLE shells"));
+        assert!(!MIGRATION_0004.contains("CREATE TABLE pty_sessions"));
+        assert!(!MIGRATION_0004.contains("ON DELETE CASCADE"));
+        assert!(!MIGRATION_0001.contains("provider_session_id"));
+        assert!(!MIGRATION_0002.contains("provider_session_id"));
+        assert!(!MIGRATION_0003.contains("provider_session_id"));
+    }
+
+    #[test]
+    fn migrate_schema_three_applies_terminal() {
+        let dir = tempdir().unwrap();
+        let db = dir.path().join("host.db");
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute_batch(MIGRATION_0001).unwrap();
+            conn.execute_batch(MIGRATION_0002).unwrap();
+            conn.execute_batch(MIGRATION_0003).unwrap();
+            let schema: String = conn
+                .query_row(
+                    "SELECT value FROM schema_meta WHERE key = 'schema'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(schema, "3");
+        }
+        let store = Store::open(&db).unwrap();
+        let conn = rusqlite::Connection::open(store.path()).unwrap();
+        let schema: String = conn
+            .query_row(
+                "SELECT value FROM schema_meta WHERE key = 'schema'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(schema, "4");
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('shells', 'pty_sessions')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn chat_cannot_have_provider_session_id_terminal_can() {
+        let (_tmp, store) = open_store();
+        let host_id = new_id();
+        store.host_insert_if_absent(&host_id, "h").unwrap();
+        let ws = store.workspace_add("/p", "p").unwrap();
+        let task = store.task_create("t", &ws.id).unwrap();
+        let chat = store
+            .agent_create(&task.id, &host_id, "cli.generic")
+            .unwrap();
+        assert_eq!(chat.interface, "chat");
+        assert!(chat.provider_session_id.is_none());
+        assert_eq!(
+            store
+                .agent_set_provider_session_id(&chat.id, "sess")
+                .unwrap_err()
+                .code(),
+            "invalid_params"
+        );
+
+        let term = store
+            .agent_create_interface(&task.id, &host_id, "cli.claude", "terminal")
+            .unwrap();
+        assert_eq!(term.interface, "terminal");
+        assert!(term.provider_session_id.is_none());
+        store
+            .agent_set_provider_session_id(&term.id, "sess-1")
+            .unwrap();
+        let got = store.agent_get(&term.id).unwrap().unwrap();
+        assert_eq!(got.provider_session_id.as_deref(), Some("sess-1"));
+
+        let conn = rusqlite::Connection::open(store.path()).unwrap();
+        conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+        let chat_with_sid = conn.execute(
+            "INSERT INTO agents (id, task_id, host_id, parent_id, interface, provider, status, run_location, created_at, provider_session_id)              VALUES ('a-chat-sid', ?1, ?2, NULL, 'chat', 'cli.generic', 'idle', 'local', '2026-08-19T00:00:00Z', 'nope')",
+            [&task.id, &host_id],
+        );
+        assert!(chat_with_sid.is_err(), "chat + session id must fail CHECK");
+        let term_with_sid = conn.execute(
+            "INSERT INTO agents (id, task_id, host_id, parent_id, interface, provider, status, run_location, created_at, provider_session_id)              VALUES ('a-term-sid', ?1, ?2, NULL, 'terminal', 'cli.claude', 'idle', 'local', '2026-08-19T00:00:00Z', 'ok')",
+            [&task.id, &host_id],
+        );
+        assert!(term_with_sid.is_ok(), "terminal + session id must succeed");
+        let bad_iface = conn.execute(
+            "INSERT INTO agents (id, task_id, host_id, parent_id, interface, provider, status, run_location, created_at, provider_session_id)              VALUES ('a-bad', ?1, ?2, NULL, 'shell', 'cli.generic', 'idle', 'local', '2026-08-19T00:00:00Z', NULL)",
+            [&task.id, &host_id],
+        );
+        assert!(bad_iface.is_err(), "interface=shell must fail CHECK");
     }
 }
