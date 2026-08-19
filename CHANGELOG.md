@@ -5,9 +5,30 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [2.0.0] — 2026-08-19 (unreleased)
+## [2.1.0] — 2026-08-19
 
-Parity release against Traycer Desktop 1.1.x (local-first). Protocol 1.8. Linux x86_64 packages; macOS aarch64 compile/CI only. Tag not cut yet.
+Complete DoD. Protocol 1.9. Storage 0009 + 0010. Zero `missing`/`partial` in the parity matrix. Tag is Chief's after APPROVE 0097+0098.
+
+### Added
+
+- Task / workspace / artifact search (`search.query`).
+- Terminals and Shell without a Task (workspace required).
+- Artifact PDF export (`format=pdf` → 200).
+- Multi-account labels per provider (credentials stay in env/keyring).
+- Mid-turn steer (`agent.steer`; `cli.claude` + `cli.codex`).
+- Self-hosted `rt-sync` (`sync.push` / `sync.pull`).
+- Resource monitor, notification hooks, prompt stash, drag-to-tile.
+- PR view via system `gh`.
+- Worktree cleanup (`worktree.gc`) and branch prefix.
+- Nested `AGENTS.md`, user presets, `rt-cli logs --follow`.
+
+### Out of scope (unchanged)
+
+- C26, C66–C75: telemetry, managed cloud, CRDT, Windows/WSL package, secrets in `host.db`, extra harnesses as required, own inference, sharing/SSO.
+
+## [2.0.0] — 2026-08-19
+
+Parity release against Traycer Desktop 1.1.x (local-first). Protocol 1.8. Linux x86_64 packages; macOS aarch64 compile/CI only. Tag `v2.0.0` at `ded044c`.
 
 ### Added
 
@@ -51,5 +72,7 @@ First production release. Linux x86_64 only ([ADR-001](docs/adr/0001-target-plat
 - `GET /metrics`. GUI picker / N agents in the canvas (host already allows both).
 
 [1.0.0]: https://github.com/Valeron2206/rusttraycer/releases/tag/v1.0.0
+
+[2.1.0]: https://github.com/Valeron2206/rusttraycer/releases/tag/v2.1.0
 
 [2.0.0]: https://github.com/Valeron2206/rusttraycer/releases/tag/v2.0.0
