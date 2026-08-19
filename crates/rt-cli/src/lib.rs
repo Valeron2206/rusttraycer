@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use serde_json::{json, Value};
 
-pub const PROTOCOL_CRATE: &str = "0.1.0";
+pub const PROTOCOL_CRATE: &str = "1.0.0";
 const SESSION_HEADER: &str = "X-Rt-Session";
 const STOP_WAIT: Duration = Duration::from_secs(2);
 
@@ -417,13 +417,7 @@ fn fetch_host_doctor(rpc_url: &str) -> Option<Value> {
     });
     let hs = rpc_post(&agent, &rpc, None, &hs_body)?;
     let ok = hs.get("ok")?;
-    if ok
-        .get("accepted")
-        .and_then(|a| a.get("host.doctor"))
-        .is_none()
-    {
-        return None;
-    }
+    ok.get("accepted").and_then(|a| a.get("host.doctor"))?;
     let token = ok.get("sessionToken")?.as_str()?;
 
     let doc_body = json!({
@@ -492,7 +486,7 @@ mod tests {
             "rpcUrl": "http://127.0.0.1:9",
             "wsUrl": "ws://127.0.0.1:9/ws",
             "startedAt": "2026-01-01T00:00:00Z",
-            "protocol": { "crate": "0.1.0" },
+            "protocol": { "crate": "1.0.0" },
         });
         fs::write(pid_path(dir), serde_json::to_vec_pretty(&json).unwrap()).unwrap();
     }
@@ -583,7 +577,7 @@ cat > "$dir/pid.json" <<EOF
   "rpcUrl": "http://127.0.0.1:9",
   "wsUrl": "ws://127.0.0.1:9/ws",
   "startedAt": "2026-01-01T00:00:00Z",
-  "protocol": {{ "crate": "0.1.0" }}
+  "protocol": {{ "crate": "1.0.0" }}
 }}
 EOF
 trap 'exit 0' TERM INT
