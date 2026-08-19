@@ -10,9 +10,10 @@ members = [
 ]
 
 [workspace.package]
-version = "2.1.0"
+version = "2.1.1"
 edition = "2021"
 rust-version = "1.85"
+license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
 eframe = { version = "0.31", default-features = false, features = ["default_fonts", "glow"] }

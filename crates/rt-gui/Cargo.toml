@@ -2,6 +2,7 @@
 name = "rt-gui"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 description = "Thin desktop client for RustTraycer (eframe + egui)"
 autobins = false
 autoexamples = false
