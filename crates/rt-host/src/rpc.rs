@@ -37,7 +37,6 @@ struct RpcRequest {
     params: Value,
 }
 
-
 fn rpc_ok(id: String, ok: Value) -> Json<Value> {
     Json(json!({ "id": id, "ok": ok }))
 }
@@ -195,12 +194,22 @@ async fn dispatch(svc: &HostService, method: &str, params: Value) -> Result<Valu
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| HostError::InvalidParams("workspaceId is required".into()))?;
             let path = params.get("path").and_then(|v| v.as_str());
-            let depth = params.get("depth").and_then(|v| v.as_u64()).map(|n| n as u32);
+            let depth = params
+                .get("depth")
+                .and_then(|v| v.as_u64())
+                .map(|n| n as u32);
             let max_entries = params
                 .get("maxEntries")
                 .and_then(|v| v.as_u64())
                 .map(|n| n as u32);
-            Ok(serde_json::to_value(svc.files_tree(workspace_id, path, depth, max_entries)?)?)
+            let worktree_id = params.get("worktreeId").and_then(|v| v.as_str());
+            Ok(serde_json::to_value(svc.files_tree(
+                workspace_id,
+                path,
+                depth,
+                max_entries,
+                worktree_id,
+            )?)?)
         }
         "files.read" => {
             let workspace_id = params
@@ -211,8 +220,37 @@ async fn dispatch(svc: &HostService, method: &str, params: Value) -> Result<Valu
                 .get("path")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| HostError::InvalidParams("path is required".into()))?;
-            Ok(serde_json::to_value(svc.files_read(workspace_id, path)?)?)
+            let worktree_id = params.get("worktreeId").and_then(|v| v.as_str());
+            Ok(serde_json::to_value(svc.files_read(
+                workspace_id,
+                path,
+                worktree_id,
+            )?)?)
         }
+        "worktree.ensure" => {
+            let agent_id = params
+                .get("agentId")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| HostError::InvalidParams("agentId is required".into()))?;
+            Ok(serde_json::to_value(svc.worktree_ensure(agent_id)?)?)
+        }
+        "worktree.get" => {
+            let agent_id = params
+                .get("agentId")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| HostError::InvalidParams("agentId is required".into()))?;
+            Ok(serde_json::to_value(svc.worktree_get(agent_id)?)?)
+        }
+        "worktree.list" => {
+            let workspace_id = params
+                .get("workspaceId")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| HostError::InvalidParams("workspaceId is required".into()))?;
+            let items = svc.worktree_list(workspace_id)?;
+            Ok(json!({ "items": items }))
+        }
+        "git.status" => Ok(serde_json::to_value(svc.git_status(&params)?)?),
+        "git.diff" => Ok(serde_json::to_value(svc.git_diff(&params)?)?),
         other => Err(HostError::UnsupportedMethod(other.to_string())),
     }
 }

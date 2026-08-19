@@ -50,9 +50,9 @@ pub fn resolve_inside(root: &Path, rel: &str) -> Result<PathBuf, HostError> {
             "path must not contain '..'".into(),
         ));
     }
-    let root_canon = root.canonicalize().map_err(|_| {
-        HostError::NotFound("workspace path is missing".into())
-    })?;
+    let root_canon = root
+        .canonicalize()
+        .map_err(|_| HostError::NotFound("workspace path is missing".into()))?;
 
     let mut joined = root_canon.clone();
     if !rel.is_empty() && rel != "." {
@@ -79,7 +79,9 @@ pub fn resolve_inside(root: &Path, rel: &str) -> Result<PathBuf, HostError> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             Err(HostError::NotFound(format!("path not found: {rel}")))
         }
-        Err(e) => Err(HostError::InvalidParams(format!("cannot resolve path: {e}"))),
+        Err(e) => Err(HostError::InvalidParams(format!(
+            "cannot resolve path: {e}"
+        ))),
     }
 }
 
@@ -129,7 +131,11 @@ fn entry_for(root: &Path, canon: &Path) -> Result<FileEntry, HostError> {
     }
 }
 
-fn read_children_sorted(root: &Path, dir: &Path, parent_rel: &str) -> Vec<(FileEntry, PathBuf, bool)> {
+fn read_children_sorted(
+    root: &Path,
+    dir: &Path,
+    parent_rel: &str,
+) -> Vec<(FileEntry, PathBuf, bool)> {
     let mut kids = Vec::new();
     let rd = match fs::read_dir(dir) {
         Ok(rd) => rd,
@@ -193,7 +199,15 @@ fn walk(
         let child_rel = entry.path.clone();
         items.push(entry);
         if is_dir && depth > 1 {
-            walk(root, &canon, &child_rel, depth - 1, max_entries, items, truncated);
+            walk(
+                root,
+                &canon,
+                &child_rel,
+                depth - 1,
+                max_entries,
+                items,
+                truncated,
+            );
             if *truncated {
                 return;
             }
@@ -225,13 +239,45 @@ fn parse_positive(v: Option<&Value>, default: u64, name: &str) -> Result<u64, Ho
     }
 }
 
-fn require_workspace(store: &Store, workspace_id: &str) -> Result<rt_storage::Workspace, HostError> {
+fn require_workspace(
+    store: &Store,
+    workspace_id: &str,
+) -> Result<rt_storage::Workspace, HostError> {
     if uuid::Uuid::parse_str(workspace_id).is_err() {
         return Err(HostError::InvalidParams("invalid workspaceId".into()));
     }
     store
         .workspace_get(workspace_id)?
         .ok_or_else(|| HostError::NotFound(format!("workspace {workspace_id}")))
+}
+
+fn optional_worktree_id(params: &Value) -> Result<Option<&str>, HostError> {
+    match params.get("worktreeId") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) => Ok(Some(s.as_str())),
+        Some(_) => Err(HostError::InvalidParams(
+            "worktreeId must be a string".into(),
+        )),
+    }
+}
+
+fn walk_root(
+    store: &Store,
+    ws: &rt_storage::Workspace,
+    worktree_id: Option<&str>,
+) -> Result<PathBuf, HostError> {
+    match worktree_id {
+        None => Ok(PathBuf::from(&ws.path)),
+        Some(id) => {
+            let wt = store
+                .worktree_get(id)?
+                .ok_or_else(|| HostError::NotFound(format!("worktree {id}")))?;
+            if wt.workspace_id != ws.id {
+                return Err(HostError::NotFound(format!("worktree {id}")));
+            }
+            Ok(PathBuf::from(wt.path))
+        }
+    }
 }
 
 pub fn files_tree(store: &Store, params: &Value) -> Result<Value, HostError> {
@@ -251,12 +297,13 @@ pub fn files_tree(store: &Store, params: &Value) -> Result<Value, HostError> {
     };
     let depth = parse_positive(params.get("depth"), DEFAULT_DEPTH, "depth")?;
     let max_entries = parse_positive(params.get("maxEntries"), DEFAULT_MAX_ENTRIES, "maxEntries")?;
+    let wt_id = optional_worktree_id(params)?;
 
-    let root = PathBuf::from(&ws.path);
+    let root = walk_root(store, &ws, wt_id)?;
     let target = resolve_inside(&root, rel)?;
-    let root_canon = root.canonicalize().map_err(|_| {
-        HostError::NotFound("workspace path is missing".into())
-    })?;
+    let root_canon = root
+        .canonicalize()
+        .map_err(|_| HostError::NotFound("workspace path is missing".into()))?;
 
     if target.is_file() {
         let item = entry_for(&root_canon, &target)?;
@@ -297,11 +344,12 @@ pub fn files_read(store: &Store, params: &Value) -> Result<Value, HostError> {
         return Err(HostError::InvalidParams("path must be nonempty".into()));
     }
     let ws = require_workspace(store, workspace_id)?;
-    let root = PathBuf::from(&ws.path);
+    let wt_id = optional_worktree_id(params)?;
+    let root = walk_root(store, &ws, wt_id)?;
     let target = resolve_inside(&root, rel)?;
-    let root_canon = root.canonicalize().map_err(|_| {
-        HostError::NotFound("workspace path is missing".into())
-    })?;
+    let root_canon = root
+        .canonicalize()
+        .map_err(|_| HostError::NotFound("workspace path is missing".into()))?;
 
     if target.is_dir() {
         return Err(HostError::InvalidParams("path is a directory".into()));
@@ -322,8 +370,8 @@ pub fn files_read(store: &Store, params: &Value) -> Result<Value, HostError> {
     if data[..scan].contains(&0) {
         return Err(HostError::FileBinary("NUL in first 8 KiB".into()));
     }
-    let content = String::from_utf8(data)
-        .map_err(|_| HostError::FileBinary("invalid UTF-8".into()))?;
+    let content =
+        String::from_utf8(data).map_err(|_| HostError::FileBinary("invalid UTF-8".into()))?;
     let path = rel_of(&root_canon, &target);
     Ok(json!({
         "path": path,
@@ -354,7 +402,9 @@ mod tests {
         std::fs::create_dir(root.join("b_dir")).unwrap();
         std::fs::write(root.join("b_dir").join("z.txt"), b"z").unwrap();
         std::fs::write(root.join("b_dir").join("a.txt"), b"a").unwrap();
-        let ws = store.workspace_add(root.to_str().expect("utf8 path"), "proj").unwrap();
+        let ws = store
+            .workspace_add(root.to_str().expect("utf8 path"), "proj")
+            .unwrap();
         (tmp, store, ws.id, root)
     }
 
@@ -429,11 +479,7 @@ mod tests {
         assert_eq!(err.code(), "invalid_params");
         let err = files_tree(&store, &json!({ "workspaceId": id, "path": "/etc" })).unwrap_err();
         assert_eq!(err.code(), "invalid_params");
-        let err = files_tree(
-            &store,
-            &json!({ "workspaceId": id, "path": "no-such" }),
-        )
-        .unwrap_err();
+        let err = files_tree(&store, &json!({ "workspaceId": id, "path": "no-such" })).unwrap_err();
         assert_eq!(err.code(), "not_found");
         let err = files_tree(
             &store,
@@ -446,11 +492,7 @@ mod tests {
     #[test]
     fn read_ok_and_errors() {
         let (_t, store, id, root) = seeded();
-        let v = files_read(
-            &store,
-            &json!({ "workspaceId": id, "path": "README.md" }),
-        )
-        .unwrap();
+        let v = files_read(&store, &json!({ "workspaceId": id, "path": "README.md" })).unwrap();
         assert_eq!(v["path"], "README.md");
         assert_eq!(v["content"], "# hi\n");
         assert_eq!(v["truncated"], false);
@@ -459,39 +501,24 @@ mod tests {
         let err = files_read(&store, &json!({ "workspaceId": id, "path": "src" })).unwrap_err();
         assert_eq!(err.code(), "invalid_params");
 
-        let err = files_read(
-            &store,
-            &json!({ "workspaceId": id, "path": "missing.txt" }),
-        )
-        .unwrap_err();
+        let err =
+            files_read(&store, &json!({ "workspaceId": id, "path": "missing.txt" })).unwrap_err();
         assert_eq!(err.code(), "not_found");
 
         let err = files_read(&store, &json!({ "workspaceId": id, "path": "" })).unwrap_err();
         assert_eq!(err.code(), "invalid_params");
 
         std::fs::write(root.join("nul.bin"), b"hello\0world").unwrap();
-        let err = files_read(
-            &store,
-            &json!({ "workspaceId": id, "path": "nul.bin" }),
-        )
-        .unwrap_err();
+        let err = files_read(&store, &json!({ "workspaceId": id, "path": "nul.bin" })).unwrap_err();
         assert_eq!(err.code(), "file_binary");
 
         std::fs::write(root.join("bad.txt"), [0xff, 0xfe, b'x']).unwrap();
-        let err = files_read(
-            &store,
-            &json!({ "workspaceId": id, "path": "bad.txt" }),
-        )
-        .unwrap_err();
+        let err = files_read(&store, &json!({ "workspaceId": id, "path": "bad.txt" })).unwrap_err();
         assert_eq!(err.code(), "file_binary");
 
         let big = vec![b'a'; (MAX_FILE_BYTES as usize) + 1];
         std::fs::write(root.join("big.txt"), &big).unwrap();
-        let err = files_read(
-            &store,
-            &json!({ "workspaceId": id, "path": "big.txt" }),
-        )
-        .unwrap_err();
+        let err = files_read(&store, &json!({ "workspaceId": id, "path": "big.txt" })).unwrap_err();
         assert_eq!(err.code(), "file_too_large");
     }
 

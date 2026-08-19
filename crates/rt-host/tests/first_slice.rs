@@ -19,6 +19,11 @@ fn all_methods() -> Value {
         "agent.get_context",
         "files.tree",
         "files.read",
+        "worktree.ensure",
+        "worktree.get",
+        "worktree.list",
+        "git.status",
+        "git.diff",
     ];
     let mut m = serde_json::Map::new();
     for n in names {
@@ -27,7 +32,13 @@ fn all_methods() -> Value {
     Value::Object(m)
 }
 
-async fn rpc(client: &reqwest::Client, base: &str, token: Option<&str>, method: &str, params: Value) -> Value {
+async fn rpc(
+    client: &reqwest::Client,
+    base: &str,
+    token: Option<&str>,
+    method: &str,
+    params: Value,
+) -> Value {
     let mut req = client.post(format!("{base}/rpc")).json(&json!({
         "id": "t1",
         "method": method,
@@ -72,7 +83,10 @@ async fn health_handshake_doctor_files() {
         }),
     )
     .await;
-    assert_eq!(bad["ok"]["rejected"]["task.create"]["reason"], "version_mismatch");
+    assert_eq!(
+        bad["ok"]["rejected"]["task.create"]["reason"],
+        "version_mismatch"
+    );
     assert!(bad["ok"]["accepted"].as_object().unwrap().is_empty());
 
     let hello = rpc(
@@ -90,6 +104,11 @@ async fn health_handshake_doctor_files() {
     let token = hello["ok"]["sessionToken"].as_str().unwrap().to_string();
     assert!(hello["ok"]["accepted"].get("files.tree").is_some());
     assert!(hello["ok"]["accepted"].get("host.doctor").is_some());
+    assert!(hello["ok"]["accepted"].get("worktree.ensure").is_some());
+    assert!(hello["ok"]["accepted"].get("worktree.get").is_some());
+    assert!(hello["ok"]["accepted"].get("worktree.list").is_some());
+    assert!(hello["ok"]["accepted"].get("git.status").is_some());
+    assert!(hello["ok"]["accepted"].get("git.diff").is_some());
 
     let doctor = rpc(&client, &base, Some(&token), "host.doctor", json!({})).await;
     let providers = doctor["ok"]["providers"].as_array().unwrap();

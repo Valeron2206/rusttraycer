@@ -81,13 +81,13 @@ mod tests {
     #[test]
     fn version_reject_reason_is_version_mismatch() {
         let mut client = BTreeMap::new();
-        client.insert(
-            "host.doctor".into(),
-            MethodVersion { major: 2, minor: 0 },
-        );
+        client.insert("host.doctor".into(), MethodVersion { major: 2, minor: 0 });
         client.insert(
             "files.tree".into(),
-            MethodVersion { major: 1, minor: 99 },
+            MethodVersion {
+                major: 1,
+                minor: 99,
+            },
         );
         let (acc, rej) = negotiate(&client);
         assert!(!acc.contains_key("host.doctor"));
@@ -101,10 +101,7 @@ mod tests {
     #[test]
     fn version_accept_equal_and_older_minor() {
         let mut client = BTreeMap::new();
-        client.insert(
-            "task.create".into(),
-            MethodVersion { major: 1, minor: 0 },
-        );
+        client.insert("task.create".into(), MethodVersion { major: 1, minor: 0 });
         client.insert("host.ping".into(), MethodVersion { major: 1, minor: 0 });
         client.insert("files.tree".into(), MethodVersion { major: 1, minor: 0 });
         client.insert("files.read".into(), MethodVersion { major: 1, minor: 0 });
@@ -126,6 +123,31 @@ mod tests {
         let (acc, rej) = negotiate(&client);
         assert!(acc.is_empty());
         assert_eq!(rej["artifact.create"].reason, "unsupported");
+    }
+
+    #[test]
+    fn worktree_and_git_methods_accepted_at_1_0() {
+        let mut client = BTreeMap::new();
+        for name in [
+            "worktree.ensure",
+            "worktree.get",
+            "worktree.list",
+            "git.status",
+            "git.diff",
+        ] {
+            client.insert(name.into(), MethodVersion { major: 1, minor: 0 });
+        }
+        let (acc, rej) = negotiate(&client);
+        assert!(rej.is_empty(), "{rej:?}");
+        for name in [
+            "worktree.ensure",
+            "worktree.get",
+            "worktree.list",
+            "git.status",
+            "git.diff",
+        ] {
+            assert_eq!(acc[name], MethodVersion { major: 1, minor: 0 });
+        }
     }
 
     #[test]

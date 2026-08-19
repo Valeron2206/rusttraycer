@@ -45,6 +45,11 @@ pub const METHOD_AGENT_SEND: &str = "agent.send";
 pub const METHOD_AGENT_GET_CONTEXT: &str = "agent.get_context";
 pub const METHOD_FILES_TREE: &str = "files.tree";
 pub const METHOD_FILES_READ: &str = "files.read";
+pub const METHOD_WORKTREE_ENSURE: &str = "worktree.ensure";
+pub const METHOD_WORKTREE_GET: &str = "worktree.get";
+pub const METHOD_WORKTREE_LIST: &str = "worktree.list";
+pub const METHOD_GIT_STATUS: &str = "git.status";
+pub const METHOD_GIT_DIFF: &str = "git.diff";
 
 /// Tradable methods (handshake itself is not included).
 pub const TRADABLE_METHODS: &[&str] = &[
@@ -64,6 +69,11 @@ pub const TRADABLE_METHODS: &[&str] = &[
     METHOD_AGENT_GET_CONTEXT,
     METHOD_FILES_TREE,
     METHOD_FILES_READ,
+    METHOD_WORKTREE_ENSURE,
+    METHOD_WORKTREE_GET,
+    METHOD_WORKTREE_LIST,
+    METHOD_GIT_STATUS,
+    METHOD_GIT_DIFF,
 ];
 
 pub fn host_method_version() -> MethodVersion {
@@ -209,6 +219,47 @@ pub struct FileReadOk {
     pub encoding: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Worktree {
+    pub id: String,
+    pub workspace_id: String,
+    pub agent_id: String,
+    pub path: String,
+    pub branch: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitStatusEntry {
+    pub path: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitStatus {
+    pub branch: String,
+    pub dirty: bool,
+    pub entries: Vec<GitStatusEntry>,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitDiffFile {
+    pub path: String,
+    pub patch: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitDiff {
+    pub files: Vec<GitDiffFile>,
+    pub truncated: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -234,5 +285,66 @@ mod tests {
         assert!(!validate_title(&"a".repeat(201)));
         assert!(validate_title(&"й".repeat(200)));
         assert!(!validate_title(&"й".repeat(201)));
+    }
+
+    #[test]
+    fn worktree_and_git_types_camel_case() {
+        assert!(TRADABLE_METHODS.contains(&METHOD_WORKTREE_ENSURE));
+        assert!(TRADABLE_METHODS.contains(&METHOD_WORKTREE_GET));
+        assert!(TRADABLE_METHODS.contains(&METHOD_WORKTREE_LIST));
+        assert!(TRADABLE_METHODS.contains(&METHOD_GIT_STATUS));
+        assert!(TRADABLE_METHODS.contains(&METHOD_GIT_DIFF));
+        assert!(!TRADABLE_METHODS.iter().any(|m| *m == "agent.cancel"));
+
+        let wt = Worktree {
+            id: "w1".into(),
+            workspace_id: "ws".into(),
+            agent_id: "ag".into(),
+            path: "/tmp/wt".into(),
+            branch: "rt/abcd1234".into(),
+            created_at: "2026-01-01T00:00:00Z".into(),
+        };
+        let v = serde_json::to_value(&wt).unwrap();
+        assert_eq!(v["workspaceId"], "ws");
+        assert_eq!(v["agentId"], "ag");
+        assert_eq!(v["createdAt"], "2026-01-01T00:00:00Z");
+        assert!(v.get("workspace_id").is_none());
+        let wt2: Worktree = serde_json::from_value(v).unwrap();
+        assert_eq!(wt2.branch, "rt/abcd1234");
+
+        let st = GitStatus {
+            branch: "main".into(),
+            dirty: true,
+            entries: vec![GitStatusEntry {
+                path: "src/lib.rs".into(),
+                status: "modified".into(),
+            }],
+            truncated: false,
+        };
+        let v = serde_json::to_value(&st).unwrap();
+        assert_eq!(v["branch"], "main");
+        assert_eq!(v["dirty"], true);
+        assert_eq!(v["entries"][0]["path"], "src/lib.rs");
+        assert_eq!(v["entries"][0]["status"], "modified");
+        assert_eq!(v["truncated"], false);
+
+        let diff = GitDiff {
+            files: vec![GitDiffFile {
+                path: "src/lib.rs".into(),
+                patch: Some("@@".into()),
+            }],
+            truncated: false,
+        };
+        let v = serde_json::to_value(&diff).unwrap();
+        assert_eq!(v["files"][0]["path"], "src/lib.rs");
+        assert_eq!(v["files"][0]["patch"], "@@");
+        assert_eq!(v["truncated"], false);
+        let bin = GitDiffFile {
+            path: "a.bin".into(),
+            patch: None,
+        };
+        let v = serde_json::to_value(&bin).unwrap();
+        assert_eq!(v["path"], "a.bin");
+        assert!(v["patch"].is_null());
     }
 }
