@@ -263,6 +263,61 @@ pub struct ProviderAccount {
     pub created_at: String,
 }
 
+/// Durable prompt stash row. Optional image path is encoded inside `body`
+/// as a first line `rt-image-path:<path>` so 0009 stays untouched.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptStash {
+    pub id: String,
+    pub body: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_path: Option<String>,
+    pub created_at: String,
+}
+
+pub const STASH_IMAGE_PATH_PREFIX: &str = "rt-image-path:";
+pub const MAX_STASH_BODY_BYTES: usize = 65536;
+
+pub fn encode_stash_body(body: &str, image_path: Option<&str>) -> String {
+    match image_path {
+        Some(path) if !path.is_empty() => format!("{STASH_IMAGE_PATH_PREFIX}{path}\n{body}"),
+        _ => body.to_string(),
+    }
+}
+
+pub fn decode_stash_body(stored: &str) -> (String, Option<String>) {
+    let Some(rest) = stored.strip_prefix(STASH_IMAGE_PATH_PREFIX) else {
+        return (stored.to_string(), None);
+    };
+    match rest.split_once('\n') {
+        Some((path, body)) => (body.to_string(), Some(path.to_string())),
+        None => (String::new(), Some(rest.to_string())),
+    }
+}
+
+fn validate_stash_image_path(image_path: Option<&str>) -> Result<Option<&str>> {
+    let Some(path) = image_path else {
+        return Ok(None);
+    };
+    if path.is_empty() {
+        return Err(StorageError::InvalidParams(
+            "imagePath must be a local path when present".into(),
+        ));
+    }
+    if path.contains('\n') || path.contains('\r') {
+        return Err(StorageError::InvalidParams(
+            "imagePath must be a single-line local path".into(),
+        ));
+    }
+    let lower = path.to_ascii_lowercase();
+    if lower.contains("://") || lower.starts_with("http:") || lower.starts_with("https:") {
+        return Err(StorageError::InvalidParams(
+            "imagePath must be a local path, not a URL".into(),
+        ));
+    }
+    Ok(Some(path))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelProfile {
@@ -1295,6 +1350,58 @@ impl Store {
         )
         .optional()
         .map_err(Into::into)
+    }
+
+    pub fn stash_add(&self, body: &str, image_path: Option<&str>) -> Result<PromptStash> {
+        if body.is_empty() || body.len() > MAX_STASH_BODY_BYTES {
+            return Err(StorageError::InvalidParams(
+                "stash body must be 1..=65536 UTF-8 bytes".into(),
+            ));
+        }
+        let image_path = validate_stash_image_path(image_path)?;
+        let stored = encode_stash_body(body, image_path);
+        let id = new_id();
+        let created_at = now_rfc3339();
+        {
+            let conn = self.lock()?;
+            conn.execute(
+                "INSERT INTO prompt_stash (id, body, created_at) VALUES (?1, ?2, ?3)",
+                params![id, stored, created_at],
+            )?;
+        }
+        Ok(PromptStash {
+            id,
+            body: body.to_string(),
+            image_path: image_path.map(str::to_string),
+            created_at,
+        })
+    }
+
+    pub fn stash_list(&self) -> Result<Vec<PromptStash>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, body, created_at FROM prompt_stash ORDER BY created_at DESC, id DESC",
+        )?;
+        let rows = stmt.query_map([], map_stash_row)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    pub fn stash_delete(&self, id: &str) -> Result<()> {
+        if id.is_empty() {
+            return Err(StorageError::InvalidParams("stashId is required".into()));
+        }
+        let n = {
+            let conn = self.lock()?;
+            conn.execute("DELETE FROM prompt_stash WHERE id = ?1", [id])?
+        };
+        if n == 0 {
+            return Err(StorageError::NotFound);
+        }
+        Ok(())
     }
 
     pub fn agent_set_account_id(&self, id: &str, account_id: Option<&str>) -> Result<Agent> {
@@ -2988,6 +3095,17 @@ fn map_account_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ProviderAccount> {
         provider: r.get(1)?,
         label: r.get(2)?,
         created_at: r.get(3)?,
+    })
+}
+
+fn map_stash_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<PromptStash> {
+    let stored: String = r.get(1)?;
+    let (body, image_path) = decode_stash_body(&stored);
+    Ok(PromptStash {
+        id: r.get(0)?,
+        body,
+        image_path,
+        created_at: r.get(2)?,
     })
 }
 
@@ -4942,5 +5060,55 @@ mod tests {
         assert_eq!(bound.account_id.as_deref(), Some(a.id.as_str()));
         let cleared = store.agent_set_account_id(&agent.id, None).unwrap();
         assert!(cleared.account_id.is_none());
+    }
+
+    #[test]
+    fn stash_add_list_delete_encodes_image_path_and_survives_reopen() {
+        let dir = tempdir().unwrap();
+        let db = dir.path().join("host.db");
+        let first = {
+            let store = Store::open(&db).unwrap();
+            let empty = store.stash_add("", None).unwrap_err();
+            assert_eq!(empty.code(), "invalid_params");
+            let url = store
+                .stash_add("hi", Some("https://example.com/a.png"))
+                .unwrap_err();
+            assert_eq!(url.code(), "invalid_params");
+            let a = store.stash_add("first prompt", None).unwrap();
+            assert_eq!(a.body, "first prompt");
+            assert!(a.image_path.is_none());
+            let b = store.stash_add("with shot", Some("/tmp/shot.png")).unwrap();
+            assert_eq!(b.body, "with shot");
+            assert_eq!(b.image_path.as_deref(), Some("/tmp/shot.png"));
+            let listed = store.stash_list().unwrap();
+            assert_eq!(listed.len(), 2);
+            assert_eq!(listed[0].id, b.id, "newest first");
+            assert_eq!(listed[0].image_path.as_deref(), Some("/tmp/shot.png"));
+            assert_eq!(listed[0].body, "with shot");
+            assert!(!listed[0].body.contains(STASH_IMAGE_PATH_PREFIX));
+            let raw: String = {
+                let conn = rusqlite::Connection::open(store.path()).unwrap();
+                conn.query_row(
+                    "SELECT body FROM prompt_stash WHERE id = ?1",
+                    [&b.id],
+                    |r| r.get(0),
+                )
+                .unwrap()
+            };
+            assert!(raw.starts_with(STASH_IMAGE_PATH_PREFIX), "{raw}");
+            assert!(raw.contains("/tmp/shot.png"), "{raw}");
+            (a.id, b.id)
+        };
+        let store = Store::open(&db).unwrap();
+        let listed = store.stash_list().unwrap();
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].id, first.1);
+        assert_eq!(listed[0].image_path.as_deref(), Some("/tmp/shot.png"));
+        assert_eq!(listed[0].body, "with shot");
+        store.stash_delete(&first.1).unwrap();
+        store.stash_delete(&first.0).unwrap();
+        assert!(store.stash_list().unwrap().is_empty());
+        let missing = store.stash_delete("no-such").unwrap_err();
+        assert_eq!(missing.code(), "not_found");
     }
 }
