@@ -19,6 +19,7 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 ureq.workspace = true
+rt-runtime = { path = "../rt-runtime" }
 
 [dev-dependencies]
 tempfile.workspace = true

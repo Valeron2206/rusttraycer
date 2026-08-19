@@ -72,6 +72,14 @@ pub enum StopOutcome {
     Stopped { pid: u32 },
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct HarnessStatus {
+    pub id: String,
+    pub available: bool,
+    pub detail: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DoctorReport {
@@ -79,10 +87,13 @@ pub struct DoctorReport {
     pub pid: Option<u32>,
     pub host_id: Option<String>,
     pub rpc_url: Option<String>,
+    pub port: Option<u16>,
+    pub version: String,
     pub data_dir: String,
     pub db_path: String,
     pub log_path: String,
     pub pid_path: String,
+    pub harnesses: Vec<HarnessStatus>,
     pub host: Option<Value>,
 }
 
@@ -256,10 +267,7 @@ pub fn exec_host(bin: &Path) -> Result<(), CliError> {
 pub fn exec_host(bin: &Path) -> Result<(), CliError> {
     Err(CliError::ExecFailed {
         bin: bin.to_path_buf(),
-        source: std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "exec_host is Unix-only",
-        ),
+        source: std::io::Error::new(std::io::ErrorKind::Unsupported, "exec_host is Unix-only"),
     })
 }
 
@@ -320,17 +328,53 @@ pub fn doctor() -> Result<DoctorReport, CliError> {
     } else {
         None
     };
+    let port = live.as_ref().and_then(|i| port_from_rpc_url(&i.rpc_url));
+    let version = live
+        .as_ref()
+        .map(|i| i.protocol_crate.clone())
+        .unwrap_or_else(|| PROTOCOL_CRATE.to_string());
+    let harnesses = rt_runtime::probe_harnesses()
+        .into_iter()
+        .map(|p| HarnessStatus {
+            id: p.id,
+            available: p.available,
+            detail: p.detail,
+        })
+        .collect();
     Ok(DoctorReport {
         running,
         pid: live.as_ref().map(|i| i.pid),
         host_id: live.as_ref().map(|i| i.host_id.clone()),
         rpc_url: live.as_ref().map(|i| i.rpc_url.clone()),
+        port,
+        version,
         data_dir: data_dir.to_string_lossy().into_owned(),
         db_path: db_path(&data_dir).to_string_lossy().into_owned(),
         log_path: log_path(&data_dir).to_string_lossy().into_owned(),
         pid_path: pid_path(&data_dir).to_string_lossy().into_owned(),
+        harnesses,
         host,
     })
+}
+
+/// Parse the TCP port from a pid.json `rpcUrl` (`http://127.0.0.1:47800` → 47800).
+fn port_from_rpc_url(url: &str) -> Option<u16> {
+    let rest = url
+        .trim()
+        .strip_prefix("http://")
+        .or_else(|| url.trim().strip_prefix("https://"))?;
+    let hostport = rest.split('/').next().unwrap_or(rest);
+    let hostport = hostport
+        .rsplit_once('@')
+        .map(|(_, h)| h)
+        .unwrap_or(hostport);
+    let port = if hostport.starts_with('[') {
+        let end = hostport.find(']')?;
+        hostport.get(end + 1..)?.strip_prefix(':')?
+    } else {
+        hostport.rsplit_once(':').map(|(_, p)| p)?
+    };
+    port.parse().ok()
 }
 
 fn is_loopback_rpc(url: &str) -> bool {
@@ -373,7 +417,8 @@ fn fetch_host_doctor(rpc_url: &str) -> Option<Value> {
     });
     let hs = rpc_post(&agent, &rpc, None, &hs_body)?;
     let ok = hs.get("ok")?;
-    if ok.get("accepted")
+    if ok
+        .get("accepted")
         .and_then(|a| a.get("host.doctor"))
         .is_none()
     {
@@ -596,10 +641,7 @@ done
         assert!(report.host_id.is_none());
         assert!(report.rpc_url.is_none());
         assert!(report.host.is_none());
-        assert_eq!(
-            report.data_dir,
-            tmp.path().join("host").to_string_lossy()
-        );
+        assert_eq!(report.data_dir, tmp.path().join("host").to_string_lossy());
         assert_eq!(
             report.db_path,
             tmp.path().join("host").join("host.db").to_string_lossy()
@@ -612,6 +654,40 @@ done
             report.pid_path,
             tmp.path().join("host").join("pid.json").to_string_lossy()
         );
+        assert!(report.port.is_none());
+        assert_eq!(report.version, PROTOCOL_CRATE);
+        assert_eq!(report.harnesses.len(), 3);
+        assert_eq!(report.harnesses[0].id, "cli.generic");
+        assert_eq!(report.harnesses[1].id, "cli.claude");
+        assert_eq!(report.harnesses[2].id, "cli.codex");
+    }
+
+    #[test]
+    fn doctor_generic_available_when_cmd_set() {
+        let _lock = lock_env();
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = EnvGuard::set("RUSTTRAYCER_HOME", tmp.path());
+        let dummy = dummy_bin(tmp.path());
+        let _cmd = EnvGuard::set("RUSTTRAYCER_GENERIC_CMD", &dummy);
+
+        let report = doctor().unwrap();
+        assert!(!report.running);
+        assert!(!db_path(&tmp.path().join("host")).exists());
+        let generic = report
+            .harnesses
+            .iter()
+            .find(|h| h.id == "cli.generic")
+            .expect("cli.generic");
+        assert!(generic.available, "detail={}", generic.detail);
+    }
+
+    #[test]
+    fn port_from_rpc_url_parses_host_port() {
+        assert_eq!(port_from_rpc_url("http://127.0.0.1:47800"), Some(47800));
+        assert_eq!(port_from_rpc_url("http://127.0.0.1:9"), Some(9));
+        assert_eq!(port_from_rpc_url("http://localhost:1234/rpc"), Some(1234));
+        assert_eq!(port_from_rpc_url("http://127.0.0.1"), None);
+        assert_eq!(port_from_rpc_url(""), None);
     }
 
     #[test]
