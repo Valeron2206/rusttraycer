@@ -69,8 +69,8 @@ Sources (live, 2026-08-19):
 | C54 | Read workspace `AGENTS.md` | brief №14; [e8-workspace-v2](e8-workspace-v2.md) | missing | E8 | Ф5 | 14 |
 | C55 | Agent-selection guide (global + optional `.traycer/…`) | settings/agents; ADR-0004; [e8-workspace-v2](e8-workspace-v2.md) | missing | E8 | Ф5 | 14 |
 | C56 | Local workflow presets planning/review/debug/document | directive E8; ADR-0004; [e8-workspace-v2](e8-workspace-v2.md) | missing | E8 | Ф5 | 14, 16 |
-| C57 | Export/import durable entities (clone-not-migrate) | directive E9; ADR-0003 | missing | E9 | Ф6 | 2, 3 |
-| C58 | Self-hosted `rt-sync` | directive E9; ADR-0003 | missing | E9 | Ф6 | 2 |
+| C57 | Export/import durable entities (clone-not-migrate) | directive E9; ADR-0003; [e9-sync-v2](e9-sync-v2.md) | missing | E9 | Ф6 | 2, 3 |
+| C58 | Self-hosted `rt-sync` | directive E9; ADR-0003; [e9-sync-v2](e9-sync-v2.md) | missing | E9 | later | 2 |
 | C59 | `GET /metrics` (loopback only) | directive E10; ADR-0008 (not vendor) | missing | E10 | Ф6 | — |
 | C60 | CLI `status` / `logs` / `reset-db` | directive E10 | missing | E10 | Ф6 | — |
 | C61 | Linux AppImage + .deb | install.md; ADR-0006 | missing | E10 | Ф6 | — |
@@ -96,7 +96,7 @@ Sources (live, 2026-08-19):
 | # | Invariant | Locked by |
 |---|---|---|
 | 1 | UI ≠ Host | shipped C01–C02; GUI spawn only `#[cfg(test)]`. **Needs dedicated prod-path test** (no `Command::new(rt-host)` outside tests). |
-| 2 | Durable vs live; clone-not-migrate | transcript shipped (C03). PTY-not-durable **needs test in E4**. Export rules **ADR-0003** + test in E9. |
+| 2 | Durable vs live; clone-not-migrate | transcript shipped (C03). Export rules **[e9-sync-v2](e9-sync-v2.md)** / ADR-0003; **needs test** after code STAR. |
 | 3 | hostId canonical | restart e2e (C04, C17). Export **ADR-0003** + test in E9. |
 | 4 | Agent ≠ harness ≠ interface ≠ shell | types in protocol today (agent+harness). Interface+shell **E4 tests**. |
 | 5 | Worktree isolation | e2e worktree (C16). Cleanup UX missing (C65). |
@@ -121,7 +121,7 @@ Sources (live, 2026-08-19):
 | Ф3 | E4 | C32–C36 (C37 later, e4-terminal-v2) |
 | Ф4 | E5 then E6 | C38–C47 (C42 PDF later; C43–C47 must e6-a2a-v2) |
 | Ф5 | E7 + E8 | C48–C50, C52, C54–C56 (C51, C53 later, e7-model-ux-v2) |
-| Ф6 | E9 + E10 | C57–C62 |
+| Ф6 | E9 + E10 | C57, C59–C62 (C58 later, e9-sync-v2) |
 | Ф7 | harden / release | DoD e2e in directive §5 |
 
 DoD v2.0.0: every row `shipped` or `out-of-scope-by-ADR`. No `partial`/`missing` left.
