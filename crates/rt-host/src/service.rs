@@ -149,7 +149,8 @@ pub struct DoctorResult {
 }
 
 pub struct AgentCreateArgs<'a> {
-    pub task_id: &'a str,
+    pub task_id: Option<&'a str>,
+    pub workspace_id: Option<&'a str>,
     pub provider: Option<&'a str>,
     pub interface: Option<&'a str>,
     pub launch_args: Option<Vec<String>>,
@@ -164,6 +165,7 @@ pub struct AgentCreateArgs<'a> {
 #[serde(rename_all = "camelCase")]
 pub struct AgentView {
     pub id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub task_id: String,
     pub host_id: String,
     pub parent_id: Option<String>,
@@ -179,6 +181,8 @@ pub struct AgentView {
     pub effort: Option<String>,
     pub fast: bool,
     pub role: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
 }
 
 impl From<Agent> for AgentView {
@@ -200,6 +204,7 @@ impl From<Agent> for AgentView {
             effort: a.effort,
             fast: a.fast,
             role: a.role,
+            workspace_id: a.workspace_id,
         }
     }
 }
@@ -544,9 +549,20 @@ rusttraycer_tasks{{status="archived"}} {archived}
         Ok(self.store.agent_list(task_id)?)
     }
 
+    pub fn agent_list_for_workspace(&self, workspace_id: &str) -> Result<Vec<Agent>> {
+        if workspace_id.is_empty() {
+            return Err(HostError::InvalidParams("workspaceId is required".into()));
+        }
+        if self.store.workspace_get(workspace_id)?.is_none() {
+            return Err(HostError::NotFound(format!("workspace {workspace_id}")));
+        }
+        Ok(self.store.agent_list_for_workspace(workspace_id)?)
+    }
+
     pub fn agent_create(&self, task_id: &str, provider: Option<&str>) -> Result<Agent> {
         self.agent_create_ex(AgentCreateArgs {
-            task_id,
+            task_id: Some(task_id),
+            workspace_id: None,
             provider,
             interface: None,
             launch_args: None,
@@ -561,6 +577,7 @@ rusttraycer_tasks{{status="archived"}} {archived}
     pub fn agent_create_ex(&self, args: AgentCreateArgs<'_>) -> Result<Agent> {
         let AgentCreateArgs {
             task_id,
+            workspace_id,
             provider,
             interface,
             launch_args,
@@ -589,11 +606,8 @@ rusttraycer_tasks{{status="archived"}} {archived}
                 "launchArgs must have at most 32 strings".into(),
             ));
         }
-        let task = self
-            .store
-            .task_get(task_id)?
-            .ok_or_else(|| HostError::NotFound(format!("task {task_id}")))?;
-        let role = self.resolve_role(&task, role)?;
+        let task_id = task_id.filter(|s| !s.is_empty());
+        let workspace_id = workspace_id.filter(|s| !s.is_empty());
         if interface == "terminal" {
             let pty = self
                 .backends
@@ -604,17 +618,43 @@ rusttraycer_tasks{{status="archived"}} {archived}
                 return Err(HostError::NotPty);
             }
         }
-        // available=false does not block create
         let mut spec = self.resolve_model_spec(provider, model, effort, fast)?;
-        spec.role = role;
-        let agent = self.store.agent_create_model(
-            task_id,
-            &self.host_id,
-            provider,
-            interface,
-            parent_id,
-            spec.clone(),
-        )?;
+        let agent = if let Some(task_id) = task_id {
+            let task = self
+                .store
+                .task_get(task_id)?
+                .ok_or_else(|| HostError::NotFound(format!("task {task_id}")))?;
+            spec.role = self.resolve_role(&task, role)?;
+            self.store.agent_create_model(
+                task_id,
+                &self.host_id,
+                provider,
+                interface,
+                parent_id,
+                spec.clone(),
+            )?
+        } else {
+            let workspace_id = workspace_id.ok_or_else(|| {
+                HostError::InvalidParams("workspaceId is required when taskId is omitted".into())
+            })?;
+            if self.store.workspace_get(workspace_id)?.is_none() {
+                return Err(HostError::NotFound(format!("workspace {workspace_id}")));
+            }
+            if parent_id.is_some() {
+                return Err(HostError::InvalidParams("parentId requires taskId".into()));
+            }
+            spec.role = match role {
+                Some(r) => guides::parse_role(r)?.to_string(),
+                None => "coder".into(),
+            };
+            self.store.agent_create_for_workspace(
+                workspace_id,
+                &self.host_id,
+                provider,
+                interface,
+                spec.clone(),
+            )?
+        };
         self.store.harness_pref_upsert(
             provider,
             spec.model.as_deref(),
@@ -1268,11 +1308,17 @@ rusttraycer_tasks{{status="archived"}} {archived}
             .store
             .agent_get(agent_id)?
             .ok_or_else(|| HostError::NotFound(format!("agent {agent_id}")))?;
-        let task = self
-            .store
-            .task_get(&agent.task_id)?
-            .ok_or_else(|| HostError::NotFound(format!("task {}", agent.task_id)))?;
-        if let Some(ws_id) = task.workspace_ids.first() {
+        if !agent.task_id.is_empty() {
+            let task = self
+                .store
+                .task_get(&agent.task_id)?
+                .ok_or_else(|| HostError::NotFound(format!("task {}", agent.task_id)))?;
+            if let Some(ws_id) = task.workspace_ids.first() {
+                if let Some(row) = self.store.policy_get_for_workspace(ws_id)? {
+                    return policy_view_from_row(&row, PolicySource::Workspace);
+                }
+            }
+        } else if let Some(ws_id) = agent.workspace_id.as_deref() {
             if let Some(row) = self.store.policy_get_for_workspace(ws_id)? {
                 return policy_view_from_row(&row, PolicySource::Workspace);
             }
@@ -1757,11 +1803,22 @@ rusttraycer_tasks{{status="archived"}} {archived}
         if let Some(wt) = self.store.worktree_get_by_agent(&agent.id)? {
             return Ok(std::path::PathBuf::from(wt.path));
         }
-        let task = self.task_get(&agent.task_id)?;
-        let ws_id = task
-            .workspace_ids
-            .first()
-            .ok_or_else(|| HostError::Internal("task has no workspace".into()))?;
+        if !agent.task_id.is_empty() {
+            let task = self.task_get(&agent.task_id)?;
+            let ws_id = task
+                .workspace_ids
+                .first()
+                .ok_or_else(|| HostError::Internal("task has no workspace".into()))?;
+            let ws = self
+                .store
+                .workspace_get(ws_id)?
+                .ok_or_else(|| HostError::NotFound(format!("workspace {ws_id}")))?;
+            return Ok(std::path::PathBuf::from(ws.path));
+        }
+        let ws_id = agent
+            .workspace_id
+            .as_deref()
+            .ok_or_else(|| HostError::InvalidParams("agent is not bound to a workspace".into()))?;
         let ws = self
             .store
             .workspace_get(ws_id)?
@@ -1771,15 +1828,19 @@ rusttraycer_tasks{{status="archived"}} {archived}
 
     fn shell_cwd(
         &self,
-        task_id: &str,
+        task_id: Option<&str>,
         workspace_id: &str,
         worktree_id: Option<&str>,
     ) -> Result<std::path::PathBuf> {
-        let task = self.task_get(task_id)?;
-        if !task.workspace_ids.iter().any(|id| id == workspace_id) {
-            return Err(HostError::InvalidParams(
-                "workspaceId is not attached to this task".into(),
-            ));
+        if let Some(task_id) = task_id {
+            let task = self.task_get(task_id)?;
+            if !task.workspace_ids.iter().any(|id| id == workspace_id) {
+                return Err(HostError::InvalidParams(
+                    "workspaceId is not attached to this task".into(),
+                ));
+            }
+        } else if self.store.workspace_get(workspace_id)?.is_none() {
+            return Err(HostError::NotFound(format!("workspace {workspace_id}")));
         }
         if let Some(wt_id) = worktree_id {
             let wt = self
@@ -1917,6 +1978,7 @@ rusttraycer_tasks{{status="archived"}} {archived}
             kind: PtyKind::Agent,
             entity_id: agent_id,
             task_id: &agent.task_id,
+            workspace_id: agent.workspace_id.as_deref().unwrap_or(""),
             cwd: cwd.to_string_lossy().as_ref(),
             program,
             args,
@@ -1991,6 +2053,7 @@ rusttraycer_tasks{{status="archived"}} {archived}
             cols: req.cols,
             rows: req.rows,
             task_id: req.task_id.to_string(),
+            workspace_id: req.workspace_id.to_string(),
             cwd: req.cwd.to_string(),
         };
         self.mux
@@ -2047,26 +2110,31 @@ rusttraycer_tasks{{status="archived"}} {archived}
 
     pub fn shell_create(
         &self,
-        task_id: &str,
+        task_id: Option<&str>,
         workspace_id: &str,
         worktree_id: Option<&str>,
         cols: u16,
         rows: u16,
     ) -> Result<serde_json::Value> {
-        if task_id.is_empty() {
-            return Err(HostError::InvalidParams("taskId is required".into()));
-        }
+        let task_id = task_id.filter(|s| !s.is_empty());
         if workspace_id.is_empty() {
-            return Err(HostError::InvalidParams("workspaceId is required".into()));
+            return Err(HostError::InvalidParams(
+                "workspaceId is required when taskId is omitted".into(),
+            ));
+        }
+        if task_id.is_none() && self.store.workspace_get(workspace_id)?.is_none() {
+            return Err(HostError::NotFound(format!("workspace {workspace_id}")));
         }
         Self::check_pty_size(cols, rows)?;
         let cwd = self.shell_cwd(task_id, workspace_id, worktree_id)?;
         let (program, args) = pty::shell_pty_command();
         let shell_id = rt_storage::new_id();
+        let bound_task = task_id.unwrap_or("");
         let session = self.spawn_into_mux(&SpawnInto {
             kind: PtyKind::Shell,
             entity_id: &shell_id,
-            task_id,
+            task_id: bound_task,
+            workspace_id,
             cwd: cwd.to_string_lossy().as_ref(),
             program,
             args,
@@ -2081,14 +2149,34 @@ rusttraycer_tasks{{status="archived"}} {archived}
         })?)
     }
 
-    pub fn shell_list(&self, task_id: &str) -> Result<serde_json::Value> {
-        if task_id.is_empty() {
-            return Err(HostError::InvalidParams("taskId is required".into()));
-        }
-        if self.store.task_get(task_id)?.is_none() {
-            return Err(HostError::NotFound(format!("task {task_id}")));
-        }
-        let items = self.mux.list_shells(task_id).map_err(HostError::Internal)?;
+    pub fn shell_list(
+        &self,
+        task_id: Option<&str>,
+        workspace_id: Option<&str>,
+    ) -> Result<serde_json::Value> {
+        let task_id = task_id.filter(|s| !s.is_empty());
+        let workspace_id = workspace_id.filter(|s| !s.is_empty());
+        let items = match (task_id, workspace_id) {
+            (Some(task_id), _) => {
+                if self.store.task_get(task_id)?.is_none() {
+                    return Err(HostError::NotFound(format!("task {task_id}")));
+                }
+                self.mux.list_shells(task_id).map_err(HostError::Internal)?
+            }
+            (None, Some(workspace_id)) => {
+                if self.store.workspace_get(workspace_id)?.is_none() {
+                    return Err(HostError::NotFound(format!("workspace {workspace_id}")));
+                }
+                self.mux
+                    .list_shells_for_workspace(workspace_id)
+                    .map_err(HostError::Internal)?
+            }
+            (None, None) => {
+                return Err(HostError::InvalidParams(
+                    "workspaceId is required when taskId is omitted".into(),
+                ));
+            }
+        };
         let items: Vec<rt_protocol::ShellListItem> = items
             .into_iter()
             .map(|s| rt_protocol::ShellListItem {
@@ -2664,6 +2752,7 @@ struct SpawnInto<'a> {
     kind: PtyKind,
     entity_id: &'a str,
     task_id: &'a str,
+    workspace_id: &'a str,
     cwd: &'a str,
     program: String,
     args: Vec<String>,

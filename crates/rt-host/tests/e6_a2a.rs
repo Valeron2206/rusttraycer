@@ -388,7 +388,7 @@ async fn handshake_agent_create_1_5_write_stays_1_2() {
     let base = format!("http://{addr}");
     let client = reqwest::Client::new();
     let (_token, hs) = handshake(&client, &base, f5_methods()).await;
-    assert_eq!(hs["ok"]["accepted"]["agent.create"]["minor"], 5);
+    assert_eq!(hs["ok"]["accepted"]["agent.create"]["minor"], 9);
     assert_eq!(hs["ok"]["accepted"]["a2a.deliver"]["minor"], 5);
     assert_eq!(hs["ok"]["accepted"]["loop.start"]["minor"], 5);
     assert_eq!(hs["ok"]["accepted"]["files.write"]["minor"], 2);

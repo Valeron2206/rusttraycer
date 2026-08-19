@@ -325,7 +325,7 @@ async fn handshake_new_methods_1_8() {
     assert_eq!(hs["ok"]["accepted"]["sync.import"]["minor"], 8);
     assert_eq!(hs["ok"]["accepted"]["workspace.guides.get"]["minor"], 7);
     assert_eq!(hs["ok"]["accepted"]["agent.switch"]["minor"], 6);
-    assert_eq!(hs["ok"]["accepted"]["agent.create"]["minor"], 5);
+    assert_eq!(hs["ok"]["accepted"]["agent.create"]["minor"], 9);
     assert_eq!(hs["ok"]["accepted"]["host.ping"]["minor"], 0);
     let _ = tx.send(());
     let _ = join.await;
