@@ -65,7 +65,7 @@ export RUSTTRAYCER_GENERIC_CMD=/tmp/rt-echo.sh
 rt-cli start
 ```
 
-Then in the GUI: add a folder → Task → agent (`cli.generic`) → send a message. Transcript is in `host.db` after restart.
+Then in the GUI: add a folder → Task → pick a harness from `host.doctor` (generic/claude/codex) → send. N agents per Task. New agents default to **ask** (not Traycer full-access). Transcript is in `host.db` after restart.
 
 ## Layout
 
@@ -76,7 +76,7 @@ Then in the GUI: add a folder → Task → agent (`cli.generic`) → send a mess
 | `rt-storage` | `host.db` (rusqlite, migrations) |
 | `rt-runtime` | Adapters: `cli.generic`, `cli.claude`, `cli.codex` |
 | `rt-cli` | `start` / `stop` / `doctor` |
-| `rt-gui` | eframe + egui: tasks, chat, git panel, Stop. One `cli.generic` agent per Task |
+| `rt-gui` | eframe + egui: tasks, harness picker, N agents, ask-default ladder, git panel, Stop |
 
 ## Specs
 
