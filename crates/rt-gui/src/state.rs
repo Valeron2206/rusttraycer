@@ -1,7 +1,7 @@
 //! Session/UI state. Live host: health + handshake + ping, then workspace/task catalog.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::Instant;
 
@@ -398,11 +398,8 @@ impl AppState {
 
     pub fn tick_rpc(&mut self) {
         let mut incoming = Vec::new();
-        loop {
-            match self.rpc_rx.try_recv() {
-                Ok(ev) => incoming.push(ev),
-                Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
-            }
+        while let Ok(ev) = self.rpc_rx.try_recv() {
+            incoming.push(ev);
         }
         for ev in incoming {
             self.apply_rpc_incoming(ev);
@@ -418,17 +415,29 @@ impl AppState {
     }
 
     fn apply_cancel_result(&mut self, agent_id: &str, result: Result<CancelOk, ConnectError>) {
-        if self.pending_cancel.as_deref() == Some(agent_id) {
-            self.pending_cancel = None;
-        }
         match result {
-            Ok(_) => {
+            Ok(ok) => {
+                if self.pending_cancel.as_deref() == Some(agent_id)
+                    || self.pending_cancel.as_deref() == Some(ok.agent_id.as_str())
+                {
+                    self.pending_cancel = None;
+                }
+                if ok.cancelled {
+                    self.pending_cancel = None;
+                }
                 // cancelled true or false is both ok — hide Stop, enable composer.
-                if let Some(agent) = self.agents.iter_mut().find(|a| a.id == agent_id) {
+                if let Some(agent) = self
+                    .agents
+                    .iter_mut()
+                    .find(|a| a.id == ok.agent_id || a.id == agent_id)
+                {
                     agent.status = AgentStatus::Idle;
                 }
             }
             Err(err) => {
+                if self.pending_cancel.as_deref() == Some(agent_id) {
+                    self.pending_cancel = None;
+                }
                 self.toast = Some(err.as_label());
             }
         }
@@ -508,9 +517,13 @@ impl AppState {
     fn apply_ws_incoming(&mut self, incoming: WsIncoming) {
         match incoming {
             WsIncoming::Event(event) => self.apply_ws_event(event),
-            WsIncoming::Disconnected { .. } => {
+            WsIncoming::Disconnected { reason } => {
                 if self.is_online() {
-                    self.ws_banner = Some("Соединение с host потеряно, переподключение…".into());
+                    self.ws_banner = Some(if reason.is_empty() {
+                        "Соединение с host потеряно, переподключение…".into()
+                    } else {
+                        format!("Соединение с host потеряно, переподключение… ({reason})")
+                    });
                 }
             }
             WsIncoming::Reconnected => {
@@ -639,10 +652,16 @@ impl AppState {
 
     fn load_git_panel(&mut self) {
         self.git_note = None;
-        let Some(workspace_id) = self.workspace_id.clone() else {
-            self.git_status = None;
-            self.git_diff = None;
-            return;
+        let workspace_id = match self.workspace_id.clone() {
+            Some(id) => id,
+            None => match self.worktree.as_ref() {
+                Some(wt) if !wt.workspace_id.is_empty() => wt.workspace_id.clone(),
+                _ => {
+                    self.git_status = None;
+                    self.git_diff = None;
+                    return;
+                }
+            },
         };
         let Some(session) = self.session.clone() else {
             return;
@@ -857,7 +876,11 @@ impl AppState {
         let Some(session) = self.session.clone() else {
             return;
         };
-        match session.files_tree_for(&workspace_id, "", self.worktree_id()) {
+        let tree = match self.worktree_id() {
+            Some(id) => session.files_tree_for(&workspace_id, "", Some(id)),
+            None => session.files_tree(&workspace_id, ""),
+        };
+        match tree {
             Ok(tree) => {
                 self.file_tree = tree.items.into_iter().map(FileNode::from).collect();
                 self.file_tree_truncated = tree.truncated;
@@ -971,7 +994,11 @@ impl AppState {
             let Some(session) = self.session.clone() else {
                 return;
             };
-            match session.files_tree_for(&workspace_id, &path, self.worktree_id()) {
+            let tree = match self.worktree_id() {
+                Some(id) => session.files_tree_for(&workspace_id, &path, Some(id)),
+                None => session.files_tree(&workspace_id, &path),
+            };
+            match tree {
                 Ok(tree) => {
                     self.file_children.insert(
                         path.clone(),
@@ -1010,7 +1037,11 @@ impl AppState {
             });
             return;
         };
-        match session.files_read_for(&workspace_id, &path, self.worktree_id()) {
+        let read = match self.worktree_id() {
+            Some(id) => session.files_read_for(&workspace_id, &path, Some(id)),
+            None => session.files_read(&workspace_id, &path),
+        };
+        match read {
             Ok(read) => {
                 self.file_preview = Some(FilePreview::Text {
                     path: read.path,

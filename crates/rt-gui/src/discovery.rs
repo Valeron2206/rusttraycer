@@ -60,8 +60,8 @@ pub fn read_pid_json() -> Result<PidInfo, DiscoverError> {
         Err(err) => return Err(DiscoverError::Unreadable(err.to_string())),
     };
 
-    let parsed: PidFile = serde_json::from_str(&raw)
-        .map_err(|err| DiscoverError::Unreadable(err.to_string()))?;
+    let parsed: PidFile =
+        serde_json::from_str(&raw).map_err(|err| DiscoverError::Unreadable(err.to_string()))?;
 
     Ok(PidInfo {
         host_id: parsed.host_id,

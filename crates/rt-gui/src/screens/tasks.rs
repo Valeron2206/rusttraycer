@@ -70,7 +70,12 @@ fn show_empty_state(ui: &mut egui::Ui, state: &mut AppState) {
     empty_no_tasks(ui, state);
 }
 
-fn empty_card(ui: &mut egui::Ui, title: &str, body: &str, add_contents: impl FnOnce(&mut egui::Ui)) {
+fn empty_card(
+    ui: &mut egui::Ui,
+    title: &str,
+    body: &str,
+    add_contents: impl FnOnce(&mut egui::Ui),
+) {
     ui.vertical_centered(|ui| {
         ui.add_space(48.0);
         egui::Frame::new()
@@ -165,7 +170,14 @@ fn show_task_list(ui: &mut egui::Ui, state: &mut AppState) {
     let rows: Vec<(String, String, TaskStatus, String)> = state
         .filtered_tasks()
         .into_iter()
-        .map(|t| (t.id.clone(), t.title.clone(), t.status, t.updated_at.clone()))
+        .map(|t| {
+            (
+                t.id.clone(),
+                t.title.clone(),
+                t.status,
+                t.updated_at.clone(),
+            )
+        })
         .collect();
 
     let mut select_id: Option<String> = None;
@@ -205,8 +217,7 @@ fn show_task_list(ui: &mut egui::Ui, state: &mut AppState) {
                         if ui.small_button("Переименовать").clicked() {
                             rename = Some((id.clone(), title.clone()));
                         }
-                        if *status == TaskStatus::Open
-                            && ui.small_button("В архив").clicked()
+                        if *status == TaskStatus::Open && ui.small_button("В архив").clicked()
                         {
                             archive_id = Some(id.clone());
                         }
@@ -280,10 +291,8 @@ pub fn show_rename_dialog(ctx: &egui::Context, state: &mut AppState) {
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .show(ctx, |ui| {
             ui.label("Название");
-            let _resp = ui.add(
-                egui::TextEdit::singleline(&mut state.rename_task_title)
-                    .desired_width(320.0),
-            );
+            let _resp = ui
+                .add(egui::TextEdit::singleline(&mut state.rename_task_title).desired_width(320.0));
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 let can = state.can_rpc() && !state.rename_task_title.trim().is_empty();

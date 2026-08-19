@@ -36,13 +36,11 @@ pub enum WsEvent {
     #[serde(rename = "task.updated")]
     TaskUpdated {
         #[serde(rename = "taskId")]
-        #[allow(dead_code)]
         task_id: String,
     },
     #[serde(rename = "host.going_away")]
     HostGoingAway {
         #[serde(rename = "hostId")]
-        #[allow(dead_code)]
         host_id: String,
     },
 }
@@ -112,8 +110,20 @@ pub fn apply_event(
             }
             ApplyOutcome::StatusChanged(status.clone())
         }
-        WsEvent::HostGoingAway { .. } => ApplyOutcome::GoingAway,
-        WsEvent::TaskUpdated { .. } => ApplyOutcome::TaskUpdated,
+        WsEvent::HostGoingAway { host_id } => {
+            if host_id.is_empty() {
+                ApplyOutcome::Ignored
+            } else {
+                ApplyOutcome::GoingAway
+            }
+        }
+        WsEvent::TaskUpdated { task_id } => {
+            if task_id.is_empty() {
+                ApplyOutcome::Ignored
+            } else {
+                ApplyOutcome::TaskUpdated
+            }
+        }
     }
 }
 
@@ -126,7 +136,7 @@ pub enum WsCmd {
 #[derive(Debug)]
 pub enum WsIncoming {
     Event(WsEvent),
-    Disconnected { #[allow(dead_code)] reason: String },
+    Disconnected { reason: String },
     Reconnected,
 }
 
@@ -213,9 +223,7 @@ pub fn connect_ws(ws_url: &str, token: &str) -> Result<WebSocket<TcpStream>, Str
 
 fn send_subscribe(socket: &mut WebSocket<TcpStream>, task_id: &str) -> Result<(), String> {
     let body = serde_json::json!({ "type": "subscribe", "taskId": task_id }).to_string();
-    socket
-        .send(Message::text(body))
-        .map_err(|e| e.to_string())
+    socket.send(Message::text(body)).map_err(|e| e.to_string())
 }
 
 fn ws_loop(ws_url: String, token: String, cmd_rx: Receiver<WsCmd>, event_tx: Sender<WsIncoming>) {
@@ -242,10 +250,8 @@ fn ws_loop(ws_url: String, token: String, cmd_rx: Receiver<WsCmd>, event_tx: Sen
             }
         };
 
-        if ever_connected {
-            if event_tx.send(WsIncoming::Reconnected).is_err() {
-                return;
-            }
+        if ever_connected && event_tx.send(WsIncoming::Reconnected).is_err() {
+            return;
         }
         ever_connected = true;
 
