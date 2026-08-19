@@ -13,7 +13,8 @@
 4. C66 (Grok/Amp/Hermes/…) **oos**. Allowlist: `cli.generic` | `cli.claude` | `cli.codex`.
 5. Новые RPC — handshake minor (№11). Секреты в host.db запрещены (ADR-0005 / C74).
 6. Лестницу / A2A / artifacts **не открывать**. Switch не yolo и не `kind=edit|exec`.
-7. E8 (C54–C56) — отдельная спека после E7.
+7. E8 (C52 roles, C54–C56) — отдельная спека после E7. C52 **не** E7 (уже отдал e6-a2a-v2).
+8. C74 / ADR-0005: секреты не в host.db. C51 later — только env/keyring.
 
 ## Решение C48–C53 (закон)
 
@@ -23,17 +24,18 @@
 | C49 named profiles | **must** |
 | C50 remember last model/effort/fast per harness | **must**, sqlite без секретов |
 | C51 multi-account per provider | **later** (креды env/keyring; не sqlite; не блокер switch) |
-| C52 agent roles | **later** |
+| C52 agent roles | **E8** (не E7; chrome + selection, e6) |
 | C53 mid-turn steer ⌘Enter | **later** (не все harness; не каркас UX) |
 
-Матрица: C51–C53 wave **later**.
+Матрица: C51, C53 wave **later**. C52 → E8.
 
 ## Что есть
 
-- `agent.create { taskId, provider, parentId?, interface? }` фиксирует `provider` навсегда.
+- `agent.create { taskId, provider, parentId?, interface? }` фиксирует `provider` навсегда. Switch RPC **нет**.
+- GUI «switch» сегодня = вкладка Task (другой агент), не смена harness на том же `agentId`.
 - `Agent.provider` на проводе есть; model/effort/fast **нет**.
 - Doctor отдаёт три provider + caps. Пикер только на create (E1).
-- Backend в supervisor привязан к агенту с create. Switch нет.
+- Backend в supervisor привязан к агенту с create.
 - Profiles / prefs таблиц нет.
 
 ## Storage 0007
@@ -131,13 +133,13 @@ Doctor может отдать `{ id: "native", available: false, detail: "reser
 - На выбранном агенте: harness picker (doctor) + model/effort/fast. Apply = `agent.switch`. Тот же чат, тот же id.
 - Profiles: список, save current as profile, apply profile.
 - Create agent: те же поля; дефолты из `prefs.get`.
-- Нет account switcher (C51), нет roles (C52), нет ⌘Enter steer (C53).
+- Нет account switcher (C51), нет ⌘Enter steer (C53). Roles — E8, не этот экран.
 - Нет поля API key.
 
 ## Вне скоупа
 
-- C51 / C52 / C53
-- C54–C56 E8
+- C51 / C53 later
+- C52 + C54–C56 E8
 - C66 named extra harnesses, C67 inference
 - E9 sync профилей
 - Секреты в sqlite, Settings PAT

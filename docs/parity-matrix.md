@@ -64,7 +64,7 @@ Sources (live, 2026-08-19):
 | C49 | Named model profiles (harness+params) | directive E7; ADR-0007 | missing | E7 | Ф5 | 8 |
 | C50 | Remembered model / effort / fast per harness | changelog | missing | E7 | Ф5 | 8 |
 | C51 | Multi-account per provider (switch per conversation) | changelog; [e7-model-ux-v2](e7-model-ux-v2.md) | missing | E7 | later | 8 |
-| C52 | Agent roles | changelog; CLI; [e7-model-ux-v2](e7-model-ux-v2.md) | missing | E7 | later | 4 |
+| C52 | Agent roles | changelog; CLI; [e6-a2a-v2](e6-a2a-v2.md); [e7-model-ux-v2](e7-model-ux-v2.md) | missing | E8 | Ф5 | 4 |
 | C53 | Mid-turn steer (⌘Enter) | changelog; 1.1.9; [e7-model-ux-v2](e7-model-ux-v2.md) | missing | E7 | later | — |
 | C54 | Read workspace `AGENTS.md` | brief №14; extension page (Desktop uses settings) | missing | E8 | Ф5 | 14 |
 | C55 | Agent-selection guide (global + optional `.traycer/…`) | settings/agents; ADR-0004 | missing | E8 | Ф5 | 14 |
@@ -120,7 +120,7 @@ Sources (live, 2026-08-19):
 | Ф2 | E3 | C27–C31 (C64 later, e3-write-v2) |
 | Ф3 | E4 | C32–C36 (C37 later, e4-terminal-v2) |
 | Ф4 | E5 then E6 | C38–C47 (C42 PDF later; C43–C47 must e6-a2a-v2) |
-| Ф5 | E7 + E8 | C48–C50, C54–C56 (C51–C53 later, e7-model-ux-v2) |
+| Ф5 | E7 + E8 | C48–C50, C52, C54–C56 (C51, C53 later, e7-model-ux-v2) |
 | Ф6 | E9 + E10 | C57–C62 |
 | Ф7 | harden / release | DoD e2e in directive §5 |
 
