@@ -1,3 +1,5 @@
+> **v1.0 reader:** this file is the original draft. Host: cancel, claude/codex, git/worktree. GUI: still one `cli.generic` per Task. PTY/A2A/cloud did not ship. See [v1-delta.md](v1-delta.md).
+
 # RustTraycer — архитектура v0
 
 Статус: предложение Architect, 2026-08-17.

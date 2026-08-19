@@ -1,3 +1,5 @@
+> **v1.0 reader:** this file is the original draft. cli.claude and cli.codex are implemented; generic wire is unchanged. See [v1-delta.md](v1-delta.md).
+
 # Runtime adapters — спецификация v0
 
 Для: Core (`rt-host` вызывает trait), Architect (`rt-protocol` типы).

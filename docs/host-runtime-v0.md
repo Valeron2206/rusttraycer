@@ -1,3 +1,5 @@
+> **v1.0 reader:** this file is the original draft. worktree + git RPC implemented; empty pty.rs/mux.rs remain reserved. See [v1-delta.md](v1-delta.md).
+
 # Host Runtime — спецификация v0
 
 Для: Core (`rt-host`, `rt-storage`, `rt-runtime`).
