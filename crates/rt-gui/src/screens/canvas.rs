@@ -24,6 +24,7 @@ use crate::model_ux::{
     PROFILE_NAME_HINT, PROFILE_SAVE, SWITCH_BUTTON,
 };
 use crate::rpc::HarnessCapsView;
+use crate::search_ux::{GC_BUTTON, GC_CONFIRM_BODY, GC_CONFIRM_OK, GC_CONFIRM_TITLE};
 use crate::state::{AppState, FileKind, FilePreview};
 use crate::terminal::{
     self, AgentInterface, AgentView, AGENT_IS_CHAT, CHAT_TAB, CLOSE_TERMINAL, INTERFACE_LABEL,
@@ -127,6 +128,7 @@ pub fn show_ladder_dialogs(ctx: &egui::Context, state: &mut AppState) {
 
 pub fn show_write_dialogs(ctx: &egui::Context, state: &mut AppState) {
     show_push_confirm(ctx, state);
+    show_worktree_gc_confirm(ctx, state);
 }
 
 pub fn show_artifact_dialogs(ctx: &egui::Context, state: &mut AppState) {
@@ -270,6 +272,33 @@ fn show_clear_transcript_confirm(ctx: &egui::Context, state: &mut AppState) {
         });
     if !open {
         state.cancel_clear_transcript();
+    }
+}
+
+fn show_worktree_gc_confirm(ctx: &egui::Context, state: &mut AppState) {
+    if !state.show_worktree_gc_confirm {
+        return;
+    }
+    let mut open = true;
+    egui::Window::new(GC_CONFIRM_TITLE)
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ctx, |ui| {
+            ui.label(GC_CONFIRM_BODY);
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button(GC_CONFIRM_OK).clicked() {
+                    state.confirm_worktree_gc();
+                }
+                if ui.button("Отмена").clicked() {
+                    state.cancel_worktree_gc();
+                }
+            });
+        });
+    if !open {
+        state.cancel_worktree_gc();
     }
 }
 
@@ -876,6 +905,14 @@ fn show_git(ui: &mut egui::Ui, state: &mut AppState) {
             .clicked()
         {
             state.isolate_selected_agent();
+        }
+    });
+    ui.add_enabled_ui(state.can_rpc(), |ui| {
+        if ui
+            .add_sized([ui.available_width(), 28.0], egui::Button::new(GC_BUTTON))
+            .clicked()
+        {
+            state.request_worktree_gc();
         }
     });
     if let Some(wt) = &state.worktree {

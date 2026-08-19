@@ -1,5 +1,6 @@
 use crate::chrome;
 use crate::screens;
+use crate::search_ux::{SEARCH_EMPTY, SEARCH_LABEL};
 use crate::state::{AppState, Screen};
 
 pub struct RtGuiApp {
@@ -33,6 +34,7 @@ impl eframe::App for RtGuiApp {
         screens::canvas::show_write_dialogs(ctx, &mut self.state);
         screens::canvas::show_artifact_dialogs(ctx, &mut self.state);
         screens::host::show_sync_import_confirm(ctx, &mut self.state);
+        show_search_results(ctx, &mut self.state);
 
         if let Some(toast) = self.state.toast.clone() {
             egui::Window::new("Сообщение")
@@ -50,5 +52,36 @@ impl eframe::App for RtGuiApp {
         if self.state.wants_repaint() {
             ctx.request_repaint_after(std::time::Duration::from_millis(80));
         }
+    }
+}
+
+fn show_search_results(ctx: &egui::Context, state: &mut AppState) {
+    if !state.search_ran && state.search_items.is_empty() {
+        return;
+    }
+    let mut clicked = None;
+    egui::Window::new(SEARCH_LABEL)
+        .collapsible(false)
+        .resizable(true)
+        .default_width(360.0)
+        .anchor(egui::Align2::LEFT_TOP, [220.0, 48.0])
+        .show(ctx, |ui| {
+            if state.search_items.is_empty() {
+                ui.weak(SEARCH_EMPTY);
+                return;
+            }
+            for (idx, item) in state.search_items.iter().enumerate() {
+                let line = if item.hint.is_empty() {
+                    format!("{} · {}", item.kind_label_ru(), item.title)
+                } else {
+                    format!("{} · {} · {}", item.kind_label_ru(), item.title, item.hint)
+                };
+                if ui.selectable_label(false, line).clicked() {
+                    clicked = Some(idx);
+                }
+            }
+        });
+    if let Some(idx) = clicked {
+        state.activate_search_result(idx);
     }
 }

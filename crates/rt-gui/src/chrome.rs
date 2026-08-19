@@ -1,4 +1,5 @@
 use crate::ladder::YOLO_BANNER;
+use crate::search_ux::{SEARCH_HINT, SEARCH_LABEL};
 use crate::state::{AppState, HostStatus, Screen};
 
 pub fn show(ctx: &egui::Context, state: &mut AppState) {
@@ -24,6 +25,20 @@ pub fn show(ctx: &egui::Context, state: &mut AppState) {
                 nav_item(ui, state, Screen::Canvas, &canvas_label, canvas_enabled);
 
                 nav_item(ui, state, Screen::Host, "Host", true);
+
+                ui.separator();
+                ui.label(SEARCH_LABEL);
+                let resp = ui.add(
+                    egui::TextEdit::singleline(&mut state.search_q)
+                        .desired_width(180.0)
+                        .hint_text(SEARCH_HINT),
+                );
+                if resp.changed() {
+                    state.mark_search_edited();
+                }
+                if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    state.submit_search();
+                }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.add_space(10.0);

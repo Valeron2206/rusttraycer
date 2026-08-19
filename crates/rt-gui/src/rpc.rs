@@ -129,6 +129,11 @@ pub const METHOD_SYNC_IMPORT: &str = "sync.import";
 
 pub const SYNC_METHODS: &[&str] = &[METHOD_SYNC_EXPORT, METHOD_SYNC_IMPORT];
 
+pub const METHOD_SEARCH_QUERY: &str = "search.query";
+pub const METHOD_WORKTREE_GC: &str = "worktree.gc";
+
+pub const SEARCH_GC_METHODS: &[&str] = &[METHOD_SEARCH_QUERY, METHOD_WORKTREE_GC];
+
 #[derive(Debug, Clone)]
 pub struct Session {
     pub host_id: String,
@@ -205,6 +210,14 @@ impl ConnectError {
     }
 
     pub fn is_sync_unsupported(&self) -> bool {
+        self.is_unsupported_method() || self.is_version_mismatch()
+    }
+
+    pub fn is_search_unsupported(&self) -> bool {
+        self.is_unsupported_method() || self.is_version_mismatch()
+    }
+
+    pub fn is_worktree_gc_unsupported(&self) -> bool {
         self.is_unsupported_method() || self.is_version_mismatch()
     }
 
@@ -326,6 +339,9 @@ fn hello_methods() -> Value {
     }
     for name in SYNC_METHODS {
         map.insert(name.to_string(), json!({ "major": 1, "minor": 8 }));
+    }
+    for name in SEARCH_GC_METHODS {
+        map.insert(name.to_string(), json!({ "major": 1, "minor": 9 }));
     }
     Value::Object(map)
 }
@@ -1457,12 +1473,70 @@ impl Session {
             json!({ "workspaceId": workspace_id, "archive": archive }),
         )
     }
+
+    pub fn search_accepted(&self) -> bool {
+        self.accepted
+            .get(METHOD_SEARCH_QUERY)
+            .map(|v| v.major == 1 && v.minor >= 9)
+            .unwrap_or(false)
+    }
+
+    pub fn search_rejected(&self) -> bool {
+        self.rejected.contains_key(METHOD_SEARCH_QUERY)
+    }
+
+    pub fn worktree_gc_accepted(&self) -> bool {
+        self.accepted
+            .get(METHOD_WORKTREE_GC)
+            .map(|v| v.major == 1 && v.minor >= 9)
+            .unwrap_or(false)
+    }
+
+    pub fn worktree_gc_rejected(&self) -> bool {
+        self.rejected.contains_key(METHOD_WORKTREE_GC)
+    }
+
+    pub fn search_query(
+        &self,
+        q: &str,
+        kinds: Option<&[&str]>,
+    ) -> Result<Vec<SearchItemOk>, ConnectError> {
+        let Some(params) = crate::search_ux::search_params(q, kinds) else {
+            return Ok(Vec::new());
+        };
+        parse_items(self.call(METHOD_SEARCH_QUERY, params)?)
+    }
+
+    pub fn worktree_gc(&self, dry_run: bool) -> Result<WorktreeGcOk, ConnectError> {
+        parse_ok(self.call(METHOD_WORKTREE_GC, crate::search_ux::gc_params(dry_run))?)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncExportOk {
     pub archive: Value,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchItemOk {
+    pub kind: String,
+    pub id: String,
+    pub title: String,
+    #[serde(default)]
+    pub hint: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct WorktreeGcOk {
+    #[serde(default)]
+    pub dry_run: bool,
+    #[serde(default)]
+    pub deleted: Vec<Value>,
+    #[serde(default)]
+    pub items: Vec<Value>,
 }
 
 fn parse_sync_export(ok: Value) -> Result<SyncExportOk, ConnectError> {
@@ -4791,5 +4865,164 @@ mod tests {
         assert_eq!(hit.params["workspaceId"], "ws-1");
         assert_eq!(hit.params["archive"]["kind"], "rusttraycer.export");
         assert!(hit.params.get("token").is_none());
+    }
+
+    fn search_gc_accepted_map() -> serde_json::Map<String, Value> {
+        let mut accepted = serde_json::Map::new();
+        for name in SEARCH_GC_METHODS {
+            accepted.insert(name.to_string(), json!({"major": 1, "minor": 9}));
+        }
+        accepted
+    }
+
+    fn start_search_gc_rpc_mock() -> CatalogMock {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(Mutex::new(Vec::new()));
+        let hits_t = hits.clone();
+        thread::spawn(move || {
+            for stream in listener.incoming().take(24) {
+                let Ok(mut stream) = stream else { break };
+                let (headers, body) = read_http_request(&mut stream);
+                let has_session = headers.to_ascii_lowercase().contains("x-rt-session:");
+                let parsed: Value = serde_json::from_slice(&body).unwrap_or(json!({}));
+                let method = if headers.starts_with("GET /health") {
+                    "GET /health".to_string()
+                } else {
+                    parsed
+                        .get("method")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("other")
+                        .to_string()
+                };
+                let params = parsed.get("params").cloned().unwrap_or(json!({}));
+                hits_t.lock().unwrap().push(RpcHit {
+                    method: method.clone(),
+                    params: params.clone(),
+                    has_session,
+                });
+                let body = match method.as_str() {
+                    "GET /health" => json!({"ok": true, "hostId": "host-a"}).to_string(),
+                    "handshake" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "hostId": "host-a",
+                            "hostVersion": "0.1.0",
+                            "sessionToken": "tok-1",
+                            "accepted": search_gc_accepted_map(),
+                            "rejected": {}
+                        }
+                    })
+                    .to_string(),
+                    "host.ping" => json!({
+                        "id": "echo",
+                        "ok": { "hostId": "host-a", "now": "2026-08-19T12:00:00Z" }
+                    })
+                    .to_string(),
+                    "search.query" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "items": [{
+                                "kind": "task",
+                                "id": "task-1",
+                                "title": "Auth",
+                                "hint": "open"
+                            }]
+                        }
+                    })
+                    .to_string(),
+                    "worktree.gc" => json!({
+                        "id": "echo",
+                        "ok": { "dryRun": params.get("dryRun").cloned().unwrap_or(json!(false)), "deleted": [] }
+                    })
+                    .to_string(),
+                    _ => json!({
+                        "id": "echo",
+                        "error": { "code": "unsupported_method", "message": "no" }
+                    })
+                    .to_string(),
+                };
+                write_http_json(&mut stream, &body);
+            }
+        });
+        CatalogMock {
+            origin: format!("http://{addr}"),
+            hits,
+        }
+    }
+
+    #[test]
+    fn handshake_advertises_search_gc_1_9_and_keeps_1_8() {
+        let mock = start_catalog_mock("host-a", "tok-1");
+        let _session = connect(&pid("host-a", &mock.origin)).expect("online");
+        let hs = mock
+            .hits
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|h| h.method == "handshake")
+            .cloned()
+            .expect("handshake");
+        for name in SEARCH_GC_METHODS {
+            assert_eq!(hs.params["methods"][name]["major"], 1, "{name}");
+            assert_eq!(hs.params["methods"][name]["minor"], 9, "{name}");
+        }
+        assert_eq!(hs.params["methods"]["search.query"]["minor"], 9);
+        assert_eq!(hs.params["methods"]["worktree.gc"]["minor"], 9);
+        assert_eq!(hs.params["methods"]["sync.export"]["minor"], 8);
+        assert_eq!(hs.params["methods"]["sync.import"]["minor"], 8);
+        assert_eq!(hs.params["client"], "gui");
+    }
+
+    #[test]
+    fn search_query_sends_q_and_optional_kinds() {
+        let mock = start_search_gc_rpc_mock();
+        let session = connect(&pid("host-a", &mock.origin)).expect("online");
+        assert!(session.search_accepted());
+        let items = session.search_query("auth", None).expect("search");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].kind, "task");
+        assert_eq!(items[0].id, "task-1");
+        assert_eq!(items[0].title, "Auth");
+        assert_eq!(items[0].hint, "open");
+        let items = session
+            .search_query("auth", Some(&["task", "artifact"]))
+            .expect("kinds");
+        assert_eq!(items.len(), 1);
+        let empty = session.search_query("   ", None).expect("empty");
+        assert!(empty.is_empty());
+        let hits = mock.hits.lock().unwrap().clone();
+        let queries: Vec<Value> = hits
+            .iter()
+            .filter(|h| h.method == "search.query")
+            .map(|h| h.params.clone())
+            .collect();
+        assert_eq!(queries.len(), 2);
+        assert_eq!(queries[0]["q"], "auth");
+        assert!(queries[0].get("kinds").is_none());
+        assert_eq!(queries[1]["q"], "auth");
+        assert_eq!(queries[1]["kinds"], json!(["task", "artifact"]));
+        assert!(queries.iter().all(|p| p.get("prefix").is_none()));
+    }
+
+    #[test]
+    fn worktree_gc_sends_dry_run_without_prefix() {
+        let mock = start_search_gc_rpc_mock();
+        let session = connect(&pid("host-a", &mock.origin)).expect("online");
+        assert!(session.worktree_gc_accepted());
+        let ok = session.worktree_gc(false).expect("gc");
+        assert!(!ok.dry_run);
+        let hit = mock
+            .hits
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|h| h.method == "worktree.gc")
+            .cloned()
+            .expect("worktree.gc");
+        assert_eq!(hit.params, json!({ "dryRun": false }));
+        assert!(hit.params.get("prefix").is_none());
+        assert!(hit.params.get("branchPrefix").is_none());
+        assert!(hit.params.get("branch_prefix").is_none());
     }
 }

@@ -22,6 +22,7 @@ use crate::rpc::{
     AgentModelView, CancelOk, ConnectError, DoctorOk, DoctorProvider, GitDiffOk, GitStatusOk,
     PrefsItem, PresetItem, ProfileOk, SettingsGuide, WorkspaceGuides, Worktree,
 };
+use crate::search_ux::{self, SearchItem, GC_UNAVAILABLE, SEARCH_DEBOUNCE_MS, SEARCH_UNAVAILABLE};
 use crate::sync_ux::{
     self, EXPORT_BUTTON, EXPORT_SAVED, IMPORT_BUTTON, NEED_TASK as SYNC_NEED_TASK,
     NEED_WORKSPACE as SYNC_NEED_WORKSPACE, SYNC_UNAVAILABLE,
@@ -376,6 +377,13 @@ pub struct AppState {
     pub workspace_status: Option<String>,
     pub sync_status: Option<String>,
     pub show_sync_import_confirm: bool,
+    pub search_q: String,
+    pub search_items: Vec<SearchItem>,
+    pub search_status: Option<String>,
+    pub search_ran: bool,
+    pub show_worktree_gc_confirm: bool,
+    search_edited_at: Option<Instant>,
+    last_search_q: Option<String>,
     pending_cancel: Option<String>,
     rpc_tx: Sender<RpcIncoming>,
     rpc_rx: Receiver<RpcIncoming>,
@@ -506,6 +514,13 @@ impl AppState {
             workspace_status: None,
             sync_status: None,
             show_sync_import_confirm: false,
+            search_q: String::new(),
+            search_items: Vec::new(),
+            search_status: None,
+            search_ran: false,
+            show_worktree_gc_confirm: false,
+            search_edited_at: None,
+            last_search_q: None,
             pending_cancel: None,
             rpc_tx,
             rpc_rx,
@@ -599,6 +614,7 @@ impl AppState {
         for ev in incoming {
             self.apply_rpc_incoming(ev);
         }
+        self.tick_search_debounce();
     }
 
     fn apply_rpc_incoming(&mut self, incoming: RpcIncoming) {
@@ -639,7 +655,9 @@ impl AppState {
     }
 
     pub fn wants_repaint(&self) -> bool {
-        self.pending_cancel.is_some() || (self.ws.is_some() && self.screen == Screen::Canvas)
+        self.pending_cancel.is_some()
+            || self.search_edited_at.is_some()
+            || (self.ws.is_some() && self.screen == Screen::Canvas)
     }
 
     pub fn request_retry(&mut self) {
@@ -672,6 +690,7 @@ impl AppState {
                         self.refresh_model_capability();
                         self.refresh_workspace_capability();
                         self.refresh_sync_capability();
+                        self.refresh_search_gc_capability();
                         self.refresh_tasks_catalog();
                         if self.screen == Screen::Canvas {
                             self.refresh_canvas_after_reconnect();
@@ -2739,10 +2758,8 @@ impl AppState {
         match session.artifact_export(&id, EXPORT_FORMAT) {
             Ok(ok) => {
                 let filename = artifacts::export_suggested_filename(&id, &ok.filename, "md");
-                if ok.format == "pdf" {
-                    self.toast = Some("PDF не поддерживается".into());
-                    return None;
-                }
+                // Nit 0081: host may echo format=pdf on the MD path. Save markdown anyway.
+                let _echoed_format = ok.format.as_str();
                 Some((filename, ok.markdown))
             }
             Err(err) => {
@@ -3804,6 +3821,203 @@ impl AppState {
                 self.toast = Some(summary);
             }
             Err(err) => self.surface_sync_error(err),
+        }
+    }
+
+    pub fn search_host_ok(&self) -> bool {
+        self.session
+            .as_ref()
+            .map(|s| s.search_accepted() && !s.search_rejected())
+            .unwrap_or(false)
+    }
+
+    pub fn worktree_gc_host_ok(&self) -> bool {
+        self.session
+            .as_ref()
+            .map(|s| s.worktree_gc_accepted() && !s.worktree_gc_rejected())
+            .unwrap_or(false)
+    }
+
+    fn refresh_search_gc_capability(&mut self) {
+        match &self.session {
+            Some(s) if s.search_accepted() && !s.search_rejected() => {
+                if self.search_status.as_deref() == Some(SEARCH_UNAVAILABLE) {
+                    self.search_status = None;
+                }
+            }
+            Some(s) if s.search_rejected() => {
+                if self.can_rpc() {
+                    self.search_status = Some(SEARCH_UNAVAILABLE.into());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn surface_search_unavailable(&mut self) {
+        self.search_status = Some(SEARCH_UNAVAILABLE.into());
+        self.toast = Some(SEARCH_UNAVAILABLE.into());
+    }
+
+    fn surface_search_error(&mut self, err: ConnectError) {
+        if err.is_search_unsupported() {
+            self.surface_search_unavailable();
+        } else {
+            let label = err.as_label();
+            self.search_status = Some(label.clone());
+            self.toast = Some(label);
+        }
+    }
+
+    fn surface_gc_unavailable(&mut self) {
+        self.toast = Some(GC_UNAVAILABLE.into());
+        self.show_worktree_gc_confirm = false;
+    }
+
+    fn surface_gc_error(&mut self, err: ConnectError) {
+        if err.is_worktree_gc_unsupported() {
+            self.surface_gc_unavailable();
+        } else {
+            self.toast = Some(err.as_label());
+        }
+    }
+
+    pub fn mark_search_edited(&mut self) {
+        self.search_edited_at = Some(Instant::now());
+    }
+
+    fn tick_search_debounce(&mut self) {
+        let Some(at) = self.search_edited_at else {
+            return;
+        };
+        if at.elapsed() < std::time::Duration::from_millis(SEARCH_DEBOUNCE_MS) {
+            return;
+        }
+        self.submit_search();
+    }
+
+    pub fn submit_search(&mut self) {
+        self.search_edited_at = None;
+        let q = self.search_q.trim().to_string();
+        if q.is_empty() {
+            self.search_items.clear();
+            self.search_ran = false;
+            self.last_search_q = None;
+            return;
+        }
+        if self.last_search_q.as_deref() == Some(q.as_str()) && self.search_ran {
+            return;
+        }
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        if !self.search_host_ok() && session.search_rejected() {
+            self.surface_search_unavailable();
+            return;
+        }
+        match session.search_query(&q, None) {
+            Ok(items) => {
+                self.search_items = items
+                    .into_iter()
+                    .map(|ok| SearchItem {
+                        kind: ok.kind,
+                        id: ok.id,
+                        title: ok.title,
+                        hint: ok.hint,
+                    })
+                    .collect();
+                self.search_ran = true;
+                self.last_search_q = Some(q);
+                if self.search_status.as_deref() == Some(SEARCH_UNAVAILABLE) {
+                    self.search_status = None;
+                }
+            }
+            Err(err) => {
+                self.search_items.clear();
+                self.search_ran = true;
+                self.last_search_q = Some(q);
+                self.surface_search_error(err);
+            }
+        }
+    }
+
+    pub fn activate_search_result(&mut self, index: usize) {
+        let Some(item) = self.search_items.get(index).cloned() else {
+            return;
+        };
+        match item.kind.as_str() {
+            search_ux::KIND_TASK => {
+                self.open_task(item.id);
+            }
+            search_ux::KIND_ARTIFACT => {
+                if let Some(art) = self.artifacts.iter().find(|a| a.id == item.id) {
+                    let task_id = art.task_id.clone();
+                    if self.selected_task_id.as_deref() != Some(task_id.as_str())
+                        && self.tasks.iter().any(|t| t.id == task_id)
+                    {
+                        self.open_task(task_id);
+                    }
+                }
+                self.select_artifact(item.id);
+                if self.split.right != crate::ladder::PaneKind::Artifacts {
+                    self.set_split_pane("right", crate::ladder::PaneKind::Artifacts);
+                }
+            }
+            search_ux::KIND_WORKSPACE => {
+                if let Some(ws) = self.workspaces.iter().find(|w| w.id == item.id) {
+                    self.workspace_id = Some(ws.id.clone());
+                    self.workspace_path = Some(ws.path.clone());
+                } else {
+                    self.workspace_id = Some(item.id);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub fn request_worktree_gc(&mut self) {
+        if !self.can_rpc() {
+            return;
+        }
+        if !self.worktree_gc_host_ok()
+            && self
+                .session
+                .as_ref()
+                .is_some_and(|s| s.worktree_gc_rejected())
+        {
+            self.surface_gc_unavailable();
+            return;
+        }
+        self.show_worktree_gc_confirm = true;
+    }
+
+    pub fn cancel_worktree_gc(&mut self) {
+        self.show_worktree_gc_confirm = false;
+    }
+
+    pub fn confirm_worktree_gc(&mut self) {
+        if !self.show_worktree_gc_confirm {
+            return;
+        }
+        self.show_worktree_gc_confirm = false;
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        if !self.worktree_gc_host_ok() && session.worktree_gc_rejected() {
+            self.surface_gc_unavailable();
+            return;
+        }
+        match session.worktree_gc(false) {
+            Ok(ok) => {
+                let value = serde_json::json!({
+                    "dryRun": ok.dry_run,
+                    "deleted": ok.deleted,
+                    "items": ok.items,
+                });
+                self.toast = Some(search_ux::format_gc_result(&value));
+                self.load_git_panel();
+            }
+            Err(err) => self.surface_gc_error(err),
         }
     }
 
@@ -7702,5 +7916,327 @@ mod tests {
         assert_eq!(state.messages[0].id, "keep-1");
         assert_eq!(state.agents.len(), 1);
         assert_eq!(state.selected_agent_id.as_deref(), Some("ag-1"));
+    }
+
+    fn search_gc_accepted_map() -> serde_json::Map<String, Value> {
+        let mut accepted = serde_json::Map::new();
+        for name in crate::rpc::SEARCH_GC_METHODS {
+            accepted.insert(name.to_string(), json!({"major": 1, "minor": 9}));
+        }
+        accepted
+    }
+
+    fn session_without_1_9() -> crate::rpc::Session {
+        use std::collections::BTreeMap;
+        let mut rejected = BTreeMap::new();
+        for name in crate::rpc::SEARCH_GC_METHODS {
+            rejected.insert((*name).to_string(), "unsupported".into());
+        }
+        crate::rpc::Session {
+            host_id: "host-a".into(),
+            host_version: "0.1.0".into(),
+            session_token: "tok-1".into(),
+            rpc_url: "http://127.0.0.1:1".into(),
+            ws_url: None,
+            accepted: BTreeMap::new(),
+            rejected,
+        }
+    }
+
+    fn start_search_gc_state_mock() -> SliceMock {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(Mutex::new(Vec::new()));
+        let hits_t = hits.clone();
+        thread::spawn(move || {
+            for stream in listener.incoming().take(64) {
+                let Ok(mut stream) = stream else { break };
+                let (headers, body) = read_http_request(&mut stream);
+                let parsed: Value = serde_json::from_slice(&body).unwrap_or(json!({}));
+                let method = if headers.starts_with("GET /health") {
+                    "GET /health".to_string()
+                } else {
+                    parsed
+                        .get("method")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("other")
+                        .to_string()
+                };
+                let params = parsed.get("params").cloned().unwrap_or(json!({}));
+                hits_t.lock().unwrap().push(RpcHit {
+                    method: method.clone(),
+                    params: params.clone(),
+                });
+                let body = match method.as_str() {
+                    "GET /health" => json!({"ok": true, "hostId": "host-a"}).to_string(),
+                    "handshake" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "hostId": "host-a",
+                            "hostVersion": "0.1.0",
+                            "sessionToken": "tok-1",
+                            "accepted": search_gc_accepted_map(),
+                            "rejected": {}
+                        }
+                    })
+                    .to_string(),
+                    "host.ping" => json!({
+                        "id": "echo",
+                        "ok": { "hostId": "host-a", "now": "2026-08-19T12:00:00Z" }
+                    })
+                    .to_string(),
+                    "search.query" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "items": [{
+                                "kind": "task",
+                                "id": "task-1",
+                                "title": "Auth",
+                                "hint": "open"
+                            }]
+                        }
+                    })
+                    .to_string(),
+                    "worktree.gc" => json!({
+                        "id": "echo",
+                        "ok": { "dryRun": false, "deleted": [] }
+                    })
+                    .to_string(),
+                    "worktree.get" => json!({
+                        "id": "echo",
+                        "error": { "code": "not_found", "message": "no worktree" }
+                    })
+                    .to_string(),
+                    "git.status" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "branch": "main",
+                            "dirty": false,
+                            "truncated": false,
+                            "entries": []
+                        }
+                    })
+                    .to_string(),
+                    _ => json!({
+                        "id": "echo",
+                        "error": { "code": "unsupported_method", "message": "no" }
+                    })
+                    .to_string(),
+                };
+                write_http_json(&mut stream, &body);
+            }
+        });
+        SliceMock {
+            origin: format!("http://{addr}"),
+            hits,
+        }
+    }
+
+    fn start_missing_method_search_mock() -> SliceMock {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(Mutex::new(Vec::new()));
+        let hits_t = hits.clone();
+        thread::spawn(move || {
+            for stream in listener.incoming().take(24) {
+                let Ok(mut stream) = stream else { break };
+                let (headers, body) = read_http_request(&mut stream);
+                let parsed: Value = serde_json::from_slice(&body).unwrap_or(json!({}));
+                let method = if headers.starts_with("GET /health") {
+                    "GET /health".to_string()
+                } else {
+                    parsed
+                        .get("method")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("other")
+                        .to_string()
+                };
+                let params = parsed.get("params").cloned().unwrap_or(json!({}));
+                hits_t.lock().unwrap().push(RpcHit {
+                    method: method.clone(),
+                    params: params.clone(),
+                });
+                let body = match method.as_str() {
+                    "GET /health" => json!({"ok": true, "hostId": "host-a"}).to_string(),
+                    "handshake" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "hostId": "host-a",
+                            "hostVersion": "0.1.0",
+                            "sessionToken": "tok-1",
+                            "accepted": {},
+                            "rejected": {}
+                        }
+                    })
+                    .to_string(),
+                    "host.ping" => json!({
+                        "id": "echo",
+                        "ok": { "hostId": "host-a", "now": "2026-08-19T12:00:00Z" }
+                    })
+                    .to_string(),
+                    _ => json!({
+                        "id": "echo",
+                        "error": { "code": "unsupported_method", "message": "no" }
+                    })
+                    .to_string(),
+                };
+                write_http_json(&mut stream, &body);
+            }
+        });
+        SliceMock {
+            origin: format!("http://{addr}"),
+            hits,
+        }
+    }
+
+    #[test]
+    fn search_query_sends_q_and_skips_empty() {
+        let mock = start_search_gc_state_mock();
+        let session = connect(&pid(&mock.origin)).expect("online");
+        let mut state = online_state(session);
+        state.search_q = "   ".into();
+        state.submit_search();
+        assert!(state.search_items.is_empty());
+        assert!(!state.search_ran);
+        let empty_hits = mock
+            .hits
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|h| h.method == "search.query")
+            .count();
+        assert_eq!(empty_hits, 0);
+        state.search_q = "auth".into();
+        state.submit_search();
+        assert_eq!(state.search_items.len(), 1);
+        assert_eq!(state.search_items[0].kind, "task");
+        assert_eq!(state.search_items[0].title, "Auth");
+        let hit = mock
+            .hits
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|h| h.method == "search.query")
+            .cloned()
+            .expect("search.query");
+        assert_eq!(hit.params["q"], "auth");
+        assert!(hit.params.get("kinds").is_none());
+        assert!(hit.params.get("prefix").is_none());
+    }
+
+    #[test]
+    fn old_host_search_and_gc_toast_and_do_not_panic() {
+        let mut state = AppState::new();
+        state.pending_discover = false;
+        state.demo = false;
+        state.host_status = HostStatus::Online;
+        state.session = Some(session_without_1_9());
+        state.workspace_id = Some("ws-1".into());
+        state.selected_task_id = Some("task-1".into());
+        state.selected_agent_id = Some("ag-1".into());
+        state.agents.push(AgentStub {
+            id: "ag-1".into(),
+            task_id: "task-1".into(),
+            parent_id: None,
+            provider: "cli.generic".into(),
+            status: AgentStatus::Idle,
+            interface: "chat".into(),
+        });
+        state.messages.push(ChatMessage {
+            id: "keep-1".into(),
+            role: "user".into(),
+            content: "stay".into(),
+        });
+        state.search_q = "auth".into();
+        assert!(!state.search_host_ok());
+        assert!(!state.worktree_gc_host_ok());
+        state.submit_search();
+        assert_eq!(state.toast.as_deref(), Some(SEARCH_UNAVAILABLE));
+        assert_eq!(SEARCH_UNAVAILABLE, "поиск недоступен: host без 1.9");
+        state.request_worktree_gc();
+        assert!(!state.show_worktree_gc_confirm);
+        assert_eq!(state.toast.as_deref(), Some(GC_UNAVAILABLE));
+        assert_eq!(GC_UNAVAILABLE, "очистка worktree недоступна: host без 1.9");
+        let _ = state.composer_enabled();
+        let _ = state.write_ready();
+        let _ = state.terminal_host_ok();
+        let _ = state.artifacts_host_ok();
+        let _ = state.a2a_host_ok();
+        let _ = state.model_ux_host_ok();
+        let _ = state.workspace_host_ok();
+        let _ = state.sync_host_ok();
+        assert_eq!(state.messages.len(), 1);
+        assert_eq!(state.messages[0].id, "keep-1");
+        assert_eq!(state.agents.len(), 1);
+    }
+
+    #[test]
+    fn missing_method_search_toasts_without_panic() {
+        let mock = start_missing_method_search_mock();
+        let session = connect(&pid(&mock.origin)).expect("online");
+        let mut state = online_state(session);
+        state.search_q = "auth".into();
+        state.submit_search();
+        assert_eq!(state.toast.as_deref(), Some(SEARCH_UNAVAILABLE));
+        let _ = state.composer_enabled();
+        let _ = state.write_ready();
+        state.request_worktree_gc();
+        assert!(state.show_worktree_gc_confirm);
+        state.confirm_worktree_gc();
+        assert_eq!(state.toast.as_deref(), Some(GC_UNAVAILABLE));
+    }
+
+    #[test]
+    fn worktree_gc_sends_after_confirm_not_before_or_cancel() {
+        let mock = start_search_gc_state_mock();
+        let session = connect(&pid(&mock.origin)).expect("online");
+        let mut state = online_state(session);
+        state.request_worktree_gc();
+        assert!(state.show_worktree_gc_confirm);
+        let before = mock
+            .hits
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|h| h.method == "worktree.gc")
+            .count();
+        assert_eq!(before, 0);
+        state.cancel_worktree_gc();
+        assert!(!state.show_worktree_gc_confirm);
+        let mid = mock
+            .hits
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|h| h.method == "worktree.gc")
+            .count();
+        assert_eq!(mid, 0);
+        state.request_worktree_gc();
+        state.confirm_worktree_gc();
+        assert!(!state.show_worktree_gc_confirm);
+        let hits = mock.hits.lock().unwrap().clone();
+        let gc = hits
+            .iter()
+            .find(|h| h.method == "worktree.gc")
+            .expect("worktree.gc");
+        assert_eq!(gc.params, json!({ "dryRun": false }));
+        assert!(gc.params.get("prefix").is_none());
+        assert!(gc.params.get("branchPrefix").is_none());
+        assert_eq!(state.toast.as_deref(), Some("очистка: deleted=0"));
+    }
+
+    #[test]
+    fn md_export_does_not_toast_stale_pdf_leftover() {
+        let mock = start_artifacts_state_mock();
+        let session = connect(&pid(&mock.origin)).expect("online");
+        let mut state = online_state(session);
+        state.selected_artifact_id = Some("art-1".into());
+        let exported = state.export_selected_markdown().expect("md");
+        assert_eq!(exported.0, "art-1.md");
+        assert_eq!(exported.1, "# Auth");
+        assert_ne!(state.toast.as_deref(), Some("PDF не поддерживается"));
+        state.selected_artifact_id = None;
+        assert!(state.export_selected_markdown().is_none());
+        assert_ne!(state.toast.as_deref(), Some("PDF не поддерживается"));
     }
 }

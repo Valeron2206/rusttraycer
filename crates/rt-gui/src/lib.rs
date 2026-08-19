@@ -10,6 +10,7 @@ mod ladder;
 mod model_ux;
 mod rpc;
 mod screens;
+mod search_ux;
 mod state;
 mod sync_ux;
 mod terminal;
