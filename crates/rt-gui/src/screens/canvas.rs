@@ -7,8 +7,9 @@ use crate::artifacts::{
     self, ArtifactKind, ARTIFACTS_PANE, ARTIFACTS_UNAVAILABLE, CLEAR_CONFIRM_BODY,
     CLEAR_CONFIRM_OK, CLEAR_CONFIRM_TITLE, CLEAR_TRANSCRIPT, COMMENTS_HEADING, COMMENT_HINT,
     COMMENT_ON_SELECTION, CREATE_AS_CHILD, CREATE_BUTTON, CREATE_KIND_LABEL, CREATE_TITLE_HINT,
-    DELETE_ARTIFACT, EDIT_BODY, EXPORT_MARKDOWN, FILTER_ALL, FILTER_KIND, FILTER_STATUS, NEED_TASK,
-    REPLY_BUTTON, RESOLVED_LABEL, RESOLVE_BUTTON, SAVE_BODY, STATUS_VALUES, VIEW_BODY,
+    DELETE_ARTIFACT, EDIT_BODY, EXPORT_MARKDOWN, EXPORT_PDF, FILTER_ALL, FILTER_KIND,
+    FILTER_STATUS, NEED_TASK, REPLY_BUTTON, RESOLVED_LABEL, RESOLVE_BUTTON, SAVE_BODY,
+    STATUS_VALUES, VIEW_BODY,
 };
 use crate::ladder::{
     AgentPolicy, PaneKind, PolicyMode, APPROVAL_ALWAYS, APPROVAL_DENY, APPROVAL_ONCE,
@@ -1671,6 +1672,11 @@ fn show_artifact_viewer(ui: &mut egui::Ui, state: &mut AppState) {
         if ui.button(EXPORT_MARKDOWN).clicked() {
             if let Some((filename, markdown)) = state.export_selected_markdown() {
                 state.save_exported_markdown(&filename, &markdown);
+            }
+        }
+        if ui.button(EXPORT_PDF).clicked() {
+            if let Some((filename, bytes)) = state.export_selected_pdf() {
+                state.save_exported_pdf(&filename, &bytes);
             }
         }
         if ui.button(DELETE_ARTIFACT).clicked() {

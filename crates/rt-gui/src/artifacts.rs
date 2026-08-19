@@ -1,4 +1,4 @@
-//! E5 artifacts GUI: tree, viewer, comments, markdown export. No host spawn.
+//! E5 artifacts GUI: tree, viewer, comments, markdown/PDF export. No host spawn.
 
 use std::collections::HashMap;
 
@@ -16,6 +16,7 @@ pub const FILTER_STATUS: &str = "Статус";
 pub const FILTER_ALL: &str = "все";
 pub const SAVE_BODY: &str = "Сохранить";
 pub const EXPORT_MARKDOWN: &str = "Экспорт Markdown";
+pub const EXPORT_PDF: &str = "Экспорт PDF";
 pub const DELETE_ARTIFACT: &str = "Удалить";
 pub const EDIT_BODY: &str = "Редактировать";
 pub const VIEW_BODY: &str = "Просмотр";
@@ -31,6 +32,9 @@ pub const CLEAR_CONFIRM_TITLE: &str = "Очистить транскрипт?";
 pub const CLEAR_CONFIRM_BODY: &str = "Сообщения агента будут удалены. Артефакты останутся.";
 pub const CLEAR_CONFIRM_OK: &str = "Очистить";
 pub const EXPORT_SAVED: &str = "Markdown сохранён";
+pub const EXPORT_PDF_SAVED: &str = "PDF сохранён";
+pub const EXPORT_PDF_EMPTY: &str = "host вернул пустой PDF";
+pub const EXPORT_PDF_BAD_BYTES: &str = "не удалось декодировать PDF";
 pub const KIND_SPEC: &str = "spec";
 pub const KIND_TICKET: &str = "ticket";
 pub const KIND_STORY: &str = "story";
@@ -40,6 +44,38 @@ pub const CREATE_KINDS: [&str; 4] = [KIND_SPEC, KIND_TICKET, KIND_STORY, KIND_RE
 pub const STATUS_VALUES: [&str; 3] = ["todo", "in_progress", "done"];
 
 pub const EXPORT_FORMAT: &str = "md";
+pub const EXPORT_FORMAT_PDF: &str = "pdf";
+
+/// Decode a 1.9 PDF payload. Prefer `bytes` (raw `%PDF` or base64); else markdown as base64 or raw UTF-8.
+pub fn decode_export_pdf(bytes: &str, markdown: &str) -> Result<Vec<u8>, String> {
+    if bytes.starts_with("%PDF") {
+        return Ok(bytes.as_bytes().to_vec());
+    }
+    let payload = bytes.trim();
+    if payload.starts_with("%PDF") {
+        return Ok(payload.as_bytes().to_vec());
+    }
+    if !payload.is_empty() {
+        return crate::terminal::decode_b64(payload)
+            .ok_or_else(|| EXPORT_PDF_BAD_BYTES.to_string());
+    }
+    let md = markdown.trim();
+    if md.is_empty() {
+        return Err(EXPORT_PDF_EMPTY.to_string());
+    }
+    if let Some(decoded) = crate::terminal::decode_b64(md) {
+        return Ok(decoded);
+    }
+    Ok(markdown.as_bytes().to_vec())
+}
+
+pub fn export_suggested_filename(id: &str, host_filename: &str, ext: &str) -> String {
+    if host_filename.trim().is_empty() {
+        format!("{id}.{ext}")
+    } else {
+        host_filename.to_string()
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ArtifactKind {
@@ -303,6 +339,7 @@ mod tests {
         assert_eq!(ARTIFACTS_UNAVAILABLE, "артефакты недоступны: host без 1.4");
         assert_eq!(NEED_TASK, "сначала выберите задачу");
         assert_eq!(EXPORT_MARKDOWN, "Экспорт Markdown");
+        assert_eq!(EXPORT_PDF, "Экспорт PDF");
         assert_eq!(CLEAR_CONFIRM_TITLE, "Очистить транскрипт?");
         assert_eq!(
             CLEAR_CONFIRM_BODY,
@@ -312,6 +349,8 @@ mod tests {
         assert_eq!(CLEAR_TRANSCRIPT, "Очистить транскрипт");
         assert_eq!(CREATE_KINDS, ["spec", "ticket", "story", "review"]);
         assert_eq!(EXPORT_FORMAT, "md");
+        assert_eq!(EXPORT_FORMAT_PDF, "pdf");
+        assert_eq!(EXPORT_PDF_SAVED, "PDF сохранён");
         assert_eq!(crate::rpc::METHOD_ARTIFACT_UPDATE, "artifact.update");
         assert_eq!(crate::rpc::METHOD_ARTIFACT_EXPORT, "artifact.export");
         assert_eq!(
@@ -362,5 +401,48 @@ mod tests {
         assert_eq!(utf8_range(0, 12), Some((0, 12)));
         assert_eq!(utf8_range(4, 4), None);
         assert_eq!(utf8_range(9, 3), None);
+    }
+
+    #[test]
+    fn decode_export_pdf_prefers_bytes_then_markdown() {
+        let raw = b"%PDF-1.4 test";
+        let b64 = crate::terminal::encode_b64(raw);
+        assert_eq!(decode_export_pdf(&b64, "ignored").unwrap(), raw);
+        assert_eq!(decode_export_pdf("", &b64).unwrap(), raw);
+        assert_eq!(decode_export_pdf("", "# Auth").unwrap(), b"# Auth");
+        assert_eq!(
+            decode_export_pdf("   ", "  ").unwrap_err(),
+            EXPORT_PDF_EMPTY
+        );
+        assert_eq!(
+            decode_export_pdf("!!!!", "").unwrap_err(),
+            EXPORT_PDF_BAD_BYTES
+        );
+        assert_eq!(export_suggested_filename("art-1", "", "pdf"), "art-1.pdf");
+        assert_eq!(
+            export_suggested_filename("art-1", "spec.pdf", "pdf"),
+            "spec.pdf"
+        );
+    }
+
+    #[test]
+    fn decode_export_pdf_accepts_raw_percent_pdf_or_base64() {
+        let raw = "%PDF-1.4\n1 0 obj\n<<>>\nendobj\n%%EOF\n";
+        let got = decode_export_pdf(raw, "ignored").unwrap();
+        assert!(got.starts_with(b"%PDF"), "raw payload must stay literal");
+        assert_eq!(got, raw.as_bytes());
+
+        let tiny = b"%PDF-1.4 tiny";
+        let b64 = crate::terminal::encode_b64(tiny);
+        assert_eq!(decode_export_pdf(&b64, "").unwrap(), tiny);
+
+        assert_eq!(
+            decode_export_pdf("not-valid-b64!!!", "").unwrap_err(),
+            EXPORT_PDF_BAD_BYTES
+        );
+        assert_eq!(
+            decode_export_pdf("!!!!", "").unwrap_err(),
+            EXPORT_PDF_BAD_BYTES
+        );
     }
 }

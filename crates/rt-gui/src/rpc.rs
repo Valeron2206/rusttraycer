@@ -1737,6 +1737,9 @@ pub struct ArtifactExportOk {
     pub markdown: String,
     #[serde(default)]
     pub filename: String,
+    /// Raw `%PDF` or base64 PDF when format=pdf (protocol 1.9). Empty for md.
+    #[serde(default)]
+    pub bytes: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -3892,7 +3895,7 @@ mod tests {
         let hits = Arc::new(Mutex::new(Vec::new()));
         let hits_t = hits.clone();
         thread::spawn(move || {
-            for stream in listener.incoming().take(32) {
+            for stream in listener.incoming().take(40) {
                 let Ok(mut stream) = stream else { break };
                 let (headers, body) = read_http_request(&mut stream);
                 let has_session = headers.to_ascii_lowercase().contains("x-rt-session:");
@@ -3979,15 +3982,34 @@ mod tests {
                         "ok": { "items": [sample], "truncated": false }
                     })
                     .to_string(),
-                    "artifact.export" => json!({
-                        "id": "echo",
-                        "ok": {
-                            "format": params.get("format").cloned().unwrap_or(json!("md")),
-                            "markdown": "# Auth",
-                            "filename": "art-1.md"
+                    "artifact.export" => {
+                        let format = params
+                            .get("format")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("md");
+                        if format == "pdf" {
+                            json!({
+                                "id": "echo",
+                                "ok": {
+                                    "format": "pdf",
+                                    "markdown": "",
+                                    "filename": "art-1.pdf",
+                                    "bytes": crate::terminal::encode_b64(b"%PDF-1.4 test")
+                                }
+                            })
+                            .to_string()
+                        } else {
+                            json!({
+                                "id": "echo",
+                                "ok": {
+                                    "format": format,
+                                    "markdown": "# Auth",
+                                    "filename": "art-1.md"
+                                }
+                            })
+                            .to_string()
                         }
-                    })
-                    .to_string(),
+                    }
                     "artifact.delete" => json!({
                         "id": "echo",
                         "ok": { "deleted": ["art-1"] }
@@ -4041,6 +4063,15 @@ mod tests {
             .artifact_export("art-1", crate::artifacts::EXPORT_FORMAT)
             .expect("export");
         assert_eq!(exported.format, "md");
+        let pdf = session
+            .artifact_export("art-1", crate::artifacts::EXPORT_FORMAT_PDF)
+            .expect("pdf");
+        assert_eq!(pdf.format, "pdf");
+        assert_eq!(pdf.filename, "art-1.pdf");
+        assert_eq!(
+            crate::terminal::decode_b64(&pdf.bytes).expect("b64"),
+            b"%PDF-1.4 test"
+        );
         session
             .comment_create("art-1", None, Some(0), Some(12), "nit")
             .expect("thread");
@@ -4056,8 +4087,13 @@ mod tests {
         assert_eq!(update.params["artifactId"], "art-1");
         assert_eq!(update.params["body"], "body");
         assert!(update.params.get("path").is_none());
-        let export = hits.iter().find(|h| h.method == "artifact.export").unwrap();
-        assert_eq!(export.params["format"], "md");
+        let exports: Vec<_> = hits
+            .iter()
+            .filter(|h| h.method == "artifact.export")
+            .collect();
+        assert_eq!(exports.len(), 2);
+        assert_eq!(exports[0].params["format"], "md");
+        assert_eq!(exports[1].params["format"], "pdf");
         let thread = hits
             .iter()
             .find(|h| h.method == "comment.create" && h.params["threadId"].is_null())
