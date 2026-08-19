@@ -404,10 +404,12 @@ mod tests {
         // Overlay/tmp can return ETXTBSY if we exec a just-written script.
         for _ in 0..20 {
             let events = collect(backend).await;
-            let busy = events.iter().any(|e| matches!(
-                e,
-                TurnEvent::Failed { message } if message.contains("Text file busy")
-            ));
+            let busy = events.iter().any(|e| {
+                matches!(
+                    e,
+                    TurnEvent::Failed { message } if message.contains("Text file busy")
+                )
+            });
             if !busy {
                 return events;
             }
@@ -458,7 +460,11 @@ sys.stdout.flush()
 "#,
         );
         let backend = CliGeneric::new(path.to_string_lossy().into_owned());
-        assert!(backend.available().available, "{}", backend.available().detail);
+        assert!(
+            backend.available().available,
+            "{}",
+            backend.available().detail
+        );
         let events = collect_exec(&backend).await;
         let tokens = tokens_of(&events);
         assert_eq!(tokens, "hi", "events={events:?}");
@@ -519,7 +525,10 @@ sys.stdout.flush()
         );
         let events = collect(&backend).await;
         let tokens = tokens_of(&events);
-        assert!(tokens.contains("space-ok"), "tokens={tokens:?} events={events:?}");
+        assert!(
+            tokens.contains("space-ok"),
+            "tokens={tokens:?} events={events:?}"
+        );
         assert!(matches!(
             events.last(),
             Some(TurnEvent::Finished { exit_code: 0 })
@@ -552,5 +561,294 @@ sys.stdout.flush()
             }
             other => panic!("expected single Failed, got {other:?}"),
         }
+    }
+
+    struct EnvRestore {
+        key: &'static str,
+        prev: Option<String>,
+    }
+
+    impl EnvRestore {
+        fn set(key: &'static str, val: &str) -> Self {
+            let prev = std::env::var(key).ok();
+            std::env::set_var(key, val);
+            Self { key, prev }
+        }
+
+        fn unset(key: &'static str) -> Self {
+            let prev = std::env::var(key).ok();
+            std::env::remove_var(key);
+            Self { key, prev }
+        }
+    }
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(v) => std::env::set_var(self.key, v),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    #[test]
+    fn from_env_unset_vs_set_and_default() {
+        let _g = crate::TEST_ENV_LOCK.lock().unwrap();
+        let _cmd = EnvRestore::unset("RUSTTRAYCER_GENERIC_CMD");
+        let _args = EnvRestore::unset("RUSTTRAYCER_GENERIC_ARGS");
+        let unset = CliGeneric::from_env();
+        assert!(!unset.available().available);
+        assert_eq!(unset.available().detail, "RUSTTRAYCER_GENERIC_CMD unset");
+
+        drop(_cmd);
+        let _cmd = EnvRestore::set("RUSTTRAYCER_GENERIC_CMD", "/bin/true");
+        let set = CliGeneric::from_env();
+        assert!(set.available().available, "{}", set.available().detail);
+        let defaulted = CliGeneric::default();
+        assert!(defaulted.available().available);
+        assert_eq!(defaulted.id(), "cli.generic");
+    }
+
+    #[test]
+    fn from_env_applies_valid_args_json() {
+        let _g = crate::TEST_ENV_LOCK.lock().unwrap();
+        let _cmd = EnvRestore::set("RUSTTRAYCER_GENERIC_CMD", "/bin/echo");
+        let _args = EnvRestore::set("RUSTTRAYCER_GENERIC_ARGS", r#"["from-env"]"#);
+        let backend = CliGeneric::from_env();
+        assert_eq!(backend.args, vec!["from-env".to_string()]);
+        assert!(backend.args_error.is_none());
+    }
+
+    #[test]
+    fn from_env_empty_args_json_is_ignored() {
+        let _g = crate::TEST_ENV_LOCK.lock().unwrap();
+        let _cmd = EnvRestore::set("RUSTTRAYCER_GENERIC_CMD", "/bin/true");
+        let _args = EnvRestore::set("RUSTTRAYCER_GENERIC_ARGS", "   ");
+        let backend = CliGeneric::from_env();
+        assert!(backend.args.is_empty());
+        assert!(backend.args_error.is_none());
+    }
+
+    #[test]
+    fn parse_generic_args_edges() {
+        assert_eq!(parse_generic_args("").unwrap(), Vec::<String>::new());
+        assert_eq!(parse_generic_args("   ").unwrap(), Vec::<String>::new());
+        assert_eq!(parse_generic_args("[]").unwrap(), Vec::<String>::new());
+        assert_eq!(
+            parse_generic_args(r#"["a","b"]"#).unwrap(),
+            vec!["a".to_string(), "b".to_string()]
+        );
+        let not_array = parse_generic_args("123").unwrap_err();
+        assert!(not_array.contains("JSON array"), "err={not_array}");
+        let not_string = parse_generic_args("[1]").unwrap_err();
+        assert!(not_string.contains("not a string"), "err={not_string}");
+        let bad_json = parse_generic_args("{").unwrap_err();
+        assert!(bad_json.contains("invalid JSON"), "err={bad_json}");
+    }
+
+    #[test]
+    fn apply_args_json_ok_clears_error() {
+        let mut backend = CliGeneric::new("/bin/true");
+        backend.apply_args_json("not-json");
+        assert!(backend.args_error.is_some());
+        backend.apply_args_json(r#"["ok"]"#);
+        assert!(backend.args_error.is_none());
+        assert_eq!(backend.args, vec!["ok".to_string()]);
+    }
+
+    #[test]
+    fn available_path_name_not_found_vs_found() {
+        let missing = CliGeneric::new("definitely-not-a-rt-generic-bin");
+        assert!(!missing.available().available);
+        assert!(
+            missing.available().detail.contains("not found"),
+            "{}",
+            missing.available().detail
+        );
+
+        let found = CliGeneric::new("true");
+        assert!(found.available().available, "{}", found.available().detail);
+
+        let slash_missing = CliGeneric::new("/no/such/rt-generic-cmd");
+        assert!(!slash_missing.available().available);
+        assert!(slash_missing.available().detail.contains("not found"));
+    }
+
+    #[test]
+    fn with_timeout_with_args_and_default_builder() {
+        let backend = CliGeneric::new("/bin/echo")
+            .with_args(vec!["x".into()])
+            .with_timeout(Duration::from_secs(3));
+        assert_eq!(backend.args, vec!["x".to_string()]);
+        assert_eq!(backend.timeout, Duration::from_secs(3));
+        assert!(backend.args_error.is_none());
+    }
+
+    #[test]
+    fn cancel_turn_default_is_ok() {
+        let backend = CliGeneric::new("/bin/true");
+        assert!(backend.cancel_turn("no-such-agent").is_ok());
+        let as_trait: &dyn AgentBackend = &backend;
+        assert!(as_trait.cancel_turn("still-missing").is_ok());
+    }
+
+    #[tokio::test]
+    async fn echo_epipe_is_not_write_stdin_failed() {
+        let backend = CliGeneric::new("/bin/echo");
+        let events = collect(&backend).await;
+        assert!(
+            events.iter().all(|e| !matches!(
+                e,
+                TurnEvent::Failed { message } if message.contains("write stdin")
+            )),
+            "events={events:?}"
+        );
+        assert!(matches!(
+            events.last(),
+            Some(TurnEvent::Finished { exit_code: 0 })
+        ));
+    }
+
+    #[tokio::test]
+    async fn true_epipe_finishes_without_stdin_failure() {
+        let backend = CliGeneric::new("/bin/true");
+        let events = collect(&backend).await;
+        assert!(
+            events.iter().all(|e| !matches!(
+                e,
+                TurnEvent::Failed { message } if message.contains("write stdin")
+            )),
+            "events={events:?}"
+        );
+        assert!(matches!(
+            events.last(),
+            Some(TurnEvent::Finished { exit_code: 0 })
+        ));
+    }
+
+    #[tokio::test]
+    async fn extra_env_is_applied() {
+        // Generic applies extra_env after the ID env vars (unlike Claude/Codex).
+        // Do not change prod: assert the existing order.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("print_env.py");
+        write_exec(
+            &path,
+            r#"#!/usr/bin/env python3
+import os, sys
+sys.stdin.read()
+print(os.environ.get("MY_EXTRA","") + " " + os.environ.get("RUSTTRAYCER_AGENT_ID",""), end="")
+"#,
+        );
+        let mut extra = BTreeMap::new();
+        extra.insert("MY_EXTRA".into(), "yes".into());
+        extra.insert("RUSTTRAYCER_AGENT_ID".into(), "hijack".into());
+        let mut req = echo_req();
+        req.extra_env = extra;
+        let backend = CliGeneric::new(path.to_string_lossy().into_owned());
+        let mut stream = backend.start_turn(req);
+        let mut events = Vec::new();
+        while let Some(ev) = stream.next().await {
+            events.push(ev);
+        }
+        let tokens = tokens_of(&events);
+        assert!(
+            tokens.contains("yes"),
+            "tokens={tokens:?} events={events:?}"
+        );
+        assert!(
+            tokens.contains("hijack"),
+            "extra_env overwrites IDs in generic; tokens={tokens:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn workspace_path_not_a_dir_fails() {
+        let mut req = echo_req();
+        req.workspace_path = std::env::temp_dir().join("rt-generic-not-a-dir-file");
+        std::fs::write(&req.workspace_path, b"x").unwrap();
+        let backend = CliGeneric::new("/bin/true");
+        let mut stream = backend.start_turn(req.clone());
+        let mut events = Vec::new();
+        while let Some(ev) = stream.next().await {
+            events.push(ev);
+        }
+        let _ = std::fs::remove_file(&req.workspace_path);
+        match events.as_slice() {
+            [TurnEvent::Failed { message }] => {
+                assert!(message.contains("not a directory"), "message={message}");
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn stderr_is_not_tokens() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stderr_and_out.sh");
+        write_exec(
+            &path,
+            "#!/bin/sh
+echo out-ok
+echo err-only >&2
+",
+        );
+        let backend = CliGeneric::new(path.to_string_lossy().into_owned());
+        let events = collect_exec(&backend).await;
+        let tokens = tokens_of(&events);
+        assert!(
+            tokens.contains("out-ok"),
+            "tokens={tokens:?} events={events:?}"
+        );
+        assert!(
+            !tokens.contains("err-only"),
+            "stderr leaked into tokens={tokens:?}"
+        );
+        assert!(matches!(
+            events.last(),
+            Some(TurnEvent::Finished { exit_code: 0 })
+        ));
+    }
+
+    #[tokio::test]
+    async fn spawn_failure_for_non_executable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("not_exec.txt");
+        std::fs::write(&path, "not a program").unwrap();
+        let backend = CliGeneric::new(path.to_string_lossy().into_owned());
+        assert!(
+            backend.available().available,
+            "regular file is resolvable: {}",
+            backend.available().detail
+        );
+        let events = collect(&backend).await;
+        match events.last() {
+            Some(TurnEvent::Failed { message }) => {
+                assert!(message.contains("spawn"), "message={message}");
+            }
+            other => panic!("expected spawn Failed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn leftover_invalid_utf8_is_still_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad_utf8.py");
+        write_exec(
+            &path,
+            r#"#!/usr/bin/env python3
+import sys
+sys.stdin.read()
+sys.stdout.buffer.write(b"ok" + bytes([0xFF]))
+"#,
+        );
+        let backend = CliGeneric::new(path.to_string_lossy().into_owned());
+        let events = collect_exec(&backend).await;
+        let tokens = tokens_of(&events);
+        assert!(tokens.contains("ok"), "tokens={tokens:?} events={events:?}");
+        assert!(matches!(
+            events.last(),
+            Some(TurnEvent::Finished { exit_code: 0 })
+        ));
     }
 }
