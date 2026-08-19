@@ -14,6 +14,13 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use serde_json::{json, Value};
 
+mod sync;
+
+pub use sync::{
+    prepare_sync, read_sync_secret, sync_execute, validate_peer_url, SyncInvocation, SyncOp,
+    METHOD_SYNC_PULL, METHOD_SYNC_PUSH, SYNC_SECRET_ENV, SYNC_SECRET_HEADER,
+};
+
 pub const PROTOCOL_CRATE: &str = "2.0.0";
 const SESSION_HEADER: &str = "X-Rt-Session";
 const STOP_WAIT: Duration = Duration::from_secs(2);
@@ -38,6 +45,20 @@ pub enum CliError {
     ResetNeedsYes,
     #[error("host is running; stop first")]
     HostRunning,
+    #[error("RUSTTRAYCER_SYNC_SECRET is missing")]
+    SyncSecretMissing,
+    #[error("workspace-id is required")]
+    SyncWorkspaceRequired,
+    #[error("peer URL is not a user-owned host (Traycer cloud is forbidden)")]
+    ForbiddenPeerUrl,
+    #[error("invalid peer URL")]
+    InvalidPeerUrl,
+    #[error("host is not running; start it first")]
+    HostNotRunning,
+    #[error("host rpcUrl is not loopback")]
+    HostNotLoopback,
+    #[error("rpc failed: {detail}")]
+    RpcFailed { detail: String },
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]
@@ -54,6 +75,13 @@ impl CliError {
             Self::InvalidPidFile(_) => "invalid_pid_file",
             Self::ResetNeedsYes => "reset_needs_yes",
             Self::HostRunning => "host_running",
+            Self::SyncSecretMissing => "sync_secret_missing",
+            Self::SyncWorkspaceRequired => "sync_workspace_required",
+            Self::ForbiddenPeerUrl => "forbidden_peer_url",
+            Self::InvalidPeerUrl => "invalid_peer_url",
+            Self::HostNotRunning => "host_not_running",
+            Self::HostNotLoopback => "host_not_loopback",
+            Self::RpcFailed { .. } => "rpc_failed",
             Self::Io(_) | Self::Json(_) => "internal",
         }
     }
@@ -537,7 +565,7 @@ fn port_from_rpc_url(url: &str) -> Option<u16> {
     port.parse().ok()
 }
 
-fn is_loopback_rpc(url: &str) -> bool {
+pub(crate) fn is_loopback_rpc(url: &str) -> bool {
     let u = url.trim();
     let rest = if let Some(r) = u.strip_prefix("http://") {
         r
@@ -604,23 +632,26 @@ fn rpc_post(agent: &ureq::Agent, url: &str, token: Option<&str>, body: &Value) -
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::io::Write;
-    use std::os::unix::fs::PermissionsExt;
+pub(crate) mod tests_support {
     use std::sync::{Mutex, MutexGuard};
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-    struct EnvGuard {
+    pub struct EnvGuard {
         key: &'static str,
         old: Option<std::ffi::OsString>,
     }
 
     impl EnvGuard {
-        fn set(key: &'static str, val: impl AsRef<std::ffi::OsStr>) -> Self {
+        pub fn set(key: &'static str, val: impl AsRef<std::ffi::OsStr>) -> Self {
             let old = std::env::var_os(key);
             std::env::set_var(key, val);
+            Self { key, old }
+        }
+
+        pub fn remove(key: &'static str) -> Self {
+            let old = std::env::var_os(key);
+            std::env::remove_var(key);
             Self { key, old }
         }
     }
@@ -634,9 +665,17 @@ mod tests {
         }
     }
 
-    fn lock_env() -> MutexGuard<'static, ()> {
+    pub fn lock_env() -> MutexGuard<'static, ()> {
         ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tests_support::{lock_env, EnvGuard};
+    use super::*;
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
 
     fn write_pid(dir: &Path, pid: u32) {
         fs::create_dir_all(dir).unwrap();
