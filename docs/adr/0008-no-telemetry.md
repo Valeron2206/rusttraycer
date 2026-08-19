@@ -1,6 +1,6 @@
 # ADR-0008 — No telemetry
 
-Status: proposed (task/0035-adr-0008-no-telemetry).
+Status: accepted (task/0035-adr-0008-no-telemetry, 2026-08-19).
 Source: `docs/directive-v2.md` §1 (do not copy Sentry/PostHog) and DoD §5 (no outbound network except explicit user action).
 Applies for the whole v2 line. Not deferred.
 
@@ -17,9 +17,9 @@ The spec is silent on crash reporters, usage pings, and “anonymous” metrics.
 **No product telemetry, ever, in v2.** Out of scope permanently — not a later epic.
 
 1. No Sentry, PostHog, Segment, OpenTelemetry exporters, crash-pad, or any analytics/crash SDK. No DSN, no `*-telemetry*` crate, no build feature that phones home.
-2. The host, GUI, and CLI make **no hidden network calls**. Outbound traffic is allowed only as a direct consequence of an explicit user action: send a turn (spawn the chosen harness), open a folder, apply a write the user approved, `git push` they confirmed, export/import they started. Loopback HTTP/WS to the local host is not “outbound”.
+2. The host, GUI, and CLI make **no hidden network calls**. Outbound traffic is allowed only as a direct consequence of an explicit user action: send a turn (spawn the chosen harness), apply a write the user approved, `git push` they confirmed, export/import they started. Loopback HTTP/WS to the local host is not “outbound”.
 3. `GET /metrics` (when E10 adds it) stays on loopback, unauthenticated to the local process, and is **not** shipped to a vendor. Structured `tracing` stays local (stderr / `host.log`).
-4. Reviewer rejects any PR that adds a vendor SDK, a hard-coded URL, a background upload, or an env var whose only job is a telemetry endpoint.
+4. Reviewer rejects any PR that adds a vendor SDK, a hard-coded telemetry/analytics endpoint, a background upload, or an env var whose only job is a telemetry endpoint.
 5. Self-hosted sync (E9) and provider CLIs are not telemetry: the user starts them, and they use system credentials (env / keyring / git credential helper), never a baked-in DSN.
 
 Rejected: “optional opt-in analytics”; rejected: crash-only Sentry; rejected: “we will add it after v2.0”.
