@@ -1,4 +1,4 @@
-//! Per-method {major,minor} negotiation. Existing methods stay 1.0; policy.* is 1.1.
+//! Per-method {major,minor} negotiation. Existing methods stay 1.0; policy.* is 1.1; write/git mutate is 1.2.
 
 use std::collections::BTreeMap;
 
@@ -206,5 +206,44 @@ mod tests {
         let all = host_methods();
         assert_eq!(all.len(), TRADABLE_METHODS.len());
         assert_eq!(all["files.tree"], MethodVersion { major: 1, minor: 0 });
+    }
+
+    #[test]
+    fn write_methods_accepted_at_1_2_tree_stays_1_0() {
+        let names = [
+            "files.write",
+            "files.patch",
+            "files.open",
+            "git.stage",
+            "git.unstage",
+            "git.restore",
+            "git.commit",
+            "git.push",
+        ];
+        let mut client = BTreeMap::new();
+        for name in names {
+            client.insert(name.into(), MethodVersion { major: 1, minor: 2 });
+        }
+        client.insert("files.tree".into(), MethodVersion { major: 1, minor: 0 });
+        let (acc, rej) = negotiate(&client);
+        assert!(rej.is_empty(), "{rej:?}");
+        for name in names {
+            assert_eq!(acc[name], MethodVersion { major: 1, minor: 2 });
+        }
+        assert_eq!(acc["files.tree"], MethodVersion { major: 1, minor: 0 });
+        assert_eq!(
+            host_methods()["files.write"],
+            MethodVersion { major: 1, minor: 2 }
+        );
+        assert_eq!(
+            host_methods()["files.tree"],
+            MethodVersion { major: 1, minor: 0 }
+        );
+
+        let mut older = BTreeMap::new();
+        older.insert("files.write".into(), MethodVersion { major: 1, minor: 0 });
+        let (acc, rej) = negotiate(&older);
+        assert!(rej.is_empty(), "{rej:?}");
+        assert_eq!(acc["files.write"], MethodVersion { major: 1, minor: 2 });
     }
 }

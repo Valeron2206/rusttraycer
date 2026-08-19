@@ -28,6 +28,10 @@ pub mod error_codes {
     pub const FILE_BINARY: &str = "file_binary";
     pub const DENIED: &str = "denied";
     pub const APPROVAL_EXPIRED: &str = "approval_expired";
+    pub const GIT_IDENTITY: &str = "git_identity";
+    pub const GIT_AUTH: &str = "git_auth";
+    pub const GIT_CONFLICT: &str = "git_conflict";
+    pub const PATCH_FAILED: &str = "patch_failed";
 }
 
 pub const METHOD_HANDSHAKE: &str = "handshake";
@@ -56,6 +60,14 @@ pub const METHOD_GIT_DIFF: &str = "git.diff";
 pub const METHOD_POLICY_GET: &str = "policy.get";
 pub const METHOD_POLICY_SET: &str = "policy.set";
 pub const METHOD_APPROVAL_RESPOND: &str = "approval.respond";
+pub const METHOD_FILES_WRITE: &str = "files.write";
+pub const METHOD_FILES_PATCH: &str = "files.patch";
+pub const METHOD_FILES_OPEN: &str = "files.open";
+pub const METHOD_GIT_STAGE: &str = "git.stage";
+pub const METHOD_GIT_UNSTAGE: &str = "git.unstage";
+pub const METHOD_GIT_RESTORE: &str = "git.restore";
+pub const METHOD_GIT_COMMIT: &str = "git.commit";
+pub const METHOD_GIT_PUSH: &str = "git.push";
 
 /// Tradable methods (handshake itself is not included).
 pub const TRADABLE_METHODS: &[&str] = &[
@@ -84,6 +96,14 @@ pub const TRADABLE_METHODS: &[&str] = &[
     METHOD_POLICY_GET,
     METHOD_POLICY_SET,
     METHOD_APPROVAL_RESPOND,
+    METHOD_FILES_WRITE,
+    METHOD_FILES_PATCH,
+    METHOD_FILES_OPEN,
+    METHOD_GIT_STAGE,
+    METHOD_GIT_UNSTAGE,
+    METHOD_GIT_RESTORE,
+    METHOD_GIT_COMMIT,
+    METHOD_GIT_PUSH,
 ];
 
 pub fn host_method_version() -> MethodVersion {
@@ -93,8 +113,9 @@ pub fn host_method_version() -> MethodVersion {
     }
 }
 
-/// Per-method negotiated version. Policy/approval methods are 1.1; all other
-/// tradable methods stay 1.0. Unknown names return `None`.
+/// Per-method negotiated version. Policy/approval methods are 1.1; write/git
+/// mutate methods are 1.2; all other tradable methods stay 1.0. Unknown names
+/// return `None`.
 pub fn method_version(name: &str) -> Option<MethodVersion> {
     if !TRADABLE_METHODS.iter().any(|m| *m == name) {
         return None;
@@ -102,6 +123,10 @@ pub fn method_version(name: &str) -> Option<MethodVersion> {
     match name {
         METHOD_POLICY_GET | METHOD_POLICY_SET | METHOD_APPROVAL_RESPOND => {
             Some(MethodVersion { major: 1, minor: 1 })
+        }
+        METHOD_FILES_WRITE | METHOD_FILES_PATCH | METHOD_FILES_OPEN | METHOD_GIT_STAGE
+        | METHOD_GIT_UNSTAGE | METHOD_GIT_RESTORE | METHOD_GIT_COMMIT | METHOD_GIT_PUSH => {
+            Some(MethodVersion { major: 1, minor: 2 })
         }
         _ => Some(host_method_version()),
     }
@@ -401,6 +426,42 @@ pub struct ApprovalRespondOk {
     pub applied: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FilesWriteOk {
+    pub path: String,
+    pub bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FilesPatchOk {
+    pub paths: Vec<String>,
+    pub hunks: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FilesOpenOk {
+    pub opened: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitCommitOk {
+    pub commit: String,
+    pub branch: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitPushOk {
+    pub remote: String,
+    #[serde(rename = "ref")]
+    pub ref_name: String,
+    pub ok: bool,
+}
+
 /// Wire `caps` object on `host.doctor.providers[]` (e1-canvas-v2).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -541,7 +602,11 @@ mod tests {
         assert_eq!(error_codes::INTERNAL, "internal");
         assert_eq!(error_codes::DENIED, "denied");
         assert_eq!(error_codes::APPROVAL_EXPIRED, "approval_expired");
-        assert_eq!(TRADABLE_METHODS.len(), 25);
+        assert_eq!(error_codes::GIT_IDENTITY, "git_identity");
+        assert_eq!(error_codes::GIT_AUTH, "git_auth");
+        assert_eq!(error_codes::GIT_CONFLICT, "git_conflict");
+        assert_eq!(error_codes::PATCH_FAILED, "patch_failed");
+        assert_eq!(TRADABLE_METHODS.len(), 33);
         assert!(TRADABLE_METHODS.contains(&METHOD_POLICY_GET));
         assert!(TRADABLE_METHODS.contains(&METHOD_POLICY_SET));
         assert!(TRADABLE_METHODS.contains(&METHOD_APPROVAL_RESPOND));
@@ -562,6 +627,44 @@ mod tests {
             method_version(METHOD_HOST_PING),
             Some(MethodVersion { major: 1, minor: 0 })
         );
+        assert_eq!(
+            method_version(METHOD_FILES_WRITE),
+            Some(MethodVersion { major: 1, minor: 2 })
+        );
+        assert_eq!(
+            method_version(METHOD_FILES_PATCH),
+            Some(MethodVersion { major: 1, minor: 2 })
+        );
+        assert_eq!(
+            method_version(METHOD_FILES_OPEN),
+            Some(MethodVersion { major: 1, minor: 2 })
+        );
+        assert_eq!(
+            method_version(METHOD_GIT_STAGE),
+            Some(MethodVersion { major: 1, minor: 2 })
+        );
+        assert_eq!(
+            method_version(METHOD_GIT_UNSTAGE),
+            Some(MethodVersion { major: 1, minor: 2 })
+        );
+        assert_eq!(
+            method_version(METHOD_GIT_RESTORE),
+            Some(MethodVersion { major: 1, minor: 2 })
+        );
+        assert_eq!(
+            method_version(METHOD_GIT_COMMIT),
+            Some(MethodVersion { major: 1, minor: 2 })
+        );
+        assert_eq!(
+            method_version(METHOD_GIT_PUSH),
+            Some(MethodVersion { major: 1, minor: 2 })
+        );
+        assert_eq!(
+            method_version(METHOD_FILES_TREE),
+            Some(MethodVersion { major: 1, minor: 0 })
+        );
+        assert!(TRADABLE_METHODS.contains(&METHOD_FILES_WRITE));
+        assert!(TRADABLE_METHODS.contains(&METHOD_GIT_PUSH));
         assert_eq!(method_version("handshake"), None);
         assert_eq!(method_version("no.such"), None);
     }
@@ -831,5 +934,57 @@ mod tests {
         assert_eq!(v["encoding"], "utf8");
         let read2: FileReadOk = serde_json::from_value(v).unwrap();
         assert_eq!(read2.content, "hi");
+    }
+
+    #[test]
+    fn e3_write_types_and_codes_camel_case() {
+        let w = FilesWriteOk {
+            path: "src/lib.rs".into(),
+            bytes: 12,
+        };
+        let v = serde_json::to_value(&w).unwrap();
+        assert_eq!(v["path"], "src/lib.rs");
+        assert_eq!(v["bytes"], 12);
+        let w2: FilesWriteOk = serde_json::from_value(v).unwrap();
+        assert_eq!(w2.path, "src/lib.rs");
+
+        let p = FilesPatchOk {
+            paths: vec!["a.rs".into(), "b.rs".into()],
+            hunks: 3,
+        };
+        let v = serde_json::to_value(&p).unwrap();
+        assert_eq!(v["paths"][0], "a.rs");
+        assert_eq!(v["hunks"], 3);
+        assert!(v.get("file_count").is_none());
+
+        let o = FilesOpenOk { opened: true };
+        let v = serde_json::to_value(&o).unwrap();
+        assert_eq!(v["opened"], true);
+
+        let c = GitCommitOk {
+            commit: "abc123".into(),
+            branch: "main".into(),
+        };
+        let v = serde_json::to_value(&c).unwrap();
+        assert_eq!(v["commit"], "abc123");
+        assert_eq!(v["branch"], "main");
+
+        let push = GitPushOk {
+            remote: "origin".into(),
+            ref_name: "main".into(),
+            ok: true,
+        };
+        let v = serde_json::to_value(&push).unwrap();
+        assert_eq!(v["remote"], "origin");
+        assert_eq!(v["ref"], "main");
+        assert_eq!(v["ok"], true);
+        assert!(v.get("ref_name").is_none());
+        let push2: GitPushOk = serde_json::from_value(v).unwrap();
+        assert_eq!(push2.ref_name, "main");
+
+        assert_eq!(error_codes::GIT_IDENTITY, "git_identity");
+        assert_eq!(error_codes::GIT_AUTH, "git_auth");
+        assert_eq!(error_codes::GIT_CONFLICT, "git_conflict");
+        assert_eq!(error_codes::PATCH_FAILED, "patch_failed");
     }
 }

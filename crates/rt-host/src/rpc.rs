@@ -308,6 +308,26 @@ async fn dispatch_method(
         }
         "git.status" => Ok(serde_json::to_value(svc.git_status(&params)?)?),
         "git.diff" => Ok(serde_json::to_value(svc.git_diff(&params)?)?),
+        "files.write" => {
+            let ladder = match session_token {
+                Some(t) => svc.session_accepts(t, rt_protocol::METHOD_POLICY_GET)? == Some(true),
+                None => false,
+            };
+            Ok(svc.files_write_gated(&params, ladder)?)
+        }
+        "files.patch" => {
+            let ladder = match session_token {
+                Some(t) => svc.session_accepts(t, rt_protocol::METHOD_POLICY_GET)? == Some(true),
+                None => false,
+            };
+            Ok(svc.files_patch_gated(&params, ladder)?)
+        }
+        "files.open" => Ok(svc.files_open(&params)?),
+        "git.stage" => Ok(serde_json::to_value(svc.git_stage(&params)?)?),
+        "git.unstage" => Ok(serde_json::to_value(svc.git_unstage(&params)?)?),
+        "git.restore" => Ok(serde_json::to_value(svc.git_restore(&params)?)?),
+        "git.commit" => Ok(serde_json::to_value(svc.git_commit(&params)?)?),
+        "git.push" => Ok(serde_json::to_value(svc.git_push(&params).await?)?),
         other => Err(HostError::UnsupportedMethod(other.to_string())),
     };
     match &result {

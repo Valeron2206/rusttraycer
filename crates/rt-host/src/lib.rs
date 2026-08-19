@@ -51,6 +51,14 @@ pub enum HostError {
     FileTooLarge(String),
     #[error("file is binary: {0}")]
     FileBinary(String),
+    #[error("git identity: {0}")]
+    GitIdentity(String),
+    #[error("git auth: {0}")]
+    GitAuth(String),
+    #[error("git conflict: {0}")]
+    GitConflict(String),
+    #[error("patch failed: {0}")]
+    PatchFailed(String),
     #[error("{0}")]
     Internal(String),
     #[error("already running (pid {pid})")]
@@ -75,6 +83,10 @@ impl HostError {
             Self::Unauthorized => "unauthorized",
             Self::FileTooLarge(_) => "file_too_large",
             Self::FileBinary(_) => "file_binary",
+            Self::GitIdentity(_) => "git_identity",
+            Self::GitAuth(_) => "git_auth",
+            Self::GitConflict(_) => "git_conflict",
+            Self::PatchFailed(_) => "patch_failed",
             Self::Internal(_) | Self::Io(_) | Self::Json(_) => "internal",
             Self::AlreadyRunning { .. } => "already_running",
         }
@@ -436,6 +448,10 @@ mod tests {
         assert_eq!(HostError::Unauthorized.code(), "unauthorized");
         assert_eq!(HostError::FileTooLarge("x".into()).code(), "file_too_large");
         assert_eq!(HostError::FileBinary("x".into()).code(), "file_binary");
+        assert_eq!(HostError::GitIdentity("x".into()).code(), "git_identity");
+        assert_eq!(HostError::GitAuth("x".into()).code(), "git_auth");
+        assert_eq!(HostError::GitConflict("x".into()).code(), "git_conflict");
+        assert_eq!(HostError::PatchFailed("x".into()).code(), "patch_failed");
         assert_eq!(HostError::Internal("x".into()).code(), "internal");
         assert_eq!(
             HostError::AlreadyRunning {

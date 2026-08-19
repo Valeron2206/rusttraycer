@@ -33,12 +33,35 @@ struct Session {
 }
 
 #[derive(Clone, Debug)]
+enum EditOp {
+    Write,
+    Patch,
+}
+
+#[derive(Clone, Debug)]
+enum PendingKind {
+    Exec,
+    EditWrite {
+        workspace_id: String,
+        worktree_id: Option<String>,
+        path: String,
+        content: String,
+    },
+    EditPatch {
+        workspace_id: String,
+        worktree_id: Option<String>,
+        patch: String,
+    },
+}
+
+#[derive(Clone, Debug)]
 struct PendingApproval {
     approval_id: String,
     agent_id: String,
     task_id: String,
     kind: String,
     summary: String,
+    payload: PendingKind,
 }
 
 #[derive(Default)]
@@ -530,6 +553,7 @@ impl HostService {
                     task_id: task.id.clone(),
                     kind: "exec".into(),
                     summary: summary.clone(),
+                    payload: PendingKind::Exec,
                 })?;
                 let _ = self.events.send(WsEvent::agent_approval(
                     &approval_id,
@@ -727,7 +751,7 @@ impl HostService {
                     task_id = %pending.task_id,
                     "approval allow-once"
                 );
-                self.start_saved_turn(&pending)
+                self.apply_pending(&pending)
             }
             ApprovalDecision::AllowAlways => {
                 tracing::info!(
@@ -746,7 +770,7 @@ impl HostService {
                     "agent",
                     yolo,
                 )?;
-                self.start_saved_turn(&pending)
+                self.apply_pending(&pending)
             }
         };
         if let Err(e) = result {
@@ -882,6 +906,211 @@ impl HostService {
             return Err(e);
         }
         Ok(user)
+    }
+
+    fn apply_pending(&self, pending: &PendingApproval) -> Result<()> {
+        match &pending.payload {
+            PendingKind::Exec => self.start_saved_turn(pending),
+            PendingKind::EditWrite {
+                workspace_id,
+                worktree_id,
+                path,
+                content,
+            } => {
+                files::apply_write(
+                    &self.store,
+                    workspace_id,
+                    worktree_id.as_deref(),
+                    path,
+                    content,
+                )?;
+                Ok(())
+            }
+            PendingKind::EditPatch {
+                workspace_id,
+                worktree_id,
+                patch,
+            } => {
+                self.apply_patch_at(workspace_id, worktree_id.as_deref(), patch)?;
+                Ok(())
+            }
+        }
+    }
+
+    pub fn files_write_gated(
+        &self,
+        params: &serde_json::Value,
+        ladder: bool,
+    ) -> Result<serde_json::Value> {
+        self.edit_gated(params, ladder, EditOp::Write)
+    }
+
+    pub fn files_patch_gated(
+        &self,
+        params: &serde_json::Value,
+        ladder: bool,
+    ) -> Result<serde_json::Value> {
+        self.edit_gated(params, ladder, EditOp::Patch)
+    }
+
+    pub fn files_open(&self, params: &serde_json::Value) -> Result<serde_json::Value> {
+        files::files_open(&self.store, params)
+    }
+
+    fn edit_gated(
+        &self,
+        params: &serde_json::Value,
+        ladder: bool,
+        op: EditOp,
+    ) -> Result<serde_json::Value> {
+        if !params.is_object() {
+            return Err(HostError::InvalidParams("params must be an object".into()));
+        }
+        let workspace_id = params
+            .get("workspaceId")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| HostError::InvalidParams("workspaceId is required".into()))?;
+        let agent_id = params
+            .get("agentId")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| HostError::InvalidParams("agentId is required".into()))?;
+        if uuid::Uuid::parse_str(agent_id).is_err() {
+            return Err(HostError::InvalidParams("invalid agentId".into()));
+        }
+        let worktree_id = match params.get("worktreeId") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(serde_json::Value::String(s)) => Some(s.as_str()),
+            Some(_) => {
+                return Err(HostError::InvalidParams(
+                    "worktreeId must be a string".into(),
+                ));
+            }
+        };
+
+        let (summary, payload) = match op {
+            EditOp::Write => {
+                let path = params
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| HostError::InvalidParams("path is required".into()))?;
+                let content = params
+                    .get("content")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| HostError::InvalidParams("content is required".into()))?;
+                files::check_text_content(content)?;
+                let ws = files::require_workspace(&self.store, workspace_id)?;
+                let root = files::walk_root(&self.store, &ws, worktree_id)?;
+                files::resolve_for_create(&root, path)?;
+                (
+                    format!("write {path}"),
+                    PendingKind::EditWrite {
+                        workspace_id: workspace_id.to_string(),
+                        worktree_id: worktree_id.map(str::to_string),
+                        path: path.to_string(),
+                        content: content.to_string(),
+                    },
+                )
+            }
+            EditOp::Patch => {
+                let patch = params
+                    .get("patch")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| HostError::InvalidParams("patch is required".into()))?;
+                if (patch.len() as u64) > files::MAX_FILE_BYTES {
+                    return Err(HostError::FileTooLarge("patch exceeds 256 KiB".into()));
+                }
+                let scan = patch.len().min(files::BINARY_SCAN_BYTES);
+                if patch.as_bytes()[..scan].contains(&0) {
+                    return Err(HostError::FileBinary("NUL in first 8 KiB".into()));
+                }
+                let (paths, _) = crate::worktree::parse_patch_stats(patch);
+                let summary = if paths.is_empty() {
+                    "patch".to_string()
+                } else {
+                    format!("patch {} files", paths.len())
+                };
+                (
+                    summary,
+                    PendingKind::EditPatch {
+                        workspace_id: workspace_id.to_string(),
+                        worktree_id: worktree_id.map(str::to_string),
+                        patch: patch.to_string(),
+                    },
+                )
+            }
+        };
+
+        let gate = self
+            .turn_gate
+            .lock()
+            .map_err(|_| HostError::Internal("turn_gate poisoned".into()))?;
+
+        let agent = self
+            .store
+            .agent_get(agent_id)?
+            .ok_or_else(|| HostError::NotFound(format!("agent {agent_id}")))?;
+
+        if agent.status == AgentStatus::Running
+            || self.inflight.contains(agent_id)?
+            || self.has_pending_locked(agent_id)?
+        {
+            return Err(HostError::AgentBusy);
+        }
+
+        if ladder {
+            let view = self.resolve_policy_for_agent(agent_id)?;
+            if !view.yolo && view.mode == PolicyMode::Deny {
+                tracing::info!(agent_id, "policy deny edit");
+                return Err(HostError::Denied);
+            }
+            if !view.yolo && view.mode == PolicyMode::Ask {
+                let approval_id = rt_storage::new_id();
+                self.store_pending(PendingApproval {
+                    approval_id: approval_id.clone(),
+                    agent_id: agent_id.to_string(),
+                    task_id: agent.task_id.clone(),
+                    kind: "edit".into(),
+                    summary: summary.clone(),
+                    payload,
+                })?;
+                let _ = self.events.send(WsEvent::agent_approval(
+                    &approval_id,
+                    agent_id,
+                    &agent.task_id,
+                    "edit",
+                    &summary,
+                ));
+                tracing::info!(agent_id, approval_id = %approval_id, "edit approval pending");
+                drop(gate);
+                let mut ok = serde_json::json!({ "approvalId": approval_id });
+                if let Some(path) = params.get("path") {
+                    ok["path"] = path.clone();
+                }
+                return Ok(ok);
+            }
+        }
+
+        drop(gate);
+        match payload {
+            PendingKind::EditWrite {
+                workspace_id,
+                worktree_id,
+                path,
+                content,
+            } => files::apply_write(
+                &self.store,
+                &workspace_id,
+                worktree_id.as_deref(),
+                &path,
+                &content,
+            ),
+            PendingKind::EditPatch {
+                workspace_id,
+                worktree_id,
+                patch,
+            } => self.apply_patch_at(&workspace_id, worktree_id.as_deref(), &patch),
+            PendingKind::Exec => Err(HostError::Internal("edit payload missing".into())),
+        }
     }
 
     fn start_saved_turn(&self, pending: &PendingApproval) -> Result<()> {
