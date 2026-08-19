@@ -130,9 +130,7 @@ fn post_rpc(
         "method": method,
         "params": params,
     });
-    let mut req = http
-        .post(&url)
-        .set("Content-Type", "application/json");
+    let mut req = http.post(&url).set("Content-Type", "application/json");
     if let Some(token) = token {
         req = req.set(rt_protocol::SESSION_HEADER, token);
     }
@@ -147,10 +145,7 @@ fn post_rpc(
             .as_str()
             .unwrap_or("error")
             .to_string();
-        let message = value["error"]["message"]
-            .as_str()
-            .unwrap_or("")
-            .to_string();
+        let message = value["error"]["message"].as_str().unwrap_or("").to_string();
         return Err(ConnectError::Rpc { code, message });
     }
     if value.get("ok").is_none() {
@@ -193,7 +188,8 @@ fn handshake(http: &ureq::Agent, origin: &str) -> Result<ServerHello, ConnectErr
         ConnectError::Transport(msg) => ConnectError::Handshake(msg),
         other => other,
     })?;
-    serde_json::from_value(value["ok"].clone()).map_err(|err| ConnectError::Handshake(err.to_string()))
+    serde_json::from_value(value["ok"].clone())
+        .map_err(|err| ConnectError::Handshake(err.to_string()))
 }
 
 pub fn ping(http: &ureq::Agent, origin: &str, token: Option<&str>) -> Result<String, ConnectError> {
@@ -304,17 +300,11 @@ impl Session {
     }
 
     pub fn workspace_add(&self, path: &str) -> Result<rt_protocol::Workspace, ConnectError> {
-        parse_ok(self.call(
-            rt_protocol::METHOD_WORKSPACE_ADD,
-            json!({ "path": path }),
-        )?)
+        parse_ok(self.call(rt_protocol::METHOD_WORKSPACE_ADD, json!({ "path": path }))?)
     }
 
     pub fn task_list(&self, status: &str) -> Result<Vec<rt_protocol::Task>, ConnectError> {
-        parse_items(self.call(
-            rt_protocol::METHOD_TASK_LIST,
-            json!({ "status": status }),
-        )?)
+        parse_items(self.call(rt_protocol::METHOD_TASK_LIST, json!({ "status": status }))?)
     }
 
     pub fn task_create(
@@ -336,10 +326,7 @@ impl Session {
     }
 
     pub fn task_archive(&self, id: &str) -> Result<rt_protocol::Task, ConnectError> {
-        parse_ok(self.call(
-            rt_protocol::METHOD_TASK_ARCHIVE,
-            json!({ "id": id }),
-        )?)
+        parse_ok(self.call(rt_protocol::METHOD_TASK_ARCHIVE, json!({ "id": id }))?)
     }
 
     /// `workspace.list`, then `task.list` with `status` if a workspace exists.
@@ -354,10 +341,7 @@ impl Session {
     }
 
     pub fn agent_list(&self, task_id: &str) -> Result<Vec<rt_protocol::Agent>, ConnectError> {
-        parse_items(self.call(
-            rt_protocol::METHOD_AGENT_LIST,
-            json!({ "taskId": task_id }),
-        )?)
+        parse_items(self.call(rt_protocol::METHOD_AGENT_LIST, json!({ "taskId": task_id }))?)
     }
 
     pub fn agent_create(
@@ -373,6 +357,13 @@ impl Session {
 
     pub fn agent_get(&self, id: &str) -> Result<rt_protocol::Agent, ConnectError> {
         parse_ok(self.call(rt_protocol::METHOD_AGENT_GET, json!({ "id": id }))?)
+    }
+
+    pub fn agent_cancel(&self, agent_id: &str) -> Result<CancelOk, ConnectError> {
+        parse_ok(self.call(
+            rt_protocol::METHOD_AGENT_CANCEL,
+            json!({ "agentId": agent_id }),
+        )?)
     }
 
     pub fn agent_send(
@@ -492,6 +483,13 @@ impl Session {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct CancelOk {
+    pub agent_id: String,
+    pub cancelled: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 #[allow(dead_code)]
 pub struct Worktree {
     pub id: String,
@@ -534,7 +532,6 @@ pub struct GitDiffFile {
     pub path: String,
     pub patch: Option<String>,
 }
-
 
 pub fn keepalive(session: &Session) -> Result<(), ConnectError> {
     let http = agent();
@@ -581,12 +578,15 @@ mod tests {
                     }
                     if let Some(pos) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
                         let headers = String::from_utf8_lossy(&raw[..pos]);
-                        let cl = headers.lines().find_map(|line| {
-                            let lower = line.to_ascii_lowercase();
-                            lower
-                                .strip_prefix("content-length:")
-                                .and_then(|s| s.trim().parse::<usize>().ok())
-                        }).unwrap_or(0);
+                        let cl = headers
+                            .lines()
+                            .find_map(|line| {
+                                let lower = line.to_ascii_lowercase();
+                                lower
+                                    .strip_prefix("content-length:")
+                                    .and_then(|s| s.trim().parse::<usize>().ok())
+                            })
+                            .unwrap_or(0);
                         if raw.len() >= pos + 4 + cl {
                             break;
                         }
@@ -616,12 +616,15 @@ mod tests {
                             "accepted": { "host.ping": {"major": 1, "minor": 0} },
                             "rejected": {}
                         }
-                    }).to_string(),
+                    })
+                    .to_string(),
                     "POST host.ping" => json!({
                         "id": "echo",
                         "ok": { "hostId": host_id, "now": "2026-08-17T12:00:00Z" }
-                    }).to_string(),
-                    _ => json!({"id":"echo","error":{"code":"unsupported_method","message":"no"}}).to_string(),
+                    })
+                    .to_string(),
+                    _ => json!({"id":"echo","error":{"code":"unsupported_method","message":"no"}})
+                        .to_string(),
                 };
                 let resp = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -812,33 +815,42 @@ mod tests {
                             "accepted": { "host.ping": {"major": 1, "minor": 0} },
                             "rejected": {}
                         }
-                    }).to_string(),
+                    })
+                    .to_string(),
                     "host.ping" => json!({
                         "id": "echo",
                         "ok": { "hostId": host_id, "now": "2026-08-17T12:00:00Z" }
-                    }).to_string(),
+                    })
+                    .to_string(),
                     "workspace.list" => json!({
                         "id": "echo",
                         "ok": { "items": [sample_workspace(&host_id, "/tmp/proj")] }
-                    }).to_string(),
+                    })
+                    .to_string(),
                     "workspace.add" => {
                         let path = params.get("path").and_then(|v| v.as_str()).unwrap_or("");
                         json!({
                             "id": "echo",
                             "ok": sample_workspace(&host_id, path)
-                        }).to_string()
+                        })
+                        .to_string()
                     }
                     "task.list" => json!({
                         "id": "echo",
                         "ok": { "items": [sample_task("task-1", "Demo", "open", "ws-1")] }
-                    }).to_string(),
+                    })
+                    .to_string(),
                     "task.create" => {
                         let title = params.get("title").and_then(|v| v.as_str()).unwrap_or("");
-                        let ws = params.get("workspaceId").and_then(|v| v.as_str()).unwrap_or("");
+                        let ws = params
+                            .get("workspaceId")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
                         json!({
                             "id": "echo",
                             "ok": sample_task("task-new", title, "open", ws)
-                        }).to_string()
+                        })
+                        .to_string()
                     }
                     "task.rename" => {
                         let id = params.get("id").and_then(|v| v.as_str()).unwrap_or("");
@@ -846,19 +858,22 @@ mod tests {
                         json!({
                             "id": "echo",
                             "ok": sample_task(id, title, "open", "ws-1")
-                        }).to_string()
+                        })
+                        .to_string()
                     }
                     "task.archive" => {
                         let id = params.get("id").and_then(|v| v.as_str()).unwrap_or("");
                         json!({
                             "id": "echo",
                             "ok": sample_task(id, "Demo", "archived", "ws-1")
-                        }).to_string()
+                        })
+                        .to_string()
                     }
                     _ => json!({
                         "id": "echo",
                         "error": { "code": "unsupported_method", "message": "no" }
-                    }).to_string(),
+                    })
+                    .to_string(),
                 };
                 write_http_json(&mut stream, &body);
             }
@@ -882,9 +897,7 @@ mod tests {
     fn catalog_after_connect_calls_workspace_and_task_list() {
         let mock = start_catalog_mock("host-a", "tok-1");
         let session = connect(&pid("host-a", &mock.origin)).expect("online");
-        let catalog = session
-            .refresh_tasks_catalog("open")
-            .expect("catalog");
+        let catalog = session.refresh_tasks_catalog("open").expect("catalog");
         assert_eq!(catalog.workspaces.len(), 1);
         assert_eq!(catalog.workspaces[0].id, "ws-1");
         assert_eq!(catalog.tasks.len(), 1);
@@ -981,19 +994,23 @@ mod tests {
                             "accepted": {},
                             "rejected": {}
                         }
-                    }).to_string(),
+                    })
+                    .to_string(),
                     "host.ping" => json!({
                         "id": "echo",
                         "ok": { "hostId": "host-a", "now": "2026-08-17T12:00:00Z" }
-                    }).to_string(),
+                    })
+                    .to_string(),
                     "workspace.add" => json!({
                         "id": "echo",
                         "error": {
                             "code": "workspace_path_invalid",
                             "message": "path must exist and be a directory"
                         }
-                    }).to_string(),
-                    _ => json!({"id":"echo","error":{"code":"unsupported_method","message":"no"}}).to_string(),
+                    })
+                    .to_string(),
+                    _ => json!({"id":"echo","error":{"code":"unsupported_method","message":"no"}})
+                        .to_string(),
                 };
                 write_http_json(&mut stream, &body);
             }
@@ -1010,7 +1027,6 @@ mod tests {
             other => panic!("expected Rpc, got {other:?}"),
         }
     }
-
 
     fn sample_agent(id: &str, task_id: &str, status: &str) -> Value {
         json!({
@@ -1111,6 +1127,21 @@ mod tests {
                             "ok": { "userMessage": sample_message("m-new", agent_id, "user", content) }
                         }).to_string()
                     }
+                    "agent.cancel" => {
+                        let agent_id = params.get("agentId").and_then(|v| v.as_str()).unwrap_or("");
+                        if agent_id == "missing" {
+                            json!({
+                                "id": "echo",
+                                "error": { "code": "not_found", "message": "no agent" }
+                            }).to_string()
+                        } else {
+                            let cancelled = agent_id == "ag-running";
+                            json!({
+                                "id": "echo",
+                                "ok": { "agentId": agent_id, "cancelled": cancelled }
+                            }).to_string()
+                        }
+                    }
                     "worktree.ensure" => {
                         let agent_id = params.get("agentId").and_then(|v| v.as_str()).unwrap_or("ag-1");
                         json!({
@@ -1207,7 +1238,9 @@ mod tests {
         let listed = session.agent_list("task-1").expect("list");
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].id, "ag-1");
-        let created = session.agent_create("task-1", "cli.generic").expect("create");
+        let created = session
+            .agent_create("task-1", "cli.generic")
+            .expect("create");
         assert_eq!(created.id, "ag-new");
         assert_eq!(created.task_id, "task-1");
         assert_eq!(created.provider, "cli.generic");
@@ -1230,11 +1263,41 @@ mod tests {
         assert_eq!(create.params["provider"], "cli.generic");
         let get = hits.iter().find(|h| h.method == "agent.get").unwrap();
         assert_eq!(get.params["id"], "ag-1");
-        let ctx_hit = hits.iter().find(|h| h.method == "agent.get_context").unwrap();
+        let ctx_hit = hits
+            .iter()
+            .find(|h| h.method == "agent.get_context")
+            .unwrap();
         assert_eq!(ctx_hit.params["agentId"], "ag-1");
         let send = hits.iter().find(|h| h.method == "agent.send").unwrap();
         assert_eq!(send.params["agentId"], "ag-1");
         assert_eq!(send.params["content"], "hello");
+    }
+
+    #[test]
+    fn agent_cancel_sends_method_and_parses_cancelled() {
+        let mock = start_agent_files_mock("host-a", "tok-1");
+        let session = connect(&pid("host-a", &mock.origin)).expect("online");
+        let yes = session.agent_cancel("ag-running").expect("cancel true");
+        assert_eq!(yes.agent_id, "ag-running");
+        assert!(yes.cancelled);
+        let no = session.agent_cancel("ag-idle").expect("cancel false");
+        assert_eq!(no.agent_id, "ag-idle");
+        assert!(!no.cancelled);
+        let err = session.agent_cancel("missing").unwrap_err();
+        match err {
+            ConnectError::Rpc { code, .. } => assert_eq!(code, "not_found"),
+            other => panic!("expected not_found, got {other:?}"),
+        }
+
+        let hits = mock.hits.lock().unwrap().clone();
+        let cancels: Vec<_> = hits.iter().filter(|h| h.method == "agent.cancel").collect();
+        assert_eq!(cancels.len(), 3);
+        assert_eq!(cancels[0].params["agentId"], "ag-running");
+        assert!(cancels[0].has_session);
+        assert_eq!(cancels[1].params["agentId"], "ag-idle");
+        assert!(cancels[1].has_session);
+        assert_eq!(cancels[2].params["agentId"], "missing");
+        assert!(cancels[2].has_session);
     }
 
     #[test]
@@ -1269,9 +1332,10 @@ mod tests {
         assert_eq!(trees[1].params["workspaceId"], "ws-1");
         assert_eq!(trees[1].params["path"], "src");
         assert!(trees[0].has_session);
-        let read_hit = hits.iter().find(|h| {
-            h.method == "files.read" && h.params["path"] == "README.md"
-        }).unwrap();
+        let read_hit = hits
+            .iter()
+            .find(|h| h.method == "files.read" && h.params["path"] == "README.md")
+            .unwrap();
         assert_eq!(read_hit.params["workspaceId"], "ws-1");
         assert_eq!(read_hit.params["path"], "README.md");
     }
@@ -1341,7 +1405,10 @@ mod tests {
                                 host_id: host_id.to_string(),
                                 pid: v.get("pid").and_then(|x| x.as_u64()).unwrap_or(0),
                                 rpc_url: rpc_url.to_string(),
-                                ws_url: v.get("wsUrl").and_then(|x| x.as_str()).map(|s| s.to_string()),
+                                ws_url: v
+                                    .get("wsUrl")
+                                    .and_then(|x| x.as_str())
+                                    .map(|s| s.to_string()),
                                 started_at: v
                                     .get("startedAt")
                                     .and_then(|x| x.as_str())
@@ -1489,7 +1556,8 @@ mod tests {
         ));
         std::fs::create_dir_all(&script_home).unwrap();
         let script = write_generic_script(&script_home);
-        let Some(mut live) = spawn_live_host_env(&[("RUSTTRAYCER_GENERIC_CMD", script.as_os_str())])
+        let Some(mut live) =
+            spawn_live_host_env(&[("RUSTTRAYCER_GENERIC_CMD", script.as_os_str())])
         else {
             let _ = std::fs::remove_dir_all(&script_home);
             return;
@@ -1603,7 +1671,9 @@ mod tests {
                 "WS assistant chunks were not observed (user_ws={saw_user_ws} idle={saw_idle}); RPC path still asserted"
             );
         } else {
-            eprintln!("live WS loop: assistant={saw_assistant} idle={saw_idle} user_ws={saw_user_ws}");
+            eprintln!(
+                "live WS loop: assistant={saw_assistant} idle={saw_idle} user_ws={saw_user_ws}"
+            );
         }
 
         // Simulate GUI restart: new handshake + get_context, no merge.
@@ -1650,6 +1720,23 @@ mod tests {
     }
 
     #[test]
+    fn handshake_advertises_agent_cancel() {
+        let mock = start_catalog_mock("host-a", "tok-1");
+        let _session = connect(&pid("host-a", &mock.origin)).expect("online");
+        let hs = mock
+            .hits
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|h| h.method == "handshake")
+            .cloned()
+            .expect("handshake");
+        assert_eq!(hs.params["methods"]["agent.cancel"]["major"], 1);
+        assert_eq!(hs.params["methods"]["agent.cancel"]["minor"], 0);
+        assert_eq!(hs.params["client"], "gui");
+    }
+
+    #[test]
     fn worktree_ensure_then_tree_sends_worktree_id() {
         let mock = start_agent_files_mock("host-a", "tok-1");
         let session = connect(&pid("host-a", &mock.origin)).expect("online");
@@ -1662,7 +1749,11 @@ mod tests {
         let hits = mock.hits.lock().unwrap().clone();
         let ensure = hits.iter().find(|h| h.method == "worktree.ensure").unwrap();
         assert_eq!(ensure.params["agentId"], "ag-1");
-        let tree = hits.iter().rev().find(|h| h.method == "files.tree").unwrap();
+        let tree = hits
+            .iter()
+            .rev()
+            .find(|h| h.method == "files.tree")
+            .unwrap();
         assert_eq!(tree.params["workspaceId"], "ws-1");
         assert_eq!(tree.params["worktreeId"], "wt-1");
     }
@@ -1720,5 +1811,4 @@ mod tests {
             "{hits:?}"
         );
     }
-
 }

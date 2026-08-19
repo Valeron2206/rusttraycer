@@ -1,11 +1,20 @@
 //! Session/UI state. Live host: health + handshake + ping, then workspace/task catalog.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::thread;
 use std::time::Instant;
 
 use crate::discovery::{self, DiscoverError};
-use crate::rpc::{GitDiffOk, GitStatusOk, Worktree};
+use crate::rpc::{CancelOk, ConnectError, GitDiffOk, GitStatusOk, Worktree};
 use crate::ws::{self, ApplyOutcome, WsBridge, WsIncoming};
+
+enum RpcIncoming {
+    Cancel {
+        agent_id: String,
+        result: Result<CancelOk, ConnectError>,
+    },
+}
 
 /// Toast when host returns `agent_busy` (one inflight turn).
 pub const TOAST_AGENT_BUSY: &str = "агент занят";
@@ -250,6 +259,9 @@ pub struct AppState {
     pub git_diff: Option<GitDiffOk>,
     pub git_selected_path: Option<String>,
     pub git_note: Option<String>,
+    pending_cancel: Option<String>,
+    rpc_tx: Sender<RpcIncoming>,
+    rpc_rx: Receiver<RpcIncoming>,
 }
 
 impl AppState {
@@ -258,6 +270,7 @@ impl AppState {
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
 
+        let (rpc_tx, rpc_rx) = mpsc::channel();
         let mut state = Self {
             host_status: HostStatus::Connecting,
             pid_info: None,
@@ -301,6 +314,9 @@ impl AppState {
             git_diff: None,
             git_selected_path: None,
             git_note: None,
+            pending_cancel: None,
+            rpc_tx,
+            rpc_rx,
         };
 
         if demo {
@@ -380,8 +396,46 @@ impl AppState {
         }
     }
 
+    pub fn tick_rpc(&mut self) {
+        let mut incoming = Vec::new();
+        loop {
+            match self.rpc_rx.try_recv() {
+                Ok(ev) => incoming.push(ev),
+                Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
+            }
+        }
+        for ev in incoming {
+            self.apply_rpc_incoming(ev);
+        }
+    }
+
+    fn apply_rpc_incoming(&mut self, incoming: RpcIncoming) {
+        match incoming {
+            RpcIncoming::Cancel { agent_id, result } => {
+                self.apply_cancel_result(&agent_id, result);
+            }
+        }
+    }
+
+    fn apply_cancel_result(&mut self, agent_id: &str, result: Result<CancelOk, ConnectError>) {
+        if self.pending_cancel.as_deref() == Some(agent_id) {
+            self.pending_cancel = None;
+        }
+        match result {
+            Ok(_) => {
+                // cancelled true or false is both ok — hide Stop, enable composer.
+                if let Some(agent) = self.agents.iter_mut().find(|a| a.id == agent_id) {
+                    agent.status = AgentStatus::Idle;
+                }
+            }
+            Err(err) => {
+                self.toast = Some(err.as_label());
+            }
+        }
+    }
+
     pub fn wants_repaint(&self) -> bool {
-        self.ws.is_some() && self.screen == Screen::Canvas
+        self.pending_cancel.is_some() || (self.ws.is_some() && self.screen == Screen::Canvas)
     }
 
     pub fn request_retry(&mut self) {
@@ -676,6 +730,17 @@ impl AppState {
         )
     }
 
+    pub fn selected_agent_is_running(&self) -> bool {
+        self.selected_agent()
+            .map(|a| a.status == AgentStatus::Running)
+            .unwrap_or(false)
+    }
+
+    /// «Стоп» only while the selected agent is running. Never for idle/error.
+    pub fn show_stop_button(&self) -> bool {
+        self.selected_agent_is_running()
+    }
+
     pub fn composer_disabled_reason(&self) -> Option<&'static str> {
         if self.composer_enabled() {
             return None;
@@ -834,8 +899,35 @@ impl AppState {
         self.load_selected_agent();
     }
 
+    pub fn cancel_running_agent(&mut self) {
+        if self.pending_cancel.is_some() {
+            return;
+        }
+        let Some(agent) = self.selected_agent() else {
+            return;
+        };
+        if agent.status != AgentStatus::Running {
+            return;
+        }
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        let agent_id = agent.id.clone();
+        self.pending_cancel = Some(agent_id.clone());
+        let tx = self.rpc_tx.clone();
+        let _ = thread::Builder::new()
+            .name("rt-gui-rpc-cancel".into())
+            .spawn(move || {
+                let result = session.agent_cancel(&agent_id);
+                let _ = tx.send(RpcIncoming::Cancel { agent_id, result });
+            });
+    }
+
     pub fn send_composer(&mut self) {
         if !self.composer_enabled() {
+            return;
+        }
+        if self.pending_cancel.is_some() {
             return;
         }
         let content = self.composer_text.trim().to_string();
@@ -1147,6 +1239,7 @@ mod tests {
     use std::net::TcpListener;
     use std::sync::{Arc, Mutex};
     use std::thread;
+    use std::time::Instant;
 
     #[derive(Clone, Debug)]
     struct RpcHit {
@@ -1563,5 +1656,205 @@ mod tests {
         assert_eq!(GIT_NOTE_INVALID_PARAMS, "нет git-статуса (invalid_params)");
         assert!(state.toast.is_none());
         let _ = mock;
+    }
+
+    fn start_cancel_mock(cancel: Result<bool, (&'static str, &'static str)>) -> SliceMock {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(Mutex::new(Vec::new()));
+        let hits_t = hits.clone();
+        thread::spawn(move || {
+            for stream in listener.incoming().take(16) {
+                let Ok(mut stream) = stream else { break };
+                let (headers, body) = read_http_request(&mut stream);
+                let (method, params) = if headers.starts_with("GET /health") {
+                    ("GET /health".to_string(), json!({}))
+                } else {
+                    let parsed: Value = serde_json::from_slice(&body).unwrap_or(json!({}));
+                    (
+                        parsed
+                            .get("method")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("other")
+                            .to_string(),
+                        parsed.get("params").cloned().unwrap_or(json!({})),
+                    )
+                };
+                hits_t.lock().unwrap().push(RpcHit {
+                    method: method.clone(),
+                    params: params.clone(),
+                });
+                let body = match method.as_str() {
+                    "GET /health" => json!({"ok": true, "hostId": "host-a"}).to_string(),
+                    "handshake" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "hostId": "host-a",
+                            "hostVersion": "0.1.0",
+                            "sessionToken": "tok-1",
+                            "accepted": {},
+                            "rejected": {}
+                        }
+                    })
+                    .to_string(),
+                    "host.ping" => json!({
+                        "id": "echo",
+                        "ok": { "hostId": "host-a", "now": "2026-08-17T12:00:00Z" }
+                    })
+                    .to_string(),
+                    "agent.cancel" => match cancel {
+                        Ok(flag) => {
+                            let agent_id =
+                                params.get("agentId").and_then(|v| v.as_str()).unwrap_or("");
+                            json!({
+                                "id": "echo",
+                                "ok": { "agentId": agent_id, "cancelled": flag }
+                            })
+                            .to_string()
+                        }
+                        Err((code, message)) => json!({
+                            "id": "echo",
+                            "error": { "code": code, "message": message }
+                        })
+                        .to_string(),
+                    },
+                    _ => json!({
+                        "id": "echo",
+                        "error": { "code": "unsupported_method", "message": "no" }
+                    })
+                    .to_string(),
+                };
+                write_http_json(&mut stream, &body);
+            }
+        });
+        SliceMock {
+            origin: format!("http://{addr}"),
+            hits,
+        }
+    }
+
+    fn running_agent_state(session: crate::rpc::Session) -> AppState {
+        let mut state = online_state(session);
+        if let Some(agent) = state.agents.iter_mut().find(|a| a.id == "ag-1") {
+            agent.status = AgentStatus::Running;
+        }
+        state
+    }
+
+    fn wait_cancel(state: &mut AppState) {
+        let start = Instant::now();
+        while state.pending_cancel.is_some() && start.elapsed() < std::time::Duration::from_secs(2)
+        {
+            state.tick_rpc();
+            if state.pending_cancel.is_none() {
+                return;
+            }
+            thread::sleep(std::time::Duration::from_millis(5));
+        }
+        state.tick_rpc();
+        assert!(
+            state.pending_cancel.is_none(),
+            "cancel worker did not finish"
+        );
+    }
+
+    #[test]
+    fn stop_button_only_when_running() {
+        let mut state = AppState::new();
+        state.pending_discover = false;
+        state.demo = false;
+        state.host_status = HostStatus::Online;
+        state.selected_task_id = Some("task-1".into());
+        state.selected_agent_id = Some("ag-1".into());
+        state.agents.push(AgentStub {
+            id: "ag-1".into(),
+            task_id: "task-1".into(),
+            provider: "cli.generic".into(),
+            status: AgentStatus::Idle,
+        });
+        assert!(!state.show_stop_button());
+        state.agents[0].status = AgentStatus::Error;
+        assert!(!state.show_stop_button());
+        state.agents[0].status = AgentStatus::Running;
+        assert!(state.show_stop_button());
+    }
+
+    #[test]
+    fn cancel_ok_true_sets_idle_and_enables_composer() {
+        let mock = start_cancel_mock(Ok(true));
+        let session = connect(&pid(&mock.origin)).expect("online");
+        let mut state = running_agent_state(session);
+        assert!(!state.composer_enabled());
+        assert!(state.show_stop_button());
+        state.cancel_running_agent();
+        assert_eq!(state.selected_agent().unwrap().status, AgentStatus::Running);
+        assert!(!state.composer_enabled());
+        wait_cancel(&mut state);
+        assert_eq!(state.selected_agent().unwrap().status, AgentStatus::Idle);
+        assert!(state.composer_enabled());
+        assert!(!state.show_stop_button());
+        assert!(state.toast.is_none());
+        let hit = mock
+            .hits
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|h| h.method == "agent.cancel")
+            .cloned()
+            .expect("agent.cancel");
+        assert_eq!(hit.params["agentId"], "ag-1");
+    }
+
+    #[test]
+    fn cancel_ok_false_sets_idle_without_toast() {
+        let mock = start_cancel_mock(Ok(false));
+        let session = connect(&pid(&mock.origin)).expect("online");
+        let mut state = running_agent_state(session);
+        state.cancel_running_agent();
+        wait_cancel(&mut state);
+        assert_eq!(state.selected_agent().unwrap().status, AgentStatus::Idle);
+        assert!(state.composer_enabled());
+        assert!(!state.show_stop_button());
+        assert!(state.toast.is_none());
+        let _ = mock;
+    }
+
+    #[test]
+    fn cancel_not_found_toasts_and_keeps_running() {
+        let mock = start_cancel_mock(Err(("not_found", "agent missing")));
+        let session = connect(&pid(&mock.origin)).expect("online");
+        let mut state = running_agent_state(session);
+        state.cancel_running_agent();
+        wait_cancel(&mut state);
+        assert_eq!(state.selected_agent().unwrap().status, AgentStatus::Running);
+        assert!(!state.composer_enabled());
+        assert!(state.show_stop_button());
+        let toast = state.toast.clone().expect("toast");
+        assert!(toast.contains("not_found"), "{toast}");
+        let _ = mock;
+    }
+
+    #[test]
+    fn cancel_ignored_when_idle_or_error() {
+        let mock = start_cancel_mock(Ok(true));
+        let session = connect(&pid(&mock.origin)).expect("online");
+        let mut state = running_agent_state(session);
+        state.agents[0].status = AgentStatus::Idle;
+        state.cancel_running_agent();
+        assert!(state.pending_cancel.is_none());
+        state.agents[0].status = AgentStatus::Error;
+        state.cancel_running_agent();
+        assert!(state.pending_cancel.is_none());
+        let methods: Vec<_> = mock
+            .hits
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|h| h.method.clone())
+            .collect();
+        assert!(
+            !methods.contains(&"agent.cancel".to_string()),
+            "{methods:?}"
+        );
     }
 }

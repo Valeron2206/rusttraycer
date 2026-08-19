@@ -18,6 +18,7 @@ impl eframe::App for RtGuiApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.state.tick_discovery();
         self.state.tick_ws();
+        self.state.tick_rpc();
         chrome::show(ctx, &mut self.state);
 
         match self.state.screen {

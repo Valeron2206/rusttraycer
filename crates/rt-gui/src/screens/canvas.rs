@@ -14,10 +14,7 @@ pub fn show(ctx: &egui::Context, state: &mut AppState) {
         .exact_height(36.0)
         .show(ctx, |ui| {
             ui.horizontal_centered(|ui| {
-                let title = state
-                    .selected_task_title()
-                    .unwrap_or("Task")
-                    .to_string();
+                let title = state.selected_task_title().unwrap_or("Task").to_string();
                 ui.strong(title);
                 ui.separator();
                 ui.weak(format!("host {}", state.host_id_prefix()));
@@ -99,8 +96,7 @@ fn show_agents(ui: &mut egui::Ui, state: &mut AppState) {
     } else {
         let many = agents.len() > 1;
         for (id, provider, status) in &agents {
-            let is_sel = selected.as_deref() == Some(id.as_str())
-                || (!many && selected.is_none());
+            let is_sel = selected.as_deref() == Some(id.as_str()) || (!many && selected.is_none());
             let resp = egui::Frame::new()
                 .fill(if is_sel {
                     egui::Color32::from_rgb(40, 48, 64)
@@ -157,7 +153,11 @@ fn show_git(ui: &mut egui::Ui, state: &mut AppState) {
         ui.label(format!(
             "{}{}",
             status.branch,
-            if status.dirty { " · dirty" } else { " · clean" }
+            if status.dirty {
+                " · dirty"
+            } else {
+                " · clean"
+            }
         ));
         if status.truncated {
             ui.weak("список усечён");
@@ -353,6 +353,7 @@ fn show_chat(ui: &mut egui::Ui, state: &mut AppState) {
 
     let enabled = state.composer_enabled();
     let reason = state.composer_disabled_reason();
+    let show_stop = state.show_stop_button();
     ui.add_enabled_ui(enabled, |ui| {
         ui.add(
             egui::TextEdit::multiline(&mut state.composer_text)
@@ -360,12 +361,19 @@ fn show_chat(ui: &mut egui::Ui, state: &mut AppState) {
                 .desired_rows(3)
                 .hint_text("Написать сообщение…"),
         );
-        ui.horizontal(|ui| {
+    });
+    ui.horizontal(|ui| {
+        ui.add_enabled_ui(enabled, |ui| {
             if ui.button("Отправить").clicked() {
                 state.send_composer();
             }
-            ui.weak("один активный turn · очередь не строится");
         });
+        if show_stop {
+            if ui.button("Стоп").clicked() {
+                state.cancel_running_agent();
+            }
+        }
+        ui.weak("один активный turn · очередь не строится");
     });
     if let Some(reason) = reason {
         ui.weak(reason);
