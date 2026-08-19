@@ -2,6 +2,7 @@
 //! No host spawn, no sqlite, no workspace walk.
 
 mod a2a;
+mod account_ux;
 mod app;
 mod artifacts;
 mod chrome;

@@ -8,6 +8,7 @@ use std::time::Instant;
 use serde_json::Value;
 
 use crate::a2a::{self, InboxItem, LoopView, A2A_UNAVAILABLE, DEFAULT_ITERATIONS};
+use crate::account_ux::{self, AccountItem, ACCOUNTS_UNAVAILABLE, STEER_UNAVAILABLE};
 use crate::artifacts::{
     self, ArtifactKind, ArtifactStub, CommentThread, ARTIFACTS_UNAVAILABLE, CREATE_KINDS,
     EXPORT_FORMAT, EXPORT_FORMAT_PDF, FILTER_ALL,
@@ -19,8 +20,8 @@ use crate::ladder::{
 };
 use crate::model_ux::{self, ModelParams, ModelPrefs, MODEL_UNAVAILABLE, PROFILE_NAME_BAD};
 use crate::rpc::{
-    AgentModelView, CancelOk, ConnectError, DoctorOk, DoctorProvider, GitDiffOk, GitStatusOk,
-    PrefsItem, PresetItem, ProfileOk, SettingsGuide, WorkspaceGuides, Worktree,
+    AgentModelView, AgentSwitchParams, CancelOk, ConnectError, DoctorOk, DoctorProvider, GitDiffOk,
+    GitStatusOk, PrefsItem, PresetItem, ProfileOk, SettingsGuide, WorkspaceGuides, Worktree,
 };
 use crate::search_ux::{self, SearchItem, GC_UNAVAILABLE, SEARCH_DEBOUNCE_MS, SEARCH_UNAVAILABLE};
 use crate::sync_ux::{
@@ -309,6 +310,8 @@ pub struct AppState {
     pub providers: Vec<DoctorProvider>,
     pub doctor: Option<DoctorOk>,
     pub picker_provider: Option<String>,
+    pub accounts: Vec<AccountItem>,
+    pub picker_account_id: Option<String>,
     pub open_task_ids: Vec<String>,
     pub selected_agent_by_task: HashMap<String, String>,
     pub split: SplitLayout,
@@ -446,6 +449,8 @@ impl AppState {
             providers: Vec::new(),
             doctor: None,
             picker_provider: None,
+            accounts: Vec::new(),
+            picker_account_id: None,
             open_task_ids: Vec::new(),
             selected_agent_by_task: HashMap::new(),
             split: ladder::load_split_layout(),
@@ -691,6 +696,7 @@ impl AppState {
                         self.refresh_workspace_capability();
                         self.refresh_sync_capability();
                         self.refresh_search_gc_capability();
+                        self.refresh_accounts();
                         self.refresh_tasks_catalog();
                         if self.screen == Screen::Canvas {
                             self.refresh_canvas_after_reconnect();
@@ -1326,31 +1332,33 @@ impl AppState {
         }
         let interface = self.picker_interface.as_wire();
         let params = self.picker_params();
+        let account_id = self.picked_account_id();
+        let account_id = account_id.as_deref();
         let role = if self.workspace_host_ok() {
             Some(self.picker_role.clone())
         } else {
             None
         };
         let created = if self.workspace_host_ok() {
-            session.agent_create_with_role(&task_id, &provider, interface, &params, role.as_deref())
+            session.agent_create_with_role(
+                &task_id,
+                &provider,
+                interface,
+                &params,
+                role.as_deref(),
+                account_id,
+            )
         } else if self.model_ux_host_ok() {
             session
-                .agent_create_with_model(
-                    &task_id,
-                    &provider,
-                    interface,
-                    params.model.as_deref(),
-                    params.effort.as_deref(),
-                    Some(params.fast),
-                )
+                .agent_create_with_model(&task_id, &provider, interface, &params, account_id)
                 .map(|agent| (agent, None))
         } else if interface == "chat" {
             session
-                .agent_create(&task_id, &provider)
+                .agent_create(&task_id, &provider, account_id)
                 .map(|agent| (agent, None))
         } else {
             session
-                .agent_create_with_interface(&task_id, &provider, interface)
+                .agent_create_with_interface(&task_id, &provider, interface, account_id)
                 .map(|agent| (agent, None))
         };
         match created {
@@ -1392,6 +1400,7 @@ impl AppState {
                 self.picker_interface = AgentInterface::Chat;
             }
             self.apply_remembered_for_provider(&id);
+            self.prune_picker_account();
         }
     }
 
@@ -1810,6 +1819,55 @@ impl AppState {
                 } else {
                     err.as_label()
                 });
+            }
+        }
+    }
+
+    pub fn composer_can_type(&self) -> bool {
+        self.can_rpc()
+            && self.selected_agent().is_some()
+            && !self.selected_agent().is_some_and(|a| a.is_terminal())
+    }
+
+    pub fn on_composer_mod_enter(&mut self) {
+        if self.selected_agent_is_running() {
+            self.steer_composer();
+        } else {
+            self.send_composer();
+        }
+    }
+
+    pub fn steer_composer(&mut self) {
+        if !self.selected_agent_is_running() {
+            return;
+        }
+        if self.pending_cancel.is_some() {
+            return;
+        }
+        let content = self.composer_text.trim().to_string();
+        if content.is_empty() {
+            return;
+        }
+        let Some(agent_id) = self.selected_agent().map(|a| a.id.clone()) else {
+            return;
+        };
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        if !self.steer_host_ok() {
+            self.toast = Some(STEER_UNAVAILABLE.into());
+            return;
+        }
+        match session.agent_steer(&agent_id, &content) {
+            Ok(_) => {
+                self.composer_text.clear();
+            }
+            Err(err) => {
+                if err.is_steer_unsupported() {
+                    self.toast = Some(STEER_UNAVAILABLE.into());
+                } else {
+                    self.toast = Some(err.as_label());
+                }
             }
         }
     }
@@ -3367,13 +3425,17 @@ impl AppState {
             return;
         };
         let params = self.picker_params();
+        let account_id = self.picked_account_id();
         match session.agent_switch(
             &agent_id,
-            Some(&provider),
-            params.model.as_deref(),
-            params.effort.as_deref(),
-            Some(params.fast),
-            None,
+            AgentSwitchParams {
+                provider: Some(&provider),
+                model: params.model.as_deref(),
+                effort: params.effort.as_deref(),
+                fast: Some(params.fast),
+                account_id: account_id.as_deref(),
+                ..AgentSwitchParams::default()
+            },
         ) {
             Ok(view) => self.apply_switched_agent(&agent_id, view, params),
             Err(err) => self.surface_model_error(err),
@@ -3481,7 +3543,15 @@ impl AppState {
         let Some(session) = self.session.clone() else {
             return;
         };
-        match session.agent_switch(&agent_id, None, None, None, None, Some(&profile_id)) {
+        let account_id = self.picked_account_id();
+        match session.agent_switch(
+            &agent_id,
+            AgentSwitchParams {
+                profile_id: Some(&profile_id),
+                account_id: account_id.as_deref(),
+                ..AgentSwitchParams::default()
+            },
+        ) {
             Ok(view) => {
                 let params = self
                     .profiles
@@ -3844,6 +3914,72 @@ impl AppState {
                 }
             }
             _ => {}
+        }
+    }
+
+    pub fn accounts_host_ok(&self) -> bool {
+        self.session
+            .as_ref()
+            .map(|s| s.accounts_accepted() && !s.accounts_rejected())
+            .unwrap_or(false)
+    }
+
+    pub fn steer_host_ok(&self) -> bool {
+        self.session
+            .as_ref()
+            .map(|s| s.steer_accepted() && !s.steer_rejected())
+            .unwrap_or(false)
+    }
+
+    pub fn accounts_for_picker(&self) -> Vec<&AccountItem> {
+        account_ux::accounts_for_provider(&self.accounts, self.picker_provider.as_deref())
+    }
+
+    pub fn picked_account_id(&self) -> Option<String> {
+        let id = self.picker_account_id.as_deref()?;
+        if self.accounts_for_picker().iter().any(|a| a.id == id) {
+            Some(id.to_string())
+        } else {
+            None
+        }
+    }
+
+    pub fn set_picker_account(&mut self, id: Option<String>) {
+        self.picker_account_id = id
+            .filter(|id| !id.is_empty() && self.accounts_for_picker().iter().any(|a| a.id == *id));
+    }
+
+    fn prune_picker_account(&mut self) {
+        if self.picked_account_id().is_none() {
+            self.picker_account_id = None;
+        }
+    }
+
+    pub fn refresh_accounts(&mut self) {
+        if self.accounts_host_ok() {
+            let Some(session) = self.session.clone() else {
+                return;
+            };
+            match session.account_list() {
+                Ok(items) => {
+                    self.accounts = items;
+                    self.prune_picker_account();
+                    if self.toast.as_deref() == Some(ACCOUNTS_UNAVAILABLE) {
+                        self.toast = None;
+                    }
+                }
+                Err(err) => {
+                    if err.is_accounts_unsupported() {
+                        self.toast = Some(ACCOUNTS_UNAVAILABLE.into());
+                    } else {
+                        self.toast = Some(err.as_label());
+                    }
+                }
+            }
+            return;
+        }
+        if self.can_rpc() {
+            self.toast = Some(ACCOUNTS_UNAVAILABLE.into());
         }
     }
 
@@ -8344,5 +8480,522 @@ mod tests {
         state.selected_artifact_id = None;
         assert!(state.export_selected_markdown().is_none());
         assert_ne!(state.toast.as_deref(), Some("PDF не поддерживается"));
+    }
+
+    fn account_steer_accepted_map() -> serde_json::Map<String, Value> {
+        let mut accepted = serde_json::Map::new();
+        for name in crate::rpc::ACCOUNT_STEER_METHODS {
+            accepted.insert(name.to_string(), json!({"major": 1, "minor": 9}));
+        }
+        for name in crate::rpc::MODEL_METHODS {
+            accepted.insert(name.to_string(), json!({"major": 1, "minor": 6}));
+        }
+        accepted
+    }
+
+    fn session_without_accounts_steer() -> crate::rpc::Session {
+        use std::collections::BTreeMap;
+        let mut rejected = BTreeMap::new();
+        for name in crate::rpc::ACCOUNT_STEER_METHODS {
+            rejected.insert((*name).to_string(), "unsupported".into());
+        }
+        crate::rpc::Session {
+            host_id: "host-a".into(),
+            host_version: "0.1.0".into(),
+            session_token: "tok-1".into(),
+            rpc_url: "http://127.0.0.1:1".into(),
+            ws_url: None,
+            accepted: BTreeMap::new(),
+            rejected,
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum SteerReply {
+        Ok,
+        NotSupported,
+    }
+
+    fn start_account_steer_state_mock(steer: SteerReply) -> SliceMock {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(Mutex::new(Vec::new()));
+        let hits_t = hits.clone();
+        thread::spawn(move || {
+            for stream in listener.incoming().take(64) {
+                let Ok(mut stream) = stream else { break };
+                let (headers, body) = read_http_request(&mut stream);
+                let parsed: Value = serde_json::from_slice(&body).unwrap_or(json!({}));
+                let method = if headers.starts_with("GET /health") {
+                    "GET /health".to_string()
+                } else {
+                    parsed
+                        .get("method")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("other")
+                        .to_string()
+                };
+                let params = parsed.get("params").cloned().unwrap_or(json!({}));
+                hits_t.lock().unwrap().push(RpcHit {
+                    method: method.clone(),
+                    params: params.clone(),
+                });
+                let body = match method.as_str() {
+                    "GET /health" => json!({"ok": true, "hostId": "host-a"}).to_string(),
+                    "handshake" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "hostId": "host-a",
+                            "hostVersion": "0.1.0",
+                            "sessionToken": "tok-1",
+                            "accepted": account_steer_accepted_map(),
+                            "rejected": {}
+                        }
+                    })
+                    .to_string(),
+                    "host.ping" => json!({
+                        "id": "echo",
+                        "ok": { "hostId": "host-a", "now": "2026-08-19T12:00:00Z" }
+                    })
+                    .to_string(),
+                    "host.doctor" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "providers": [
+                                {"id": "cli.claude", "available": true, "detail": ""},
+                                {"id": "cli.codex", "available": true, "detail": ""},
+                                {"id": "cli.generic", "available": true, "detail": ""}
+                            ]
+                        }
+                    })
+                    .to_string(),
+                    "account.list" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "items": [
+                                {
+                                    "id": "acc-1",
+                                    "label": "work",
+                                    "provider": "cli.claude"
+                                },
+                                {
+                                    "id": "acc-2",
+                                    "label": "codex",
+                                    "provider": "cli.codex"
+                                }
+                            ]
+                        }
+                    })
+                    .to_string(),
+                    "agent.create" => {
+                        let provider = params
+                            .get("provider")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("cli.claude");
+                        json!({
+                            "id": "echo",
+                            "ok": {
+                                "id": "ag-new",
+                                "taskId": params.get("taskId").cloned().unwrap_or(json!("task-1")),
+                                "hostId": "host-a",
+                                "parentId": null,
+                                "interface": "chat",
+                                "provider": provider,
+                                "status": "idle",
+                                "runLocation": "local",
+                                "createdAt": "2026-08-19T12:00:00Z"
+                            }
+                        })
+                        .to_string()
+                    }
+                    "agent.switch" | "agent.get" => {
+                        let id = params
+                            .get("agentId")
+                            .or_else(|| params.get("id"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("ag-1");
+                        json!({
+                            "id": "echo",
+                            "ok": {
+                                "id": id,
+                                "taskId": "task-1",
+                                "hostId": "host-a",
+                                "parentId": null,
+                                "interface": "chat",
+                                "provider": "cli.claude",
+                                "status": "idle",
+                                "runLocation": "local",
+                                "createdAt": "2026-08-19T12:00:00Z",
+                                "model": "o3",
+                                "effort": "high",
+                                "fast": true
+                            }
+                        })
+                        .to_string()
+                    }
+                    "agent.get_context" => json!({
+                        "id": "echo",
+                        "ok": { "messages": [] }
+                    })
+                    .to_string(),
+                    "agent.send" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "userMessage": sample_message("msg-send", "ag-1", "user", "sent")
+                        }
+                    })
+                    .to_string(),
+                    "agent.steer" => match steer {
+                        SteerReply::Ok => json!({
+                            "id": "echo",
+                            "ok": { "accepted": true }
+                        })
+                        .to_string(),
+                        SteerReply::NotSupported => json!({
+                            "id": "echo",
+                            "error": { "code": "not_supported", "message": "cli.generic" }
+                        })
+                        .to_string(),
+                    },
+                    "worktree.get" | "policy.get" => json!({
+                        "id": "echo",
+                        "error": { "code": "not_found", "message": "no" }
+                    })
+                    .to_string(),
+                    _ => json!({
+                        "id": "echo",
+                        "error": { "code": "unsupported_method", "message": "no" }
+                    })
+                    .to_string(),
+                };
+                write_http_json(&mut stream, &body);
+            }
+        });
+        SliceMock {
+            origin: format!("http://{addr}"),
+            hits,
+        }
+    }
+
+    fn start_e1_create_without_19() -> SliceMock {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(Mutex::new(Vec::new()));
+        let hits_t = hits.clone();
+        thread::spawn(move || {
+            for stream in listener.incoming().take(32) {
+                let Ok(mut stream) = stream else { break };
+                let (headers, body) = read_http_request(&mut stream);
+                let parsed: Value = serde_json::from_slice(&body).unwrap_or(json!({}));
+                let method = if headers.starts_with("GET /health") {
+                    "GET /health".to_string()
+                } else {
+                    parsed
+                        .get("method")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("other")
+                        .to_string()
+                };
+                let params = parsed.get("params").cloned().unwrap_or(json!({}));
+                hits_t.lock().unwrap().push(RpcHit {
+                    method: method.clone(),
+                    params: params.clone(),
+                });
+                let body = match method.as_str() {
+                    "GET /health" => json!({"ok": true, "hostId": "host-a"}).to_string(),
+                    "handshake" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "hostId": "host-a",
+                            "hostVersion": "0.1.0",
+                            "sessionToken": "tok-1",
+                            "accepted": {},
+                            "rejected": {}
+                        }
+                    })
+                    .to_string(),
+                    "host.ping" => json!({
+                        "id": "echo",
+                        "ok": { "hostId": "host-a", "now": "2026-08-19T12:00:00Z" }
+                    })
+                    .to_string(),
+                    "host.doctor" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "providers": [
+                                {"id": "cli.claude", "available": true, "detail": ""}
+                            ]
+                        }
+                    })
+                    .to_string(),
+                    "agent.create" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "id": "ag-new",
+                            "taskId": "task-1",
+                            "hostId": "host-a",
+                            "parentId": null,
+                            "interface": "chat",
+                            "provider": "cli.claude",
+                            "status": "idle",
+                            "runLocation": "local",
+                            "createdAt": "2026-08-19T12:00:00Z"
+                        }
+                    })
+                    .to_string(),
+                    "agent.get" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "id": "ag-new",
+                            "taskId": "task-1",
+                            "hostId": "host-a",
+                            "parentId": null,
+                            "interface": "chat",
+                            "provider": "cli.claude",
+                            "status": "idle",
+                            "runLocation": "local",
+                            "createdAt": "2026-08-19T12:00:00Z"
+                        }
+                    })
+                    .to_string(),
+                    "agent.get_context" => json!({
+                        "id": "echo",
+                        "ok": { "messages": [] }
+                    })
+                    .to_string(),
+                    "worktree.get" | "policy.get" => json!({
+                        "id": "echo",
+                        "error": { "code": "not_found", "message": "no" }
+                    })
+                    .to_string(),
+                    _ => json!({
+                        "id": "echo",
+                        "error": { "code": "unsupported_method", "message": "no" }
+                    })
+                    .to_string(),
+                };
+                write_http_json(&mut stream, &body);
+            }
+        });
+        SliceMock {
+            origin: format!("http://{addr}"),
+            hits,
+        }
+    }
+
+    #[test]
+    fn account_list_then_create_and_switch_send_account_id() {
+        let mock = start_account_steer_state_mock(SteerReply::Ok);
+        let session = connect(&pid(&mock.origin)).expect("online");
+        let mut state = online_state(session);
+        state.agents.clear();
+        state.selected_agent_id = None;
+        state.refresh_doctor();
+        state.refresh_accounts();
+        assert_eq!(state.accounts.len(), 2);
+        state.set_picker_provider("cli.claude".into());
+        state.set_picker_account(Some("acc-1".into()));
+        assert_eq!(state.picked_account_id().as_deref(), Some("acc-1"));
+        state.create_agent();
+        let create = mock
+            .hits
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|h| h.method == "agent.create")
+            .cloned()
+            .expect("agent.create");
+        assert_eq!(create.params["accountId"], "acc-1");
+        assert_eq!(create.params["provider"], "cli.claude");
+        assert!(create.params.get("token").is_none());
+        state.selected_agent_id = Some("ag-1".into());
+        state.agents.clear();
+        state.agents.push(AgentStub {
+            id: "ag-1".into(),
+            task_id: "task-1".into(),
+            parent_id: None,
+            provider: "cli.claude".into(),
+            status: AgentStatus::Idle,
+            interface: "chat".into(),
+        });
+        state.switch_selected_agent();
+        let sw = mock
+            .hits
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|h| h.method == "agent.switch")
+            .cloned()
+            .expect("agent.switch");
+        assert_eq!(sw.params["accountId"], "acc-1");
+        assert_eq!(sw.params["agentId"], "ag-1");
+    }
+
+    #[test]
+    fn empty_account_list_omits_account_id_on_create() {
+        let mock = start_account_steer_state_mock(SteerReply::Ok);
+        let session = connect(&pid(&mock.origin)).expect("online");
+        let mut state = online_state(session);
+        state.agents.clear();
+        state.selected_agent_id = None;
+        state.refresh_doctor();
+        state.accounts.clear();
+        state.picker_account_id = None;
+        state.set_picker_provider("cli.claude".into());
+        state.create_agent();
+        let create = mock
+            .hits
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|h| h.method == "agent.create")
+            .cloned()
+            .expect("agent.create");
+        assert!(create.params.get("accountId").is_none());
+    }
+
+    #[test]
+    fn old_host_accounts_toast_and_create_still_works() {
+        let mock = start_e1_create_without_19();
+        let session = connect(&pid(&mock.origin)).expect("online");
+        let mut state = online_state(session);
+        state.agents.clear();
+        state.selected_agent_id = None;
+        state.refresh_accounts();
+        assert_eq!(state.toast.as_deref(), Some(ACCOUNTS_UNAVAILABLE));
+        assert_eq!(ACCOUNTS_UNAVAILABLE, "аккаунты недоступны: host без 1.9");
+        state.refresh_doctor();
+        state.set_picker_provider("cli.claude".into());
+        state.create_agent();
+        let create = mock
+            .hits
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|h| h.method == "agent.create")
+            .cloned()
+            .expect("agent.create");
+        assert_eq!(create.params["provider"], "cli.claude");
+        assert!(create.params.get("accountId").is_none());
+        assert_eq!(
+            state.selected_agent().map(|a| a.id.as_str()),
+            Some("ag-new")
+        );
+        assert!(!mock
+            .hits
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|h| h.method == "account.list"));
+    }
+
+    #[test]
+    fn mod_enter_on_running_steers_not_send() {
+        let mock = start_account_steer_state_mock(SteerReply::Ok);
+        let session = connect(&pid(&mock.origin)).expect("online");
+        let mut state = online_state(session);
+        state.agents[0].status = AgentStatus::Running;
+        state.composer_text = "  nudge now  ".into();
+        assert!(!state.composer_enabled());
+        assert!(state.composer_can_type());
+        state.on_composer_mod_enter();
+        assert!(state.composer_text.is_empty());
+        let hits = mock.hits.lock().unwrap().clone();
+        assert!(hits.iter().any(|h| h.method == "agent.steer"));
+        assert!(!hits.iter().any(|h| h.method == "agent.send"));
+        let steer = hits
+            .iter()
+            .find(|h| h.method == "agent.steer")
+            .expect("agent.steer");
+        assert_eq!(steer.params["agentId"], "ag-1");
+        assert_eq!(steer.params["content"], "nudge now");
+    }
+
+    #[test]
+    fn enter_without_modifier_on_running_is_busy() {
+        let mock = start_account_steer_state_mock(SteerReply::Ok);
+        let session = connect(&pid(&mock.origin)).expect("online");
+        let mut state = online_state(session);
+        state.agents[0].status = AgentStatus::Running;
+        state.composer_text = "nudge".into();
+        state.send_composer();
+        assert_eq!(state.composer_text, "nudge");
+        let hits = mock.hits.lock().unwrap().clone();
+        assert!(!hits.iter().any(|h| h.method == "agent.steer"));
+        assert!(!hits.iter().any(|h| h.method == "agent.send"));
+    }
+
+    #[test]
+    fn idle_mod_enter_sends_not_steer() {
+        let mock = start_account_steer_state_mock(SteerReply::Ok);
+        let session = connect(&pid(&mock.origin)).expect("online");
+        let mut state = online_state(session);
+        state.agents[0].status = AgentStatus::Idle;
+        state.composer_text = "hello".into();
+        state.on_composer_mod_enter();
+        let hits = mock.hits.lock().unwrap().clone();
+        assert!(hits.iter().any(|h| h.method == "agent.send"));
+        assert!(!hits.iter().any(|h| h.method == "agent.steer"));
+    }
+
+    #[test]
+    fn generic_steer_not_supported_toasts_no_panic() {
+        let mock = start_account_steer_state_mock(SteerReply::NotSupported);
+        let session = connect(&pid(&mock.origin)).expect("online");
+        let mut state = online_state(session);
+        state.messages.push(ChatMessage {
+            id: "keep-1".into(),
+            role: "user".into(),
+            content: "stay".into(),
+        });
+        state.agents[0].status = AgentStatus::Running;
+        state.composer_text = "nudge".into();
+        state.steer_composer();
+        let toast = state.toast.clone().expect("toast");
+        assert!(toast.contains("not_supported"), "{toast}");
+        assert_eq!(state.composer_text, "nudge");
+        assert_eq!(state.messages.len(), 1);
+        assert_eq!(state.messages[0].id, "keep-1");
+        let _ = mock;
+    }
+
+    #[test]
+    fn old_host_steer_toasts_without_panic() {
+        let mut state = AppState::new();
+        state.pending_discover = false;
+        state.demo = false;
+        state.host_status = HostStatus::Online;
+        state.session = Some(session_without_accounts_steer());
+        state.selected_task_id = Some("task-1".into());
+        state.selected_agent_id = Some("ag-1".into());
+        state.agents.push(AgentStub {
+            id: "ag-1".into(),
+            task_id: "task-1".into(),
+            parent_id: None,
+            provider: "cli.generic".into(),
+            status: AgentStatus::Running,
+            interface: "chat".into(),
+        });
+        state.messages.push(ChatMessage {
+            id: "keep-1".into(),
+            role: "user".into(),
+            content: "stay".into(),
+        });
+        state.composer_text = "nudge".into();
+        state.steer_composer();
+        assert_eq!(state.toast.as_deref(), Some(STEER_UNAVAILABLE));
+        assert_eq!(STEER_UNAVAILABLE, "steer недоступен: host без 1.9");
+        assert_eq!(state.messages.len(), 1);
+        assert_eq!(state.agents.len(), 1);
+        let _ = state.composer_enabled();
+        let _ = state.write_ready();
+        let _ = state.terminal_host_ok();
+        let _ = state.artifacts_host_ok();
+        let _ = state.a2a_host_ok();
+        let _ = state.model_ux_host_ok();
+        let _ = state.workspace_host_ok();
+        let _ = state.sync_host_ok();
+        let _ = state.search_host_ok();
     }
 }

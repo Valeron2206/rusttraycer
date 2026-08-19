@@ -134,6 +134,11 @@ pub const METHOD_WORKTREE_GC: &str = "worktree.gc";
 
 pub const SEARCH_GC_METHODS: &[&str] = &[METHOD_SEARCH_QUERY, METHOD_WORKTREE_GC];
 
+pub const METHOD_ACCOUNT_LIST: &str = "account.list";
+pub const METHOD_AGENT_STEER: &str = "agent.steer";
+
+pub const ACCOUNT_STEER_METHODS: &[&str] = &[METHOD_ACCOUNT_LIST, METHOD_AGENT_STEER];
+
 #[derive(Debug, Clone)]
 pub struct Session {
     pub host_id: String,
@@ -218,6 +223,14 @@ impl ConnectError {
     }
 
     pub fn is_worktree_gc_unsupported(&self) -> bool {
+        self.is_unsupported_method() || self.is_version_mismatch()
+    }
+
+    pub fn is_accounts_unsupported(&self) -> bool {
+        self.is_unsupported_method() || self.is_version_mismatch()
+    }
+
+    pub fn is_steer_unsupported(&self) -> bool {
         self.is_unsupported_method() || self.is_version_mismatch()
     }
 
@@ -341,6 +354,9 @@ fn hello_methods() -> Value {
         map.insert(name.to_string(), json!({ "major": 1, "minor": 8 }));
     }
     for name in SEARCH_GC_METHODS {
+        map.insert(name.to_string(), json!({ "major": 1, "minor": 9 }));
+    }
+    for name in ACCOUNT_STEER_METHODS {
         map.insert(name.to_string(), json!({ "major": 1, "minor": 9 }));
     }
     Value::Object(map)
@@ -515,6 +531,10 @@ fn extract_opt_str(ok: &Value, key: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+fn put_account_id(params: &mut Value, account_id: Option<&str>) {
+    crate::account_ux::put_account_id(params, account_id);
+}
+
 fn parse_tasks_with_presets(
     ok: Value,
 ) -> Result<(Vec<rt_protocol::Task>, BTreeMap<String, String>), ConnectError> {
@@ -649,11 +669,11 @@ impl Session {
         &self,
         task_id: &str,
         provider: &str,
+        account_id: Option<&str>,
     ) -> Result<rt_protocol::Agent, ConnectError> {
-        parse_ok(self.call(
-            rt_protocol::METHOD_AGENT_CREATE,
-            json!({ "taskId": task_id, "provider": provider }),
-        )?)
+        let mut params = json!({ "taskId": task_id, "provider": provider });
+        put_account_id(&mut params, account_id);
+        parse_ok(self.call(rt_protocol::METHOD_AGENT_CREATE, params)?)
     }
 
     pub fn agent_get(&self, id: &str) -> Result<rt_protocol::Agent, ConnectError> {
@@ -959,15 +979,15 @@ impl Session {
         task_id: &str,
         provider: &str,
         interface: &str,
+        account_id: Option<&str>,
     ) -> Result<rt_protocol::Agent, ConnectError> {
-        parse_ok(self.call(
-            rt_protocol::METHOD_AGENT_CREATE,
-            json!({
-                "taskId": task_id,
-                "provider": provider,
-                "interface": interface,
-            }),
-        )?)
+        let mut params = json!({
+            "taskId": task_id,
+            "provider": provider,
+            "interface": interface,
+        });
+        put_account_id(&mut params, account_id);
+        parse_ok(self.call(rt_protocol::METHOD_AGENT_CREATE, params)?)
     }
 
     pub fn shell_create(
@@ -1266,9 +1286,8 @@ impl Session {
         task_id: &str,
         provider: &str,
         interface: &str,
-        model: Option<&str>,
-        effort: Option<&str>,
-        fast: Option<bool>,
+        model: &crate::model_ux::ModelParams,
+        account_id: Option<&str>,
     ) -> Result<rt_protocol::Agent, ConnectError> {
         let mut params = json!({
             "taskId": task_id,
@@ -1277,43 +1296,41 @@ impl Session {
         if interface != "chat" {
             params["interface"] = json!(interface);
         }
-        if let Some(model) = model {
-            params["model"] = json!(model);
+        if let Some(name) = model.model.as_deref() {
+            params["model"] = json!(name);
         }
-        if let Some(effort) = effort {
+        if let Some(effort) = model.effort.as_deref() {
             params["effort"] = json!(effort);
         }
-        if let Some(fast) = fast {
-            params["fast"] = json!(fast);
+        if model.fast {
+            params["fast"] = json!(true);
         }
+        put_account_id(&mut params, account_id);
         parse_ok(self.call(rt_protocol::METHOD_AGENT_CREATE, params)?)
     }
 
     pub fn agent_switch(
         &self,
         agent_id: &str,
-        provider: Option<&str>,
-        model: Option<&str>,
-        effort: Option<&str>,
-        fast: Option<bool>,
-        profile_id: Option<&str>,
+        switch: AgentSwitchParams<'_>,
     ) -> Result<AgentModelView, ConnectError> {
         let mut params = json!({ "agentId": agent_id });
-        if let Some(provider) = provider {
+        if let Some(provider) = switch.provider {
             params["provider"] = json!(provider);
         }
-        if let Some(model) = model {
+        if let Some(model) = switch.model {
             params["model"] = json!(model);
         }
-        if let Some(effort) = effort {
+        if let Some(effort) = switch.effort {
             params["effort"] = json!(effort);
         }
-        if let Some(fast) = fast {
+        if let Some(fast) = switch.fast {
             params["fast"] = json!(fast);
         }
-        if let Some(profile_id) = profile_id {
+        if let Some(profile_id) = switch.profile_id {
             params["profileId"] = json!(profile_id);
         }
+        put_account_id(&mut params, switch.account_id);
         parse_agent_model(self.call(METHOD_AGENT_SWITCH, params)?)
     }
 
@@ -1422,6 +1439,7 @@ impl Session {
         interface: &str,
         params: &crate::model_ux::ModelParams,
         role: Option<&str>,
+        account_id: Option<&str>,
     ) -> Result<(rt_protocol::Agent, Option<String>), ConnectError> {
         let mut body = json!({
             "taskId": task_id,
@@ -1442,6 +1460,7 @@ impl Session {
         if let Some(role) = role {
             body["role"] = json!(role);
         }
+        put_account_id(&mut body, account_id);
         let ok = self.call(rt_protocol::METHOD_AGENT_CREATE, body)?;
         let role = extract_opt_str(&ok, "role");
         let agent = parse_ok::<rt_protocol::Agent>(ok)?;
@@ -1509,6 +1528,43 @@ impl Session {
 
     pub fn worktree_gc(&self, dry_run: bool) -> Result<WorktreeGcOk, ConnectError> {
         parse_ok(self.call(METHOD_WORKTREE_GC, crate::search_ux::gc_params(dry_run))?)
+    }
+
+    pub fn accounts_accepted(&self) -> bool {
+        self.accepted
+            .get(METHOD_ACCOUNT_LIST)
+            .map(|v| v.major == 1 && v.minor >= 9)
+            .unwrap_or(false)
+    }
+
+    pub fn accounts_rejected(&self) -> bool {
+        self.rejected.contains_key(METHOD_ACCOUNT_LIST)
+    }
+
+    pub fn steer_accepted(&self) -> bool {
+        self.accepted
+            .get(METHOD_AGENT_STEER)
+            .map(|v| v.major == 1 && v.minor >= 9)
+            .unwrap_or(false)
+    }
+
+    pub fn steer_rejected(&self) -> bool {
+        self.rejected.contains_key(METHOD_AGENT_STEER)
+    }
+
+    pub fn account_list(&self) -> Result<Vec<crate::account_ux::AccountItem>, ConnectError> {
+        let ok = self.call(
+            METHOD_ACCOUNT_LIST,
+            crate::account_ux::account_list_params(),
+        )?;
+        Ok(crate::account_ux::parse_account_list(&ok))
+    }
+
+    pub fn agent_steer(&self, agent_id: &str, content: &str) -> Result<Value, ConnectError> {
+        let Some(params) = crate::account_ux::steer_params(agent_id, content) else {
+            return Ok(json!({}));
+        };
+        self.call(METHOD_AGENT_STEER, params)
     }
 }
 
@@ -1908,6 +1964,16 @@ pub struct AgentModelView {
     pub model: Option<String>,
     pub effort: Option<String>,
     pub fast: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct AgentSwitchParams<'a> {
+    pub provider: Option<&'a str>,
+    pub model: Option<&'a str>,
+    pub effort: Option<&'a str>,
+    pub fast: Option<bool>,
+    pub profile_id: Option<&'a str>,
+    pub account_id: Option<&'a str>,
 }
 
 fn opt_string(value: &Value, key: &str) -> Option<String> {
@@ -2682,7 +2748,7 @@ mod tests {
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].id, "ag-1");
         let created = session
-            .agent_create("task-1", "cli.generic")
+            .agent_create("task-1", "cli.generic", None)
             .expect("create");
         assert_eq!(created.id, "ag-new");
         assert_eq!(created.task_id, "task-1");
@@ -3023,7 +3089,7 @@ mod tests {
             .task_create("Slice 4", &added.id)
             .expect("task.create");
         let agent = session
-            .agent_create(&created.id, "cli.generic")
+            .agent_create(&created.id, "cli.generic", None)
             .expect("agent.create");
         assert_eq!(agent.provider, "cli.generic");
         let listed = session.agent_list(&created.id).expect("agent.list");
@@ -4314,7 +4380,7 @@ mod tests {
         let mock = start_pty_mock("ok");
         let session = connect(&pid("host-a", &mock.origin)).expect("online");
         let agent = session
-            .agent_create_with_interface("task-1", "cli.claude", "terminal")
+            .agent_create_with_interface("task-1", "cli.claude", "terminal", None)
             .expect("create");
         assert_eq!(agent.interface, "terminal");
         assert_eq!(agent.id, "ag-term");
@@ -4490,11 +4556,13 @@ mod tests {
         let view = session
             .agent_switch(
                 "ag-1",
-                Some("cli.codex"),
-                Some("o3"),
-                Some("high"),
-                Some(true),
-                None,
+                AgentSwitchParams {
+                    provider: Some("cli.codex"),
+                    model: Some("o3"),
+                    effort: Some("high"),
+                    fast: Some(true),
+                    ..AgentSwitchParams::default()
+                },
             )
             .expect("switch");
         assert_eq!(view.agent.id, "ag-1");
@@ -5092,5 +5160,238 @@ mod tests {
         assert!(hit.params.get("prefix").is_none());
         assert!(hit.params.get("branchPrefix").is_none());
         assert!(hit.params.get("branch_prefix").is_none());
+    }
+
+    fn account_steer_accepted_map() -> serde_json::Map<String, Value> {
+        let mut accepted = serde_json::Map::new();
+        for name in ACCOUNT_STEER_METHODS {
+            accepted.insert(name.to_string(), json!({"major": 1, "minor": 9}));
+        }
+        for name in MODEL_METHODS {
+            accepted.insert(name.to_string(), json!({"major": 1, "minor": 6}));
+        }
+        accepted
+    }
+
+    fn start_account_steer_rpc_mock() -> CatalogMock {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(Mutex::new(Vec::new()));
+        let hits_t = hits.clone();
+        thread::spawn(move || {
+            for stream in listener.incoming().take(32) {
+                let Ok(mut stream) = stream else { break };
+                let (headers, body) = read_http_request(&mut stream);
+                let has_session = headers.to_ascii_lowercase().contains("x-rt-session:");
+                let parsed: Value = serde_json::from_slice(&body).unwrap_or(json!({}));
+                let method = if headers.starts_with("GET /health") {
+                    "GET /health".to_string()
+                } else {
+                    parsed
+                        .get("method")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("other")
+                        .to_string()
+                };
+                let params = parsed.get("params").cloned().unwrap_or(json!({}));
+                hits_t.lock().unwrap().push(RpcHit {
+                    method: method.clone(),
+                    params: params.clone(),
+                    has_session,
+                });
+                let body = match method.as_str() {
+                    "GET /health" => json!({"ok": true, "hostId": "host-a"}).to_string(),
+                    "handshake" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "hostId": "host-a",
+                            "hostVersion": "0.1.0",
+                            "sessionToken": "tok-1",
+                            "accepted": account_steer_accepted_map(),
+                            "rejected": {}
+                        }
+                    })
+                    .to_string(),
+                    "host.ping" => json!({
+                        "id": "echo",
+                        "ok": { "hostId": "host-a", "now": "2026-08-19T12:00:00Z" }
+                    })
+                    .to_string(),
+                    "account.list" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "items": [
+                                {
+                                    "id": "acc-1",
+                                    "label": "work",
+                                    "provider": "cli.claude",
+                                    "token": "SECRET"
+                                },
+                                { "accountId": "acc-2", "label": "home" }
+                            ]
+                        }
+                    })
+                    .to_string(),
+                    "agent.create" => {
+                        let provider = params
+                            .get("provider")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("cli.claude");
+                        json!({
+                            "id": "echo",
+                            "ok": {
+                                "id": "ag-new",
+                                "taskId": params.get("taskId").cloned().unwrap_or(json!("task-1")),
+                                "hostId": "host-a",
+                                "parentId": null,
+                                "interface": "chat",
+                                "provider": provider,
+                                "status": "idle",
+                                "runLocation": "local",
+                                "createdAt": "2026-08-19T12:00:00Z"
+                            }
+                        })
+                        .to_string()
+                    }
+                    "agent.switch" => json!({
+                        "id": "echo",
+                        "ok": sample_switched_agent("ag-1", "cli.claude")
+                    })
+                    .to_string(),
+                    "agent.steer" => json!({
+                        "id": "echo",
+                        "ok": { "accepted": true }
+                    })
+                    .to_string(),
+                    _ => json!({
+                        "id": "echo",
+                        "error": { "code": "unsupported_method", "message": "no" }
+                    })
+                    .to_string(),
+                };
+                write_http_json(&mut stream, &body);
+            }
+        });
+        CatalogMock {
+            origin: format!("http://{addr}"),
+            hits,
+        }
+    }
+
+    #[test]
+    fn handshake_advertises_account_steer_1_9_and_keeps_1_8() {
+        let mock = start_catalog_mock("host-a", "tok-1");
+        let _session = connect(&pid("host-a", &mock.origin)).expect("online");
+        let hs = mock
+            .hits
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|h| h.method == "handshake")
+            .cloned()
+            .expect("handshake");
+        for name in ACCOUNT_STEER_METHODS {
+            assert_eq!(hs.params["methods"][name]["major"], 1, "{name}");
+            assert_eq!(hs.params["methods"][name]["minor"], 9, "{name}");
+        }
+        assert_eq!(hs.params["methods"]["account.list"]["minor"], 9);
+        assert_eq!(hs.params["methods"]["agent.steer"]["minor"], 9);
+        assert_eq!(hs.params["methods"]["search.query"]["minor"], 9);
+        assert_eq!(hs.params["methods"]["sync.export"]["minor"], 8);
+        assert_eq!(hs.params["methods"]["sync.import"]["minor"], 8);
+        assert_eq!(hs.params["methods"]["agent.switch"]["minor"], 6);
+        assert_eq!(hs.params["methods"]["agent.create"]["minor"], 0);
+        assert_eq!(hs.params["client"], "gui");
+    }
+
+    #[test]
+    fn account_list_returns_labels_without_secrets() {
+        let mock = start_account_steer_rpc_mock();
+        let session = connect(&pid("host-a", &mock.origin)).expect("online");
+        assert!(session.accounts_accepted());
+        let items = session.account_list().expect("list");
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].id, "acc-1");
+        assert_eq!(items[0].label, "work");
+        assert_eq!(items[0].provider.as_deref(), Some("cli.claude"));
+        assert_eq!(items[1].id, "acc-2");
+        let hit = mock
+            .hits
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|h| h.method == "account.list")
+            .cloned()
+            .expect("account.list");
+        assert!(hit.has_session);
+        assert!(hit.params.get("token").is_none());
+    }
+
+    #[test]
+    fn agent_create_and_switch_include_account_id_only_when_set() {
+        let mock = start_account_steer_rpc_mock();
+        let session = connect(&pid("host-a", &mock.origin)).expect("online");
+        session
+            .agent_create("task-1", "cli.claude", None)
+            .expect("create none");
+        session
+            .agent_create("task-1", "cli.claude", Some("acc-1"))
+            .expect("create acc");
+        session
+            .agent_switch(
+                "ag-1",
+                AgentSwitchParams {
+                    provider: Some("cli.claude"),
+                    ..AgentSwitchParams::default()
+                },
+            )
+            .expect("switch none");
+        session
+            .agent_switch(
+                "ag-1",
+                AgentSwitchParams {
+                    provider: Some("cli.claude"),
+                    account_id: Some("acc-1"),
+                    ..AgentSwitchParams::default()
+                },
+            )
+            .expect("switch acc");
+        let hits = mock.hits.lock().unwrap().clone();
+        let creates: Vec<_> = hits
+            .iter()
+            .filter(|h| h.method == "agent.create")
+            .map(|h| h.params.clone())
+            .collect();
+        assert_eq!(creates.len(), 2);
+        assert!(creates[0].get("accountId").is_none());
+        assert_eq!(creates[1]["accountId"], "acc-1");
+        let switches: Vec<_> = hits
+            .iter()
+            .filter(|h| h.method == "agent.switch")
+            .map(|h| h.params.clone())
+            .collect();
+        assert_eq!(switches.len(), 2);
+        assert!(switches[0].get("accountId").is_none());
+        assert_eq!(switches[1]["accountId"], "acc-1");
+    }
+
+    #[test]
+    fn agent_steer_sends_agent_id_and_content() {
+        let mock = start_account_steer_rpc_mock();
+        let session = connect(&pid("host-a", &mock.origin)).expect("online");
+        assert!(session.steer_accepted());
+        session.agent_steer("ag-1", "  nudge  ").expect("steer");
+        let empty = session.agent_steer("ag-1", "   ").expect("empty");
+        assert_eq!(empty, json!({}));
+        let hits = mock.hits.lock().unwrap().clone();
+        let steers: Vec<_> = hits
+            .iter()
+            .filter(|h| h.method == "agent.steer")
+            .map(|h| h.params.clone())
+            .collect();
+        assert_eq!(steers.len(), 1);
+        assert_eq!(steers[0]["agentId"], "ag-1");
+        assert_eq!(steers[0]["content"], "nudge");
+        assert!(hits.iter().all(|h| h.method != "agent.send"));
     }
 }

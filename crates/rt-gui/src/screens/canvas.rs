@@ -3,6 +3,7 @@ use crate::a2a::{
     INBOX_PANE, LOOP_MAX_LABEL, LOOP_PANE, LOOP_PROMPT_HINT, LOOP_RUNNING, LOOP_START, LOOP_STOP,
     NEW_CONVERSATION,
 };
+use crate::account_ux::{self, ACCOUNT_HINT, ACCOUNT_LABEL, STEER_HINT};
 use crate::artifacts::{
     self, ArtifactKind, ARTIFACTS_PANE, ARTIFACTS_UNAVAILABLE, CLEAR_CONFIRM_BODY,
     CLEAR_CONFIRM_OK, CLEAR_CONFIRM_TITLE, CLEAR_TRANSCRIPT, COMMENTS_HEADING, COMMENT_HINT,
@@ -370,6 +371,8 @@ fn show_agents(ui: &mut egui::Ui, state: &mut AppState) {
     show_workspace_guides(ui, state);
     ui.add_space(6.0);
     show_provider_picker(ui, state);
+    ui.add_space(6.0);
+    show_account_picker(ui, state);
     ui.add_space(6.0);
     show_role_picker(ui, state);
     ui.add_space(6.0);
@@ -834,6 +837,37 @@ fn show_provider_picker(ui: &mut egui::Ui, state: &mut AppState) {
                 show_caps(ui, caps);
             }
         });
+}
+
+fn show_account_picker(ui: &mut egui::Ui, state: &mut AppState) {
+    ui.label(ACCOUNT_LABEL);
+    let listed: Vec<(String, String)> = state
+        .accounts_for_picker()
+        .into_iter()
+        .map(|a| (a.id.clone(), a.display_label().to_string()))
+        .collect();
+    let current = state.picked_account_id();
+    let selected_text = current
+        .as_ref()
+        .and_then(|id| {
+            listed
+                .iter()
+                .find(|(aid, _)| aid == id)
+                .map(|(_, label)| label.clone())
+        })
+        .unwrap_or_else(|| ACCOUNT_HINT.into());
+    let mut next = current.clone();
+    egui::ComboBox::from_id_salt("account_picker")
+        .selected_text(selected_text)
+        .show_ui(ui, |ui| {
+            ui.selectable_value(&mut next, None, ACCOUNT_HINT);
+            for (id, label) in &listed {
+                ui.selectable_value(&mut next, Some(id.clone()), label);
+            }
+        });
+    if next != current {
+        state.set_picker_account(next);
+    }
 }
 
 fn show_caps(ui: &mut egui::Ui, caps: &HarnessCapsView) {
@@ -1391,9 +1425,11 @@ fn show_chat(ui: &mut egui::Ui, state: &mut AppState) {
     ui.add_space(4.0);
 
     let enabled = state.composer_enabled();
+    let can_type = state.composer_can_type();
     let reason = state.composer_disabled_reason();
     let show_stop = state.show_stop_button();
-    ui.add_enabled_ui(enabled, |ui| {
+    let running = state.selected_agent_is_running();
+    ui.add_enabled_ui(can_type, |ui| {
         ui.add(
             egui::TextEdit::multiline(&mut state.composer_text)
                 .desired_width(f32::INFINITY)
@@ -1401,6 +1437,13 @@ fn show_chat(ui: &mut egui::Ui, state: &mut AppState) {
                 .hint_text("Написать сообщение…"),
         );
     });
+    let mod_enter = ui.input(|i| {
+        i.key_pressed(egui::Key::Enter)
+            && account_ux::command_or_ctrl(i.modifiers.command, i.modifiers.ctrl)
+    });
+    if mod_enter {
+        state.on_composer_mod_enter();
+    }
     show_deliver(ui, state);
     ui.horizontal(|ui| {
         ui.add_enabled_ui(enabled, |ui| {
@@ -1417,6 +1460,9 @@ fn show_chat(ui: &mut egui::Ui, state: &mut AppState) {
             }
         });
         ui.weak("один активный turn · очередь не строится");
+        if running && can_type {
+            ui.weak(STEER_HINT);
+        }
     });
     if let Some(reason) = reason {
         ui.weak(reason);
