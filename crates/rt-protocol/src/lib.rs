@@ -110,6 +110,8 @@ pub const METHOD_PRESET_LIST: &str = "preset.list";
 pub const METHOD_AGENT_UPDATE: &str = "agent.update";
 pub const METHOD_SYNC_EXPORT: &str = "sync.export";
 pub const METHOD_SYNC_IMPORT: &str = "sync.import";
+pub const METHOD_SEARCH_QUERY: &str = "search.query";
+pub const METHOD_WORKTREE_GC: &str = "worktree.gc";
 
 pub const EXPORT_KIND: &str = "rusttraycer.export";
 pub const EXPORT_VERSION: u32 = 1;
@@ -186,6 +188,8 @@ pub const TRADABLE_METHODS: &[&str] = &[
     METHOD_AGENT_UPDATE,
     METHOD_SYNC_EXPORT,
     METHOD_SYNC_IMPORT,
+    METHOD_SEARCH_QUERY,
+    METHOD_WORKTREE_GC,
 ];
 
 pub fn host_method_version() -> MethodVersion {
@@ -200,8 +204,9 @@ pub fn host_method_version() -> MethodVersion {
 /// `agent.clear_transcript` methods are 1.4; `agent.create` and A2A/loop
 /// methods are 1.5; model-ux methods (`agent.switch`, `profile.*`, `prefs.get`)
 /// are 1.6; workspace/guides/preset/`agent.update` methods are 1.7;
-/// `sync.export`/`sync.import` are 1.8; `artifact.export` is 1.9 (PDF);
-/// all other tradable methods stay 1.0 (`HOST_METHOD_MINOR` is not bumped).
+/// `sync.export`/`sync.import` are 1.8; `artifact.export`, `search.query`,
+/// and `worktree.gc` are 1.9; all other tradable methods stay 1.0
+/// (`HOST_METHOD_MINOR` is not bumped).
 /// Unknown names return `None`.
 pub fn method_version(name: &str) -> Option<MethodVersion> {
     if !TRADABLE_METHODS.iter().any(|m| *m == name) {
@@ -228,7 +233,9 @@ pub fn method_version(name: &str) -> Option<MethodVersion> {
         | METHOD_COMMENT_LIST
         | METHOD_COMMENT_RESOLVE
         | METHOD_AGENT_CLEAR_TRANSCRIPT => Some(MethodVersion { major: 1, minor: 4 }),
-        METHOD_ARTIFACT_EXPORT => Some(MethodVersion { major: 1, minor: 9 }),
+        METHOD_ARTIFACT_EXPORT | METHOD_SEARCH_QUERY | METHOD_WORKTREE_GC => {
+            Some(MethodVersion { major: 1, minor: 9 })
+        }
         METHOD_AGENT_CREATE
         | METHOD_A2A_TRANSCRIPT
         | METHOD_A2A_DELIVER
@@ -1110,6 +1117,66 @@ pub struct SyncImportOk {
     pub profiles_skipped: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SearchKind {
+    Task,
+    Workspace,
+    Artifact,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchQueryParams {
+    pub q: String,
+    #[serde(default)]
+    pub kinds: Option<Vec<SearchKind>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchItem {
+    pub kind: SearchKind,
+    pub id: String,
+    pub title: String,
+    pub hint: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchQueryOk {
+    pub items: Vec<SearchItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorktreeGcParams {
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum WorktreeGcReason {
+    Stale,
+    Merged,
+    Landed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorktreeGcItem {
+    pub worktree_id: String,
+    pub path: String,
+    pub reason: WorktreeGcReason,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorktreeGcOk {
+    pub dry_run: bool,
+    pub items: Vec<WorktreeGcItem>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1245,7 +1312,7 @@ mod tests {
         assert_eq!(error_codes::NO_INBOX, "no_inbox");
         assert_eq!(error_codes::LOOP_EXHAUSTED, "loop_exhausted");
         assert_eq!(error_codes::CONFLICT, "conflict");
-        assert_eq!(TRADABLE_METHODS.len(), 69);
+        assert_eq!(TRADABLE_METHODS.len(), 71);
         assert!(TRADABLE_METHODS.contains(&METHOD_POLICY_GET));
         assert!(TRADABLE_METHODS.contains(&METHOD_POLICY_SET));
         assert!(TRADABLE_METHODS.contains(&METHOD_APPROVAL_RESPOND));
@@ -1274,6 +1341,16 @@ mod tests {
             method_version(METHOD_ARTIFACT_EXPORT),
             Some(MethodVersion { major: 1, minor: 9 })
         );
+        assert_eq!(
+            method_version(METHOD_SEARCH_QUERY),
+            Some(MethodVersion { major: 1, minor: 9 })
+        );
+        assert_eq!(
+            method_version(METHOD_WORKTREE_GC),
+            Some(MethodVersion { major: 1, minor: 9 })
+        );
+        assert!(TRADABLE_METHODS.contains(&METHOD_SEARCH_QUERY));
+        assert!(TRADABLE_METHODS.contains(&METHOD_WORKTREE_GC));
         assert_eq!(
             method_version(METHOD_COMMENT_LIST),
             Some(MethodVersion { major: 1, minor: 4 })
@@ -2000,7 +2077,7 @@ mod tests {
         );
         assert!(TRADABLE_METHODS.contains(&METHOD_AGENT_SWITCH));
         assert!(TRADABLE_METHODS.contains(&METHOD_PREFS_GET));
-        assert_eq!(TRADABLE_METHODS.len(), 69);
+        assert_eq!(TRADABLE_METHODS.len(), 71);
 
         let sw: AgentSwitchParams = serde_json::from_str(
             r#"{"agentId":"a1","provider":"cli.codex","model":"o3","effort":"high","fast":false}"#,
@@ -2107,7 +2184,7 @@ mod tests {
             method_version(METHOD_HOST_PING),
             Some(MethodVersion { major: 1, minor: 0 })
         );
-        assert_eq!(TRADABLE_METHODS.len(), 69);
+        assert_eq!(TRADABLE_METHODS.len(), 71);
         assert!(TRADABLE_METHODS.contains(&METHOD_WORKSPACE_GUIDES_GET));
         assert!(TRADABLE_METHODS.contains(&METHOD_AGENT_UPDATE));
         assert!(!TRADABLE_METHODS
@@ -2242,7 +2319,7 @@ mod tests {
             Some(MethodVersion { major: 1, minor: 0 })
         );
         assert_eq!(host_method_version(), MethodVersion { major: 1, minor: 0 });
-        assert_eq!(TRADABLE_METHODS.len(), 69);
+        assert_eq!(TRADABLE_METHODS.len(), 71);
         assert!(TRADABLE_METHODS.contains(&METHOD_SYNC_EXPORT));
         assert!(TRADABLE_METHODS.contains(&METHOD_SYNC_IMPORT));
         assert_eq!(EXPORT_KIND, "rusttraycer.export");
@@ -2363,5 +2440,57 @@ mod tests {
         let v = serde_json::to_value(&c).unwrap();
         assert_eq!(v["threadId"], "th1");
         assert!(v.get("thread_id").is_none());
+    }
+
+    #[test]
+    fn search_and_worktree_gc_types_camel_case() {
+        let p: SearchQueryParams =
+            serde_json::from_str(r#"{"q":"hello","kinds":["task","workspace","artifact"]}"#)
+                .unwrap();
+        assert_eq!(p.q, "hello");
+        assert_eq!(p.kinds.as_ref().map(|k| k.len()), Some(3));
+        let item = SearchItem {
+            kind: SearchKind::Task,
+            id: "t1".into(),
+            title: "Title".into(),
+            hint: "open".into(),
+        };
+        let v = serde_json::to_value(&item).unwrap();
+        assert_eq!(v["kind"], "task");
+        assert_eq!(v["id"], "t1");
+        assert_eq!(v["title"], "Title");
+        assert_eq!(v["hint"], "open");
+        assert!(v.get("worktree_id").is_none());
+        let ok = SearchQueryOk { items: vec![item] };
+        let v = serde_json::to_value(&ok).unwrap();
+        assert_eq!(v["items"][0]["kind"], "task");
+
+        let gcp: WorktreeGcParams = serde_json::from_str(r#"{"dryRun":true}"#).unwrap();
+        assert!(gcp.dry_run);
+        let item = WorktreeGcItem {
+            worktree_id: "w1".into(),
+            path: "/wt".into(),
+            reason: WorktreeGcReason::Stale,
+        };
+        let v = serde_json::to_value(&item).unwrap();
+        assert_eq!(v["worktreeId"], "w1");
+        assert_eq!(v["path"], "/wt");
+        assert_eq!(v["reason"], "stale");
+        assert!(v.get("worktree_id").is_none());
+        let ok = WorktreeGcOk {
+            dry_run: true,
+            items: vec![item],
+        };
+        let v = serde_json::to_value(&ok).unwrap();
+        assert_eq!(v["dryRun"], true);
+        assert_eq!(v["items"][0]["reason"], "stale");
+        assert_eq!(
+            serde_json::to_value(WorktreeGcReason::Merged).unwrap(),
+            "merged"
+        );
+        assert_eq!(
+            serde_json::to_value(WorktreeGcReason::Landed).unwrap(),
+            "landed"
+        );
     }
 }

@@ -5,6 +5,7 @@ use std::process::Command;
 
 use rt_protocol::{
     GitCommitOk, GitDiff, GitDiffFile, GitPushOk, GitStatus, GitStatusEntry, Worktree,
+    WorktreeGcItem, WorktreeGcOk, WorktreeGcReason,
 };
 use serde_json::Value;
 
@@ -40,7 +41,8 @@ impl HostService {
         require_git(&ws_path)?;
 
         let dest = self.data_dir.join("worktrees").join(agent_id);
-        let branch = format!("rt/{}", short_agent_id(agent_id));
+        let prefix = self.store.worktree_branch_prefix(&workspace.id)?;
+        let branch = format!("{prefix}{}", short_agent_id(agent_id));
         git_worktree_add(&ws_path, &dest, &branch)?;
         let canon = dest
             .canonicalize()
@@ -77,6 +79,49 @@ impl HostService {
             .into_iter()
             .map(to_proto)
             .collect())
+    }
+
+    pub fn worktree_gc(&self, dry_run: bool) -> Result<WorktreeGcOk> {
+        let rows = self.store.worktree_list_all()?;
+        let mut items = Vec::new();
+        for row in rows {
+            let prefix = self.store.worktree_branch_prefix(&row.workspace_id)?;
+            if !row.branch.starts_with(&prefix) {
+                continue;
+            }
+            let agent = self.store.agent_get(&row.agent_id)?;
+            if agent
+                .as_ref()
+                .is_some_and(|a| a.status == rt_storage::AgentStatus::Running)
+            {
+                continue;
+            }
+            let ws = self.store.workspace_get(&row.workspace_id)?;
+            let ws_path = ws.as_ref().map(|w| PathBuf::from(&w.path));
+            let wt_path = PathBuf::from(&row.path);
+            let dir_missing = !wt_path.exists();
+            let agent_gone = agent.is_none();
+            let reason =
+                classify_gc_reason(ws_path.as_deref(), &row.branch, dir_missing, agent_gone);
+            if !dry_run {
+                let removed = remove_worktree_if_safe(ws_path.as_deref(), &wt_path)?;
+                if !removed && !dir_missing {
+                    continue;
+                }
+                self.store.worktree_delete(&row.id)?;
+                if agent.is_some() {
+                    if let Err(e) = self.store.agent_set_run_location(&row.agent_id, "local") {
+                        tracing::warn!(error = %e, agent_id = %row.agent_id, "reset run_location after gc");
+                    }
+                }
+            }
+            items.push(WorktreeGcItem {
+                worktree_id: row.id,
+                path: row.path,
+                reason,
+            });
+        }
+        Ok(WorktreeGcOk { dry_run, items })
     }
 
     pub fn git_status(&self, params: &Value) -> Result<GitStatus> {
@@ -363,6 +408,107 @@ fn require_git(path: &Path) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+fn classify_gc_reason(
+    workspace: Option<&Path>,
+    branch: &str,
+    _dir_missing: bool,
+    _agent_gone: bool,
+) -> WorktreeGcReason {
+    if let Some(root) = workspace {
+        if is_git_repo(root) {
+            if gh_branch_merged(root, branch) {
+                return WorktreeGcReason::Merged;
+            }
+            if branch_landed(root, branch) {
+                return WorktreeGcReason::Landed;
+            }
+        }
+    }
+    WorktreeGcReason::Stale
+}
+
+fn gh_branch_merged(root: &Path, branch: &str) -> bool {
+    let out = Command::new("gh")
+        .args([
+            "pr", "list", "--head", branch, "--state", "merged", "--json", "number", "--limit", "1",
+        ])
+        .current_dir(root)
+        .env("GH_PROMPT_DISABLED", "1")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output();
+    let out = match out {
+        Ok(o) if o.status.success() => o,
+        _ => return false,
+    };
+    match serde_json::from_slice::<Value>(&out.stdout) {
+        Ok(Value::Array(arr)) => !arr.is_empty(),
+        _ => false,
+    }
+}
+
+fn default_branch(root: &Path) -> Option<String> {
+    if let Ok(out) = git_output(
+        root,
+        &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+    ) {
+        if out.status.success() {
+            let s = String::from_utf8_lossy(&out.stdout);
+            let s = s.trim();
+            if let Some(name) = s.strip_prefix("origin/") {
+                if !name.is_empty() {
+                    return Some(name.to_string());
+                }
+            }
+        }
+    }
+    for cand in ["main", "master"] {
+        if let Ok(out) = git_output(root, &["rev-parse", "--verify", cand]) {
+            if out.status.success() {
+                return Some(cand.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn branch_landed(root: &Path, branch: &str) -> bool {
+    let default = match default_branch(root) {
+        Some(d) => d,
+        None => return false,
+    };
+    let ancestor = match git_output(root, &["merge-base", "--is-ancestor", branch, &default]) {
+        Ok(o) => o.status.success(),
+        Err(_) => false,
+    };
+    if !ancestor {
+        return false;
+    }
+    let bsha = git_stdout(root, &["rev-parse", branch]).ok();
+    let dsha = git_stdout(root, &["rev-parse", &default]).ok();
+    match (bsha, dsha) {
+        (Some(b), Some(d)) => b.trim() != d.trim(),
+        _ => false,
+    }
+}
+
+fn remove_worktree_if_safe(workspace: Option<&Path>, wt_path: &Path) -> Result<bool> {
+    let Some(root) = workspace else {
+        return Ok(!wt_path.exists());
+    };
+    if !is_git_repo(root) {
+        return Ok(!wt_path.exists());
+    }
+    let Some(path_str) = wt_path.to_str() else {
+        return Err(HostError::Internal("worktree path is not utf-8".into()));
+    };
+    let out = git_output(root, &["worktree", "remove", "--force", path_str])?;
+    if out.status.success() {
+        return Ok(true);
+    }
+    let _ = git_output(root, &["worktree", "prune"]);
+    Ok(!wt_path.exists())
 }
 
 fn git_worktree_add(workspace: &Path, dest: &Path, branch: &str) -> Result<()> {
