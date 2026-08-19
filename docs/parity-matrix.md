@@ -54,7 +54,7 @@ Sources (live, 2026-08-19):
 | C39 | `artifact.create` (today stub: unsupported) | 0036 audit; protocol leftover | missing | E5 | Ф4 | 6 |
 | C40 | Artifact survives transcript delete | brief №6 | missing | E5 | Ф4 | 6 |
 | C41 | Artifact viewer + comments | panels/artifacts; comments | missing | E5 | Ф4 | 6 |
-| C42 | Export artifact Markdown/PDF | changelog | missing | E5 | Ф4 | 6 |
+| C42 | Export artifact Markdown/PDF | changelog; [e5-artifacts-v2](e5-artifacts-v2.md) | missing | E5 | later | 6 |
 | C43 | A2A reference (any agent) | concepts/agent-to-agent; brief №7 | missing | E6 | Ф4 | 7 |
 | C44 | A2A transcript read (capability) | same | missing | E6 | Ф4 | 7 |
 | C45 | A2A delivery (capability; Terminal inbox Claude-only at Traycer) | same; 1.1.10 full-access for A2A | missing | E6 | Ф4 | 7 |
@@ -119,7 +119,7 @@ Sources (live, 2026-08-19):
 | Ф1 | E1 + E2 foundation | C18–C25, C63, C65 |
 | Ф2 | E3 | C27–C31 (C64 later, e3-write-v2) |
 | Ф3 | E4 | C32–C36 (C37 later, e4-terminal-v2) |
-| Ф4 | E5 then E6 | C38–C47 |
+| Ф4 | E5 then E6 | C38–C41, C43–C47 (C42 later, e5-artifacts-v2) |
 | Ф5 | E7 + E8 | C48–C56 |
 | Ф6 | E9 + E10 | C57–C62 |
 | Ф7 | harden / release | DoD e2e in directive §5 |
