@@ -142,7 +142,10 @@ fn show_git(ui: &mut egui::Ui, state: &mut AppState) {
         }
     });
     if let Some(wt) = &state.worktree {
-        ui.weak(format!("worktree {} · {}", wt.branch, wt.id));
+        ui.weak(format!(
+            "worktree {} · {} · {} · {}",
+            wt.branch, wt.id, wt.path, wt.created_at
+        ));
     } else {
         ui.weak("worktree нет (local)");
     }
@@ -368,10 +371,8 @@ fn show_chat(ui: &mut egui::Ui, state: &mut AppState) {
                 state.send_composer();
             }
         });
-        if show_stop {
-            if ui.button("Стоп").clicked() {
-                state.cancel_running_agent();
-            }
+        if show_stop && ui.button("Стоп").clicked() {
+            state.cancel_running_agent();
         }
         ui.weak("один активный turn · очередь не строится");
     });

@@ -4,7 +4,9 @@ use crate::state::AppState;
 pub fn show(ctx: &egui::Context, state: &mut AppState) {
     egui::CentralPanel::default().show(ctx, |ui| {
         ui.heading("Host");
-        ui.weak("Диагностика. Не облако, не тема, не аккаунты. Refresh только перечитывает pid.json.");
+        ui.weak(
+            "Диагностика. Не облако, не тема, не аккаунты. Refresh только перечитывает pid.json.",
+        );
         ui.add_space(10.0);
 
         ui.horizontal(|ui| {
@@ -13,10 +15,8 @@ pub fn show(ctx: &egui::Context, state: &mut AppState) {
             }
             let has_id = state.pid_info.is_some();
             ui.add_enabled_ui(has_id, |ui| {
-                if ui.button("Скопировать hostId").clicked() {
-                    if state.copy_host_id(ctx) {
-                        state.copied_flash = Some("hostId скопирован".into());
-                    }
+                if ui.button("Скопировать hostId").clicked() && state.copy_host_id(ctx) {
+                    state.copied_flash = Some("hostId скопирован".into());
                 }
             });
             if let Some(msg) = &state.copied_flash {
@@ -37,8 +37,12 @@ pub fn show(ctx: &egui::Context, state: &mut AppState) {
                 info.host_id.clone(),
                 info.pid.to_string(),
                 info.rpc_url.clone(),
-                info.ws_url.clone().unwrap_or_else(|| unavailable.to_string()),
-                info.started_at.clone().unwrap_or_else(|| unavailable.to_string()),
+                info.ws_url
+                    .clone()
+                    .unwrap_or_else(|| unavailable.to_string()),
+                info.started_at
+                    .clone()
+                    .unwrap_or_else(|| unavailable.to_string()),
             ),
             None => (
                 unavailable.into(),
@@ -49,7 +53,15 @@ pub fn show(ctx: &egui::Context, state: &mut AppState) {
             ),
         };
 
+        let host_version = state
+            .session
+            .as_ref()
+            .map(|s| s.host_version.clone())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| unavailable.to_string());
+
         field(ui, "hostId", &host_id);
+        field(ui, "hostVersion", &host_version);
         field(ui, "pid", &pid);
         field(ui, "rpcUrl", &rpc_url);
         field(ui, "wsUrl", &ws_url);
@@ -74,7 +86,10 @@ pub fn show(ctx: &egui::Context, state: &mut AppState) {
 
 fn field(ui: &mut egui::Ui, name: &str, value: &str) {
     ui.horizontal(|ui| {
-        ui.add_sized([180.0, 18.0], egui::Label::new(egui::RichText::new(name).weak()));
+        ui.add_sized(
+            [180.0, 18.0],
+            egui::Label::new(egui::RichText::new(name).weak()),
+        );
         ui.monospace(value);
     });
 }

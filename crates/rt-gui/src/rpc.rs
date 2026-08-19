@@ -14,7 +14,6 @@ const CLIENT_VERSION: &str = rt_protocol::CRATE_VERSION;
 #[derive(Debug, Clone)]
 pub struct Session {
     pub host_id: String,
-    #[allow(dead_code)]
     pub host_version: String,
     pub session_token: String,
     pub rpc_url: String,
@@ -490,7 +489,6 @@ pub struct CancelOk {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code)]
 pub struct Worktree {
     pub id: String,
     pub workspace_id: String,
@@ -656,6 +654,7 @@ mod tests {
         info.ws_url = Some("ws://127.0.0.1:9/ws".into());
         let session = connect(&info).expect("online");
         assert_eq!(session.host_id, "host-a");
+        assert_eq!(session.host_version, "0.1.0");
         assert_eq!(session.session_token, "tok-1");
         assert_eq!(session.ws_url.as_deref(), Some("ws://127.0.0.1:9/ws"));
         let hits = mock.hits.lock().unwrap().clone();
