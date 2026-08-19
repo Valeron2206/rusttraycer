@@ -421,3 +421,182 @@ async fn second_prepare_fails_already_running() {
     let _ = shutdown.send(());
     let _ = join.await;
 }
+
+#[tokio::test]
+async fn restart_keeps_task_agent_message_same_host_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut backends = std::collections::HashMap::new();
+    let backend: Arc<dyn AgentBackend> = Arc::new(EchoBackend);
+    backends.insert("cli.generic".into(), backend);
+
+    let (addr, shutdown, join, host_id) = rt_host::spawn_test_host(dir.path(), Some(backends))
+        .await
+        .unwrap();
+    let base = format!("http://{addr}");
+    let client = reqwest::Client::new();
+
+    let hs = rpc(
+        &client,
+        &base,
+        None,
+        "handshake",
+        json!({
+            "client": "cli",
+            "clientVersion": "0.1.0",
+            "methods": all_methods()
+        }),
+    )
+    .await;
+    let token = hs["ok"]["sessionToken"].as_str().unwrap().to_string();
+
+    let ws_dir = dir.path().join("proj");
+    std::fs::create_dir(&ws_dir).unwrap();
+    let ws = rpc(
+        &client,
+        &base,
+        Some(&token),
+        "workspace.add",
+        json!({ "path": ws_dir.to_str().unwrap() }),
+    )
+    .await;
+    let ws_id = ws["ok"]["id"].as_str().unwrap().to_string();
+
+    let task = rpc(
+        &client,
+        &base,
+        Some(&token),
+        "task.create",
+        json!({ "title": "Demo", "workspaceId": ws_id }),
+    )
+    .await;
+    let task_id = task["ok"]["id"].as_str().unwrap().to_string();
+
+    let agent = rpc(
+        &client,
+        &base,
+        Some(&token),
+        "agent.create",
+        json!({ "taskId": task_id }),
+    )
+    .await;
+    let agent_id = agent["ok"]["id"].as_str().unwrap().to_string();
+
+    let sent = rpc(
+        &client,
+        &base,
+        Some(&token),
+        "agent.send",
+        json!({ "agentId": agent_id, "content": "hi there" }),
+    )
+    .await;
+    assert_eq!(sent["ok"]["userMessage"]["content"], "hi there");
+
+    let mut idle = false;
+    for _ in 0..50 {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let got = rpc(
+            &client,
+            &base,
+            Some(&token),
+            "agent.get",
+            json!({ "id": agent_id }),
+        )
+        .await;
+        if got["ok"]["status"] == "idle" {
+            idle = true;
+            break;
+        }
+    }
+    assert!(idle, "echo turn did not finish before restart");
+
+    // EchoBackend returns to idle; mark running so prepare recovery can flip it.
+    let store = rt_storage::Store::open(rt_host::bind::db_path(dir.path())).unwrap();
+    store
+        .agent_set_status(&agent_id, rt_storage::AgentStatus::Running)
+        .unwrap();
+    drop(store);
+
+    let _ = shutdown.send(());
+    let _ = join.await;
+    assert!(
+        !rt_host::bind::pid_path(dir.path()).exists(),
+        "pid.json must be gone after shutdown"
+    );
+
+    let mut backends = std::collections::HashMap::new();
+    let backend: Arc<dyn AgentBackend> = Arc::new(EchoBackend);
+    backends.insert("cli.generic".into(), backend);
+    let (addr2, shutdown2, join2, host_id2) = rt_host::spawn_test_host(dir.path(), Some(backends))
+        .await
+        .unwrap();
+    assert_eq!(
+        host_id2, host_id,
+        "hostId must persist across prepare restart"
+    );
+
+    let base2 = format!("http://{addr2}");
+    let hs2 = rpc(
+        &client,
+        &base2,
+        None,
+        "handshake",
+        json!({
+            "client": "cli",
+            "clientVersion": "0.1.0",
+            "methods": all_methods()
+        }),
+    )
+    .await;
+    let token2 = hs2["ok"]["sessionToken"].as_str().unwrap().to_string();
+
+    let ping = rpc(&client, &base2, None, "host.ping", json!({})).await;
+    assert_eq!(ping["ok"]["hostId"], host_id);
+
+    let got_task = rpc(
+        &client,
+        &base2,
+        Some(&token2),
+        "task.get",
+        json!({ "id": task_id }),
+    )
+    .await;
+    assert_eq!(got_task["ok"]["id"], task_id);
+    assert_eq!(got_task["ok"]["title"], "Demo");
+
+    let got_agent = rpc(
+        &client,
+        &base2,
+        Some(&token2),
+        "agent.get",
+        json!({ "id": agent_id }),
+    )
+    .await;
+    assert_eq!(got_agent["ok"]["id"], agent_id);
+    assert_eq!(
+        got_agent["ok"]["status"], "error",
+        "running agent must become error on prepare: {got_agent}"
+    );
+
+    let ctx = rpc(
+        &client,
+        &base2,
+        Some(&token2),
+        "agent.get_context",
+        json!({ "agentId": agent_id }),
+    )
+    .await;
+    let msgs = ctx["ok"]["messages"].as_array().unwrap();
+    assert!(
+        msgs.iter()
+            .any(|m| m["role"] == "user" && m["content"] == "hi there"),
+        "user message missing: {ctx}"
+    );
+    assert!(
+        msgs.iter()
+            .any(|m| m["role"] == "assistant" && m["content"].as_str().unwrap().contains("hello")),
+        "assistant message missing: {ctx}"
+    );
+
+    let _ = shutdown2.send(());
+    let _ = join2.await;
+}

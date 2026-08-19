@@ -103,10 +103,11 @@ fn to_proto(w: rt_storage::Worktree) -> Worktree {
 }
 
 fn short_agent_id(id: &str) -> String {
-    id.chars()
-        .filter(|c| c.is_ascii_hexdigit())
-        .take(8)
-        .collect()
+    // Tail of a UUID v7 is random; the prefix is a millisecond timestamp and
+    // collides for two agents created in the same ~65s window.
+    let hex: String = id.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+    let start = hex.len().saturating_sub(8);
+    hex[start..].to_string()
 }
 
 fn require_str<'a>(params: &'a Value, field: &str) -> Result<&'a str> {
@@ -645,6 +646,59 @@ mod tests {
         let (_dir, svc) = setup();
         let err = svc
             .worktree_list("0191f0c6-7c2a-7c11-8000-6f0c1a2b3c4d")
+            .unwrap_err();
+        assert_eq!(err.code(), "not_found");
+    }
+
+    #[test]
+    fn worktree_files_do_not_leak_between_worktrees() {
+        let (dir, svc) = setup();
+        let ws_dir = dir.path().join("repo");
+        init_git_repo(&ws_dir);
+        let ws = svc.workspace_add(ws_dir.to_str().unwrap()).unwrap();
+        let task = svc.task_create("t", &ws.id).unwrap();
+        let agent_a = svc.agent_create(&task.id, Some("cli.generic")).unwrap();
+        let agent_b = svc.agent_create(&task.id, Some("cli.generic")).unwrap();
+        let wt_a = svc.worktree_ensure(&agent_a.id).unwrap();
+        let wt_b = svc.worktree_ensure(&agent_b.id).unwrap();
+        assert_ne!(wt_a.path, wt_b.path);
+        assert_ne!(wt_a.id, wt_b.id);
+
+        let isolated = "only_in_a.txt";
+        std::fs::write(Path::new(&wt_a.path).join(isolated), "secret-a\n").unwrap();
+
+        let tree_a = svc
+            .files_tree(&ws.id, None, Some(2), None, Some(&wt_a.id))
+            .unwrap();
+        let names_a: Vec<&str> = tree_a["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|e| e["path"].as_str())
+            .collect();
+        assert!(
+            names_a.contains(&isolated),
+            "worktree A must see {isolated}: {names_a:?}"
+        );
+
+        let tree_b = svc
+            .files_tree(&ws.id, None, Some(2), None, Some(&wt_b.id))
+            .unwrap();
+        let names_b: Vec<&str> = tree_b["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|e| e["path"].as_str())
+            .collect();
+        assert!(
+            !names_b.contains(&isolated),
+            "worktree B must not see {isolated}: {names_b:?}"
+        );
+
+        let read_a = svc.files_read(&ws.id, isolated, Some(&wt_a.id)).unwrap();
+        assert_eq!(read_a["content"], "secret-a\n");
+        let err = svc
+            .files_read(&ws.id, isolated, Some(&wt_b.id))
             .unwrap_err();
         assert_eq!(err.code(), "not_found");
     }
