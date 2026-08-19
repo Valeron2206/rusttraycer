@@ -84,6 +84,7 @@ pub struct HarnessCaps {
     pub session_resume: bool,
     pub a2a_inbox: bool,
     pub pty: bool,
+    pub steer: bool,
     pub needs_api_key: bool,
     pub api_key_env: Option<&'static str>,
 }
@@ -97,6 +98,7 @@ impl HarnessCaps {
         session_resume: false,
         a2a_inbox: false,
         pty: false,
+        steer: false,
         needs_api_key: false,
         api_key_env: None,
     };
@@ -109,6 +111,7 @@ impl HarnessCaps {
         session_resume: true,
         a2a_inbox: true,
         pty: true,
+        steer: true,
         needs_api_key: false,
         api_key_env: None,
     };
@@ -121,6 +124,7 @@ impl HarnessCaps {
         session_resume: true,
         a2a_inbox: false,
         pty: true,
+        steer: true,
         needs_api_key: false,
         api_key_env: None,
     };
@@ -273,6 +277,7 @@ mod cancel_tests {
         pty: bool,
         session_resume: bool,
         a2a_inbox: bool,
+        steer: bool,
     ) {
         assert!(caps.one_shot);
         assert!(!caps.long_lived);
@@ -281,24 +286,25 @@ mod cancel_tests {
         assert_eq!(caps.session_resume, session_resume);
         assert_eq!(caps.a2a_inbox, a2a_inbox);
         assert_eq!(caps.pty, pty);
+        assert_eq!(caps.steer, steer);
         assert!(!caps.needs_api_key);
         assert!(caps.api_key_env.is_none());
     }
 
     #[test]
     fn harness_caps_cli_generic_fields() {
-        assert_one_shot_cli_caps(HarnessCaps::CLI_GENERIC, false, false, false);
+        assert_one_shot_cli_caps(HarnessCaps::CLI_GENERIC, false, false, false, false);
     }
 
     #[test]
     fn harness_caps_cli_claude_fields() {
-        assert_one_shot_cli_caps(HarnessCaps::CLI_CLAUDE, true, true, true);
+        assert_one_shot_cli_caps(HarnessCaps::CLI_CLAUDE, true, true, true, true);
         assert_ne!(HarnessCaps::CLI_CLAUDE, HarnessCaps::CLI_GENERIC);
     }
 
     #[test]
     fn harness_caps_cli_codex_fields() {
-        assert_one_shot_cli_caps(HarnessCaps::CLI_CODEX, true, true, false);
+        assert_one_shot_cli_caps(HarnessCaps::CLI_CODEX, true, true, false, true);
         assert_ne!(HarnessCaps::CLI_CODEX, HarnessCaps::CLI_CLAUDE);
         assert_ne!(HarnessCaps::CLI_CODEX, HarnessCaps::CLI_GENERIC);
     }
@@ -318,6 +324,7 @@ mod cancel_tests {
     fn generic_has_no_inbox_or_vendor_transcript() {
         let backend = CliGeneric::new("/bin/true");
         assert!(!backend.caps().a2a_inbox);
+        assert!(!backend.caps().steer);
         let err = backend
             .read_vendor_transcript(VendorTranscriptRequest {
                 session_id: "sess".into(),

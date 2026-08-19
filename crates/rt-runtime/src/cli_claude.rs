@@ -702,6 +702,7 @@ mod tests {
         assert!(backend.caps().pty);
         assert!(backend.caps().session_resume);
         assert!(backend.caps().a2a_inbox);
+        assert!(backend.caps().steer);
         assert_eq!(backend.id(), "cli.claude");
     }
 
