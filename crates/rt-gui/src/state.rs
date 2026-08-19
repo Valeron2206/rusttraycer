@@ -7,6 +7,12 @@ use crate::discovery::{self, DiscoverError};
 use crate::rpc::{GitDiffOk, GitStatusOk, Worktree};
 use crate::ws::{self, ApplyOutcome, WsBridge, WsIncoming};
 
+/// Toast when host returns `agent_busy` (one inflight turn).
+pub const TOAST_AGENT_BUSY: &str = "агент занят";
+
+/// Git panel empty/error when `git.status` / `git.diff` returns `invalid_params`.
+pub const GIT_NOTE_INVALID_PARAMS: &str = "нет git-статуса (invalid_params)";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HostStatus {
     Connecting,
@@ -393,11 +399,6 @@ impl AppState {
                 self.pid_info = Some(info.clone());
                 match crate::rpc::connect(&info) {
                     Ok(session) => {
-                        let same_host = self
-                            .session_host_id
-                            .as_deref()
-                            .map(|id| id == session.host_id)
-                            .unwrap_or(false);
                         self.session_token = Some(session.session_token.clone());
                         self.session_host_id = Some(session.host_id.clone());
                         self.start_ws(&session);
@@ -407,11 +408,8 @@ impl AppState {
                         self.last_rpc = Some(Instant::now());
                         self.ws_banner = None;
                         self.refresh_tasks_catalog();
-                        if same_host && self.screen == Screen::Canvas {
-                            if let Some(id) = self.selected_task_id.clone() {
-                                self.reload_canvas(&id);
-                                self.ws_subscribe(&id);
-                            }
+                        if self.screen == Screen::Canvas {
+                            self.refresh_canvas_after_reconnect();
                         }
                     }
                     Err(err) => {
@@ -458,18 +456,13 @@ impl AppState {
             WsIncoming::Event(event) => self.apply_ws_event(event),
             WsIncoming::Disconnected { .. } => {
                 if self.is_online() {
-                    self.ws_banner = Some(
-                        "Соединение с host потеряно, переподключение…".into(),
-                    );
+                    self.ws_banner = Some("Соединение с host потеряно, переподключение…".into());
                 }
             }
             WsIncoming::Reconnected => {
                 self.ws_banner = None;
                 if self.is_online() {
-                    if let Some(id) = self.selected_task_id.clone() {
-                        self.reload_canvas(&id);
-                        self.ws_subscribe(&id);
-                    }
+                    self.refresh_canvas_after_reconnect();
                 }
             }
         }
@@ -513,6 +506,14 @@ impl AppState {
     fn ws_subscribe(&self, task_id: &str) {
         if let Some(ws) = &self.ws {
             ws.subscribe(task_id.to_string());
+        }
+    }
+
+    /// Host restart / WS reconnect: refetch and REPLACE canvas data. Never append.
+    fn refresh_canvas_after_reconnect(&mut self) {
+        if let Some(id) = self.selected_task_id.clone() {
+            self.reload_canvas(&id);
+            self.ws_subscribe(&id);
         }
     }
 
@@ -611,13 +612,16 @@ impl AppState {
         }
         let wt = self.worktree_id().map(|s| s.to_string());
         match session.git_status(&workspace_id, wt.as_deref()) {
-            Ok(status) => self.git_status = Some(status),
+            Ok(status) => {
+                self.git_status = Some(status);
+                self.load_git_diff();
+            }
             Err(err) => {
                 self.git_status = None;
-                self.git_note = Some(err.as_label());
+                self.git_diff = None;
+                self.git_note = Some(git_error_note(&err));
             }
         }
-        self.load_git_diff();
     }
 
     fn load_git_diff(&mut self) {
@@ -634,7 +638,7 @@ impl AppState {
             Ok(diff) => self.git_diff = Some(diff),
             Err(err) => {
                 self.git_diff = None;
-                self.git_note = Some(err.as_label());
+                self.git_note = Some(git_error_note(&err));
             }
         }
     }
@@ -725,12 +729,15 @@ impl AppState {
         match session.agent_list(task_id) {
             Ok(items) => {
                 self.agents.retain(|a| a.task_id != task_id);
-                self.agents
-                    .extend(items.into_iter().map(AgentStub::from));
+                self.agents.extend(items.into_iter().map(AgentStub::from));
                 let still_valid = self
                     .selected_agent_id
                     .as_ref()
-                    .map(|id| self.agents.iter().any(|a| &a.id == id && a.task_id == task_id))
+                    .map(|id| {
+                        self.agents
+                            .iter()
+                            .any(|a| &a.id == id && a.task_id == task_id)
+                    })
                     .unwrap_or(false);
                 if !still_valid {
                     self.selected_agent_id = self
@@ -766,7 +773,10 @@ impl AppState {
         }
         match session.agent_get_context(&agent_id) {
             Ok(messages) => {
-                self.messages = messages.into_iter().map(ChatMessage::from).collect();
+                apply_get_context_replace(
+                    &mut self.messages,
+                    messages.into_iter().map(ChatMessage::from).collect(),
+                );
             }
             Err(err) => {
                 self.toast = Some(err.as_label());
@@ -848,7 +858,11 @@ impl AppState {
             }
             Err(err) => {
                 // agent_busy / not_found → toast, do not mutate the list.
-                self.toast = Some(err.as_label());
+                self.toast = Some(if err.is_agent_busy() {
+                    TOAST_AGENT_BUSY.to_string()
+                } else {
+                    err.as_label()
+                });
             }
         }
     }
@@ -1108,5 +1122,446 @@ impl AppState {
         } else {
             false
         }
+    }
+}
+
+/// Retry/reconnect: replace transcript from `agent.get_context`. Never merge.
+pub fn apply_get_context_replace(messages: &mut Vec<ChatMessage>, context: Vec<ChatMessage>) {
+    *messages = context;
+}
+
+fn git_error_note(err: &crate::rpc::ConnectError) -> String {
+    if err.is_invalid_params() {
+        GIT_NOTE_INVALID_PARAMS.to_string()
+    } else {
+        err.as_label()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rpc::connect;
+    use serde_json::{json, Value};
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::{Arc, Mutex};
+    use std::thread;
+
+    #[derive(Clone, Debug)]
+    struct RpcHit {
+        method: String,
+        params: Value,
+    }
+
+    struct SliceMock {
+        origin: String,
+        hits: Arc<Mutex<Vec<RpcHit>>>,
+    }
+
+    fn read_http_request(stream: &mut std::net::TcpStream) -> (String, Vec<u8>) {
+        let mut raw = Vec::new();
+        let mut tmp = [0u8; 2048];
+        loop {
+            match stream.read(&mut tmp) {
+                Ok(0) => break,
+                Ok(n) => raw.extend_from_slice(&tmp[..n]),
+                Err(_) => break,
+            }
+            if let Some(pos) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+                let headers = String::from_utf8_lossy(&raw[..pos]);
+                let cl = headers
+                    .lines()
+                    .find_map(|line| {
+                        let lower = line.to_ascii_lowercase();
+                        lower
+                            .strip_prefix("content-length:")
+                            .and_then(|s| s.trim().parse::<usize>().ok())
+                    })
+                    .unwrap_or(0);
+                if raw.len() >= pos + 4 + cl {
+                    let body = raw[pos + 4..pos + 4 + cl].to_vec();
+                    return (headers.into_owned(), body);
+                }
+            }
+        }
+        (String::from_utf8_lossy(&raw).into_owned(), Vec::new())
+    }
+
+    fn write_http_json(stream: &mut std::net::TcpStream, body: &str) {
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let _ = stream.write_all(resp.as_bytes());
+    }
+
+    fn sample_agent(id: &str, task_id: &str, status: &str) -> Value {
+        json!({
+            "id": id,
+            "taskId": task_id,
+            "hostId": "host-a",
+            "parentId": null,
+            "interface": "chat",
+            "provider": "cli.generic",
+            "status": status,
+            "runLocation": "local",
+            "createdAt": "2026-08-17T12:00:00Z"
+        })
+    }
+
+    fn sample_message(id: &str, agent_id: &str, role: &str, content: &str) -> Value {
+        json!({
+            "id": id,
+            "agentId": agent_id,
+            "role": role,
+            "content": content,
+            "createdAt": "2026-08-17T12:00:00Z"
+        })
+    }
+
+    #[derive(Clone, Copy)]
+    enum SendMode {
+        Ok,
+        Busy,
+        Rpc {
+            code: &'static str,
+            message: &'static str,
+        },
+    }
+
+    #[derive(Clone, Copy)]
+    enum GitMode {
+        Ok,
+        InvalidParams,
+    }
+
+    fn start_slice_mock(send: SendMode, git: GitMode) -> SliceMock {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(Mutex::new(Vec::new()));
+        let hits_t = hits.clone();
+        thread::spawn(move || {
+            for stream in listener.incoming().take(48) {
+                let Ok(mut stream) = stream else { break };
+                let (headers, body) = read_http_request(&mut stream);
+                let (method, params) = if headers.starts_with("GET /health") {
+                    ("GET /health".to_string(), json!({}))
+                } else {
+                    let parsed: Value = serde_json::from_slice(&body).unwrap_or(json!({}));
+                    (
+                        parsed
+                            .get("method")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("other")
+                            .to_string(),
+                        parsed.get("params").cloned().unwrap_or(json!({})),
+                    )
+                };
+                hits_t.lock().unwrap().push(RpcHit {
+                    method: method.clone(),
+                    params: params.clone(),
+                });
+                let body = match method.as_str() {
+                    "GET /health" => json!({"ok": true, "hostId": "host-a"}).to_string(),
+                    "handshake" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "hostId": "host-a",
+                            "hostVersion": "0.1.0",
+                            "sessionToken": "tok-1",
+                            "accepted": {},
+                            "rejected": {}
+                        }
+                    })
+                    .to_string(),
+                    "host.ping" => json!({
+                        "id": "echo",
+                        "ok": { "hostId": "host-a", "now": "2026-08-17T12:00:00Z" }
+                    })
+                    .to_string(),
+                    "agent.list" => json!({
+                        "id": "echo",
+                        "ok": { "items": [sample_agent("ag-1", "task-1", "idle")] }
+                    })
+                    .to_string(),
+                    "agent.get" => {
+                        let id = params.get("id").and_then(|v| v.as_str()).unwrap_or("ag-1");
+                        json!({ "id": "echo", "ok": sample_agent(id, "task-1", "idle") })
+                            .to_string()
+                    }
+                    "agent.get_context" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "messages": [
+                                sample_message("ctx-1", "ag-1", "user", "hi"),
+                                sample_message("ctx-2", "ag-1", "assistant", "ok")
+                            ]
+                        }
+                    })
+                    .to_string(),
+                    "agent.send" => match send {
+                        SendMode::Ok => {
+                            let agent_id =
+                                params.get("agentId").and_then(|v| v.as_str()).unwrap_or("");
+                            let content =
+                                params.get("content").and_then(|v| v.as_str()).unwrap_or("");
+                            json!({
+                                "id": "echo",
+                                "ok": {
+                                    "userMessage": sample_message("m-new", agent_id, "user", content)
+                                }
+                            })
+                            .to_string()
+                        }
+                        SendMode::Busy => json!({
+                            "id": "echo",
+                            "error": {
+                                "code": "agent_busy",
+                                "message": "agent has an in-flight turn"
+                            }
+                        })
+                        .to_string(),
+                        SendMode::Rpc { code, message } => json!({
+                            "id": "echo",
+                            "error": { "code": code, "message": message }
+                        })
+                        .to_string(),
+                    },
+                    "worktree.get" => json!({
+                        "id": "echo",
+                        "error": { "code": "not_found", "message": "no worktree" }
+                    })
+                    .to_string(),
+                    "git.status" => match git {
+                        GitMode::Ok => json!({
+                            "id": "echo",
+                            "ok": {
+                                "branch": "main",
+                                "dirty": false,
+                                "truncated": false,
+                                "entries": []
+                            }
+                        })
+                        .to_string(),
+                        GitMode::InvalidParams => json!({
+                            "id": "echo",
+                            "error": {
+                                "code": "invalid_params",
+                                "message": "not_git"
+                            }
+                        })
+                        .to_string(),
+                    },
+                    "git.diff" => match git {
+                        GitMode::Ok => json!({
+                            "id": "echo",
+                            "ok": { "truncated": false, "files": [] }
+                        })
+                        .to_string(),
+                        GitMode::InvalidParams => json!({
+                            "id": "echo",
+                            "error": {
+                                "code": "invalid_params",
+                                "message": "not_git"
+                            }
+                        })
+                        .to_string(),
+                    },
+                    "files.tree" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "items": [{
+                                "name": "README.md",
+                                "path": "README.md",
+                                "kind": "file",
+                                "size": 12,
+                                "modifiedAt": "2026-08-17T12:00:00Z"
+                            }],
+                            "truncated": false
+                        }
+                    })
+                    .to_string(),
+                    _ => json!({
+                        "id": "echo",
+                        "error": { "code": "unsupported_method", "message": "no" }
+                    })
+                    .to_string(),
+                };
+                write_http_json(&mut stream, &body);
+            }
+        });
+        SliceMock {
+            origin: format!("http://{addr}"),
+            hits,
+        }
+    }
+
+    fn pid(origin: &str) -> PidInfo {
+        PidInfo {
+            host_id: "host-a".into(),
+            pid: 1,
+            rpc_url: origin.into(),
+            ws_url: None,
+            started_at: None,
+        }
+    }
+
+    fn online_state(session: crate::rpc::Session) -> AppState {
+        let mut state = AppState::new();
+        state.pending_discover = false;
+        state.demo = false;
+        state.host_status = HostStatus::Online;
+        state.session_host_id = Some(session.host_id.clone());
+        state.session_token = Some(session.session_token.clone());
+        state.session = Some(session);
+        state.workspace_id = Some("ws-1".into());
+        state.selected_task_id = Some("task-1".into());
+        state.selected_agent_id = Some("ag-1".into());
+        state.agents.push(AgentStub {
+            id: "ag-1".into(),
+            task_id: "task-1".into(),
+            provider: "cli.generic".into(),
+            status: AgentStatus::Idle,
+        });
+        state
+    }
+
+    #[test]
+    fn send_composer_agent_busy_sets_toast() {
+        let mock = start_slice_mock(SendMode::Busy, GitMode::Ok);
+        let session = connect(&pid(&mock.origin)).expect("online");
+        let mut state = online_state(session);
+        state.messages.push(ChatMessage {
+            id: "keep-me".into(),
+            role: "user".into(),
+            content: "already there".into(),
+        });
+        state.composer_text = "second turn".into();
+        assert!(state.composer_enabled());
+        state.send_composer();
+        assert_eq!(state.toast.as_deref(), Some(TOAST_AGENT_BUSY));
+        assert_eq!(TOAST_AGENT_BUSY, "агент занят");
+        assert_eq!(state.messages.len(), 1);
+        assert_eq!(state.messages[0].id, "keep-me");
+        assert_eq!(state.composer_text, "second turn");
+        let send = mock
+            .hits
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|h| h.method == "agent.send")
+            .cloned()
+            .expect("agent.send");
+        assert_eq!(send.params["agentId"], "ag-1");
+        assert_eq!(send.params["content"], "second turn");
+    }
+
+    #[test]
+    fn send_composer_rpc_error_sets_toast() {
+        let mock = start_slice_mock(
+            SendMode::Rpc {
+                code: "not_found",
+                message: "agent missing",
+            },
+            GitMode::Ok,
+        );
+        let session = connect(&pid(&mock.origin)).expect("online");
+        let mut state = online_state(session);
+        state.composer_text = "hello".into();
+        state.send_composer();
+        let toast = state.toast.clone().expect("toast");
+        assert!(toast.contains("not_found"), "{toast}");
+        assert!(toast.contains("agent missing"), "{toast}");
+        assert!(state.messages.is_empty());
+    }
+
+    #[test]
+    fn apply_get_context_replace_does_not_merge() {
+        let mut messages = vec![
+            ChatMessage {
+                id: "stale".into(),
+                role: "user".into(),
+                content: "old".into(),
+            },
+            ChatMessage {
+                id: "ctx-1".into(),
+                role: "user".into(),
+                content: "overlap-old".into(),
+            },
+        ];
+        apply_get_context_replace(
+            &mut messages,
+            vec![
+                ChatMessage {
+                    id: "ctx-1".into(),
+                    role: "user".into(),
+                    content: "overlap-new".into(),
+                },
+                ChatMessage {
+                    id: "ctx-2".into(),
+                    role: "assistant".into(),
+                    content: "ok".into(),
+                },
+            ],
+        );
+        assert_eq!(messages.len(), 2);
+        assert_eq!(
+            messages.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            vec!["ctx-1", "ctx-2"]
+        );
+        assert_eq!(messages[0].content, "overlap-new");
+        assert!(!messages.iter().any(|m| m.id == "stale"));
+    }
+
+    #[test]
+    fn reconnect_replaces_messages_via_get_context() {
+        let mock = start_slice_mock(SendMode::Ok, GitMode::Ok);
+        let session = connect(&pid(&mock.origin)).expect("online");
+        let mut state = online_state(session);
+        state.screen = Screen::Canvas;
+        state.messages = vec![
+            ChatMessage {
+                id: "stale-1".into(),
+                role: "user".into(),
+                content: "old".into(),
+            },
+            ChatMessage {
+                id: "ctx-1".into(),
+                role: "user".into(),
+                content: "overlap-local".into(),
+            },
+        ];
+        state.apply_ws_incoming(WsIncoming::Reconnected);
+        let ids: Vec<_> = state.messages.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["ctx-1", "ctx-2"]);
+        assert_eq!(state.messages[0].content, "hi");
+        assert!(!state.messages.iter().any(|m| m.id == "stale-1"));
+        let methods: Vec<_> = mock
+            .hits
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|h| h.method.clone())
+            .collect();
+        assert!(
+            methods.contains(&"agent.get_context".to_string()),
+            "{methods:?}"
+        );
+        assert!(methods.contains(&"agent.list".to_string()), "{methods:?}");
+    }
+
+    #[test]
+    fn git_status_invalid_params_sets_empty_note() {
+        let mock = start_slice_mock(SendMode::Ok, GitMode::InvalidParams);
+        let session = connect(&pid(&mock.origin)).expect("online");
+        let mut state = online_state(session);
+        state.load_git_panel();
+        assert!(state.git_status.is_none());
+        assert!(state.git_diff.is_none());
+        assert_eq!(state.git_note.as_deref(), Some(GIT_NOTE_INVALID_PARAMS));
+        assert_eq!(GIT_NOTE_INVALID_PARAMS, "нет git-статуса (invalid_params)");
+        assert!(state.toast.is_none());
+        let _ = mock;
     }
 }
