@@ -43,6 +43,17 @@ pub enum WsEvent {
         #[serde(rename = "hostId")]
         host_id: String,
     },
+    #[serde(rename = "agent.approval")]
+    AgentApproval {
+        #[serde(rename = "approvalId")]
+        approval_id: String,
+        #[serde(rename = "agentId")]
+        agent_id: String,
+        #[serde(rename = "taskId")]
+        task_id: String,
+        kind: String,
+        summary: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,6 +63,7 @@ pub enum ApplyOutcome {
     StatusChanged(String),
     GoingAway,
     TaskUpdated,
+    Approval,
     Ignored,
 }
 
@@ -61,7 +73,20 @@ pub fn composer_allowed(online: bool, status: Option<&str>) -> bool {
 }
 
 pub fn parse_event(json: &str) -> Result<WsEvent, String> {
-    serde_json::from_str(json).map_err(|err| err.to_string())
+    match serde_json::from_str(json) {
+        Ok(event) => Ok(event),
+        Err(err) => {
+            let mut value: serde_json::Value =
+                serde_json::from_str(json).map_err(|e| e.to_string())?;
+            if value.get("event").is_none() {
+                if let Some(kind) = value.get("type").cloned() {
+                    value["event"] = kind;
+                    return serde_json::from_value(value).map_err(|e| e.to_string());
+                }
+            }
+            Err(err.to_string())
+        }
+    }
 }
 
 /// Apply a parsed WS event to a transcript. Dedup by `message.id`. No merge.
@@ -123,6 +148,27 @@ pub fn apply_event(
             } else {
                 ApplyOutcome::TaskUpdated
             }
+        }
+        WsEvent::AgentApproval {
+            task_id,
+            agent_id,
+            approval_id,
+            ..
+        } => {
+            if approval_id.is_empty() {
+                return ApplyOutcome::Ignored;
+            }
+            if let Some(want) = task_id_filter {
+                if want != task_id {
+                    return ApplyOutcome::Ignored;
+                }
+            }
+            if let Some(want) = agent_id_filter {
+                if want != agent_id {
+                    return ApplyOutcome::Ignored;
+                }
+            }
+            ApplyOutcome::Approval
         }
     }
 }
@@ -418,5 +464,42 @@ mod tests {
             apply_event(&mut messages, &away, None, None),
             ApplyOutcome::GoingAway
         );
+    }
+
+    #[test]
+    fn parse_approval_event_type_or_event_field() {
+        let via_event = parse_event(
+            r#"{"event":"agent.approval","approvalId":"ap-1","agentId":"ag-1","taskId":"task-1","kind":"exec","summary":"spawn cli.claude"}"#,
+        )
+        .unwrap();
+        let via_type = parse_event(
+            r#"{"type":"agent.approval","approvalId":"ap-1","agentId":"ag-1","taskId":"task-1","kind":"exec","summary":"spawn cli.claude"}"#,
+        )
+        .unwrap();
+        for ev in [via_event, via_type] {
+            match ev {
+                WsEvent::AgentApproval {
+                    approval_id,
+                    agent_id,
+                    summary,
+                    ..
+                } => {
+                    assert_eq!(approval_id, "ap-1");
+                    assert_eq!(agent_id, "ag-1");
+                    assert_eq!(summary, "spawn cli.claude");
+                }
+                other => panic!("expected approval, got {other:?}"),
+            }
+        }
+        let mut messages = Vec::new();
+        let ev = parse_event(
+            r#"{"event":"agent.approval","approvalId":"ap-1","agentId":"ag-1","taskId":"task-1","kind":"exec","summary":"spawn"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            apply_event(&mut messages, &ev, Some("task-1"), Some("ag-1")),
+            ApplyOutcome::Approval
+        );
+        assert!(messages.is_empty());
     }
 }
