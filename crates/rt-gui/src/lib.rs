@@ -11,6 +11,7 @@ mod model_ux;
 mod rpc;
 mod screens;
 mod state;
+mod sync_ux;
 mod terminal;
 mod workspace_ux;
 mod ws;

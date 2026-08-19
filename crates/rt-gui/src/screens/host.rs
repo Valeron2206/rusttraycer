@@ -1,5 +1,9 @@
 use crate::discovery;
 use crate::state::AppState;
+use crate::sync_ux::{
+    EXPORT_BUTTON, IMPORT_BUTTON, IMPORT_CONFIRM_BODY, IMPORT_CONFIRM_OK, IMPORT_CONFIRM_TITLE,
+    SYNC_SECTION, SYNC_UNAVAILABLE,
+};
 use crate::workspace_ux::{
     GLOBAL_GUIDE_HINT, GLOBAL_GUIDE_LABEL, GLOBAL_GUIDE_SAVE, WORKSPACE_UNAVAILABLE,
 };
@@ -150,6 +154,32 @@ pub fn show_body(ui: &mut egui::Ui, state: &mut AppState) {
     ui.add_space(16.0);
     ui.separator();
     ui.add_space(8.0);
+    ui.heading(SYNC_SECTION);
+    let sync_ok = state.sync_host_ok();
+    if state.can_rpc() && !sync_ok {
+        ui.weak(SYNC_UNAVAILABLE);
+    }
+    if let Some(status) = &state.sync_status {
+        if status != SYNC_UNAVAILABLE {
+            ui.weak(status);
+        }
+    }
+    ui.add_enabled_ui(sync_ok, |ui| {
+        ui.horizontal(|ui| {
+            if ui.button(EXPORT_BUTTON).clicked() {
+                if let Some((name, payload)) = state.export_sync() {
+                    state.save_exported_sync(&name, &payload);
+                }
+            }
+            if ui.button(IMPORT_BUTTON).clicked() {
+                state.request_sync_import();
+            }
+        });
+    });
+
+    ui.add_space(16.0);
+    ui.separator();
+    ui.add_space(8.0);
     ui.heading(GLOBAL_GUIDE_LABEL);
     state.ensure_settings_guide();
     let host_ok = state.workspace_host_ok();
@@ -192,4 +222,31 @@ fn field(ui: &mut egui::Ui, name: &str, value: &str) {
         );
         ui.monospace(value);
     });
+}
+
+pub fn show_sync_import_confirm(ctx: &egui::Context, state: &mut AppState) {
+    if !state.show_sync_import_confirm {
+        return;
+    }
+    let mut open = true;
+    egui::Window::new(IMPORT_CONFIRM_TITLE)
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ctx, |ui| {
+            ui.label(IMPORT_CONFIRM_BODY);
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button(IMPORT_CONFIRM_OK).clicked() {
+                    state.confirm_sync_import();
+                }
+                if ui.button("Отмена").clicked() {
+                    state.cancel_sync_import();
+                }
+            });
+        });
+    if !open {
+        state.cancel_sync_import();
+    }
 }

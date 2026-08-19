@@ -5,6 +5,8 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::Instant;
 
+use serde_json::Value;
+
 use crate::a2a::{self, InboxItem, LoopView, A2A_UNAVAILABLE, DEFAULT_ITERATIONS};
 use crate::artifacts::{
     self, ArtifactKind, ArtifactStub, CommentThread, ARTIFACTS_UNAVAILABLE, CREATE_KINDS,
@@ -19,6 +21,10 @@ use crate::model_ux::{self, ModelParams, ModelPrefs, MODEL_UNAVAILABLE, PROFILE_
 use crate::rpc::{
     AgentModelView, CancelOk, ConnectError, DoctorOk, DoctorProvider, GitDiffOk, GitStatusOk,
     PrefsItem, PresetItem, ProfileOk, SettingsGuide, WorkspaceGuides, Worktree,
+};
+use crate::sync_ux::{
+    self, EXPORT_BUTTON, EXPORT_SAVED, IMPORT_BUTTON, NEED_TASK as SYNC_NEED_TASK,
+    NEED_WORKSPACE as SYNC_NEED_WORKSPACE, SYNC_UNAVAILABLE,
 };
 use crate::terminal::{
     self, AgentInterface, AgentView, ShellStub, DEFAULT_COLS, DEFAULT_ROWS, NEED_TASK,
@@ -368,6 +374,8 @@ pub struct AppState {
     pub settings_guide_loaded: bool,
     pub presets: Vec<PresetItem>,
     pub workspace_status: Option<String>,
+    pub sync_status: Option<String>,
+    pub show_sync_import_confirm: bool,
     pending_cancel: Option<String>,
     rpc_tx: Sender<RpcIncoming>,
     rpc_rx: Receiver<RpcIncoming>,
@@ -496,6 +504,8 @@ impl AppState {
             settings_guide_loaded: false,
             presets: workspace_ux::builtin_presets(),
             workspace_status: None,
+            sync_status: None,
+            show_sync_import_confirm: false,
             pending_cancel: None,
             rpc_tx,
             rpc_rx,
@@ -661,6 +671,7 @@ impl AppState {
                         self.refresh_a2a_capability();
                         self.refresh_model_capability();
                         self.refresh_workspace_capability();
+                        self.refresh_sync_capability();
                         self.refresh_tasks_catalog();
                         if self.screen == Screen::Canvas {
                             self.refresh_canvas_after_reconnect();
@@ -3576,6 +3587,187 @@ impl AppState {
             let label = err.as_label();
             self.workspace_status = Some(label.clone());
             self.toast = Some(label);
+        }
+    }
+
+    pub fn sync_host_ok(&self) -> bool {
+        self.session
+            .as_ref()
+            .map(|s| s.sync_accepted() && !s.sync_rejected())
+            .unwrap_or(false)
+    }
+
+    fn refresh_sync_capability(&mut self) {
+        match &self.session {
+            Some(s) if s.sync_accepted() && !s.sync_rejected() => {
+                if self.sync_status.as_deref() == Some(SYNC_UNAVAILABLE) {
+                    self.sync_status = None;
+                }
+            }
+            Some(_) | None => {
+                if self.can_rpc() {
+                    self.sync_status = Some(SYNC_UNAVAILABLE.into());
+                }
+            }
+        }
+    }
+
+    fn surface_sync_unavailable(&mut self) {
+        self.sync_status = Some(SYNC_UNAVAILABLE.into());
+        self.toast = Some(SYNC_UNAVAILABLE.into());
+        self.show_sync_import_confirm = false;
+    }
+
+    fn surface_sync_error(&mut self, err: ConnectError) {
+        if err.is_sync_unsupported() {
+            self.surface_sync_unavailable();
+        } else {
+            let label = err.as_label();
+            self.sync_status = Some(label.clone());
+            self.toast = Some(label);
+        }
+    }
+
+    fn export_task_ids(&self) -> Vec<String> {
+        let selected = self.selected_task_id.as_deref();
+        let loaded: Vec<String> = self.tasks.iter().map(|t| t.id.clone()).collect();
+        sync_ux::export_task_ids(selected, &loaded)
+    }
+
+    pub fn export_sync(&mut self) -> Option<(String, String)> {
+        if !self.sync_host_ok() {
+            self.surface_sync_unavailable();
+            return None;
+        }
+        let session = self.session.clone()?;
+        let task_ids = self.export_task_ids();
+        if task_ids.is_empty() {
+            self.toast = Some(SYNC_NEED_TASK.into());
+            return None;
+        }
+        match session.sync_export(&task_ids) {
+            Ok(ok) => {
+                let archive = sync_ux::strip_secrets(ok.archive);
+                let filename = sync_ux::export_filename(&archive);
+                match serde_json::to_string_pretty(&archive) {
+                    Ok(payload) => Some((filename, payload)),
+                    Err(err) => {
+                        self.toast = Some(err.to_string());
+                        None
+                    }
+                }
+            }
+            Err(err) => {
+                self.surface_sync_error(err);
+                None
+            }
+        }
+    }
+
+    pub fn save_exported_sync(&mut self, filename: &str, payload: &str) {
+        if let Some(path) = rfd::FileDialog::new()
+            .set_title(EXPORT_BUTTON)
+            .set_file_name(filename)
+            .add_filter("JSON", &["json"])
+            .save_file()
+        {
+            match std::fs::write(&path, payload) {
+                Ok(()) => self.toast = Some(EXPORT_SAVED.into()),
+                Err(err) => self.toast = Some(err.to_string()),
+            }
+        }
+    }
+
+    pub fn request_sync_import(&mut self) {
+        if !self.sync_host_ok() {
+            self.surface_sync_unavailable();
+            return;
+        }
+        if self
+            .workspace_id
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or("")
+            .is_empty()
+        {
+            self.toast = Some(SYNC_NEED_WORKSPACE.into());
+            return;
+        }
+        self.show_sync_import_confirm = true;
+    }
+
+    pub fn cancel_sync_import(&mut self) {
+        self.show_sync_import_confirm = false;
+    }
+
+    pub fn confirm_sync_import(&mut self) {
+        if !self.show_sync_import_confirm {
+            return;
+        }
+        self.show_sync_import_confirm = false;
+        if let Some(path) = rfd::FileDialog::new()
+            .set_title(IMPORT_BUTTON)
+            .add_filter("JSON", &["json"])
+            .pick_file()
+        {
+            match std::fs::read_to_string(&path) {
+                Ok(text) => self.import_sync_archive_text(&text),
+                Err(err) => self.toast = Some(err.to_string()),
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub fn confirm_sync_import_payload(&mut self, archive: Value) {
+        if !self.show_sync_import_confirm {
+            return;
+        }
+        self.show_sync_import_confirm = false;
+        self.import_sync_archive(archive);
+    }
+
+    fn import_sync_archive_text(&mut self, text: &str) {
+        match serde_json::from_str::<Value>(text) {
+            Ok(value) => self.import_sync_archive(sync_ux::unwrap_archive(value)),
+            Err(err) => self.toast = Some(err.to_string()),
+        }
+    }
+
+    fn import_sync_archive(&mut self, archive: Value) {
+        if !self.sync_host_ok() {
+            self.surface_sync_unavailable();
+            return;
+        }
+        let Some(workspace_id) = self
+            .workspace_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+        else {
+            self.toast = Some(SYNC_NEED_WORKSPACE.into());
+            return;
+        };
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        let archive = sync_ux::strip_secrets(archive);
+        match session.sync_import(&workspace_id, archive) {
+            Ok(ok) => {
+                let summary = sync_ux::format_import_result(&ok, &session.host_id);
+                if self.sync_status.as_deref() == Some(SYNC_UNAVAILABLE) {
+                    self.sync_status = None;
+                }
+                self.refresh_tasks_catalog();
+                if let Some(task_id) = self.selected_task_id.clone() {
+                    self.reload_agents(&task_id);
+                    if self.selected_agent_id.is_some() {
+                        self.load_selected_agent();
+                    }
+                }
+                self.toast = Some(summary);
+            }
+            Err(err) => self.surface_sync_error(err),
         }
     }
 
@@ -7028,6 +7220,288 @@ mod tests {
         let _ = state.artifacts_host_ok();
         let _ = state.a2a_host_ok();
         let _ = state.model_ux_host_ok();
+        assert_eq!(state.messages.len(), 1);
+        assert_eq!(state.messages[0].id, "keep-1");
+        assert_eq!(state.agents.len(), 1);
+        assert_eq!(state.selected_agent_id.as_deref(), Some("ag-1"));
+    }
+
+    fn sync_accepted_map() -> serde_json::Map<String, Value> {
+        let mut accepted = serde_json::Map::new();
+        for name in crate::rpc::SYNC_METHODS {
+            accepted.insert(name.to_string(), json!({"major": 1, "minor": 8}));
+        }
+        accepted
+    }
+
+    fn session_without_1_8() -> crate::rpc::Session {
+        use std::collections::BTreeMap;
+        let mut rejected = BTreeMap::new();
+        for name in crate::rpc::SYNC_METHODS {
+            rejected.insert((*name).to_string(), "unsupported".into());
+        }
+        crate::rpc::Session {
+            host_id: "host-a".into(),
+            host_version: "0.1.0".into(),
+            session_token: "tok-1".into(),
+            rpc_url: "http://127.0.0.1:1".into(),
+            ws_url: None,
+            accepted: BTreeMap::new(),
+            rejected,
+        }
+    }
+
+    fn sample_sync_archive() -> Value {
+        json!({
+            "kind": "rusttraycer.export",
+            "exportVersion": 1,
+            "sourceHostId": "host-a",
+            "exportedAt": "2026-08-19T12:00:00Z",
+            "tasks": [{"id": "task-1"}],
+            "agents": [{"id": "ag-1", "hostId": "host-a"}],
+            "messages": [],
+            "artifacts": [],
+            "commentThreads": [],
+            "comments": [],
+            "modelProfiles": [],
+            "token": "should-strip",
+            "sessionToken": "nope"
+        })
+    }
+
+    fn start_sync_state_mock() -> SliceMock {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(Mutex::new(Vec::new()));
+        let hits_t = hits.clone();
+        thread::spawn(move || {
+            for stream in listener.incoming().take(64) {
+                let Ok(mut stream) = stream else { break };
+                let (headers, body) = read_http_request(&mut stream);
+                let parsed: Value = serde_json::from_slice(&body).unwrap_or(json!({}));
+                let method = if headers.starts_with("GET /health") {
+                    "GET /health".to_string()
+                } else {
+                    parsed
+                        .get("method")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("other")
+                        .to_string()
+                };
+                let params = parsed.get("params").cloned().unwrap_or(json!({}));
+                hits_t.lock().unwrap().push(RpcHit {
+                    method: method.clone(),
+                    params: params.clone(),
+                });
+                let body = match method.as_str() {
+                    "GET /health" => json!({"ok": true, "hostId": "host-a"}).to_string(),
+                    "handshake" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "hostId": "host-a",
+                            "hostVersion": "0.1.0",
+                            "sessionToken": "tok-1",
+                            "accepted": sync_accepted_map(),
+                            "rejected": {}
+                        }
+                    })
+                    .to_string(),
+                    "host.ping" => json!({
+                        "id": "echo",
+                        "ok": { "hostId": "host-a", "now": "2026-08-19T12:00:00Z" }
+                    })
+                    .to_string(),
+                    "sync.export" => json!({
+                        "id": "echo",
+                        "ok": { "archive": sample_sync_archive() }
+                    })
+                    .to_string(),
+                    "sync.import" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "tasks": 1,
+                            "agents": 2,
+                            "messages": 10,
+                            "artifacts": 1,
+                            "profilesImported": 0,
+                            "profilesSkipped": 1
+                        }
+                    })
+                    .to_string(),
+                    "workspace.list" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "items": [{
+                                "id": "ws-1",
+                                "hostId": "host-a",
+                                "path": "/tmp/proj",
+                                "name": "proj",
+                                "createdAt": "2026-08-19T12:00:00Z"
+                            }]
+                        }
+                    })
+                    .to_string(),
+                    "task.list" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "items": [{
+                                "id": "task-1",
+                                "title": "Login",
+                                "status": "open",
+                                "createdAt": "2026-08-19T12:00:00Z",
+                                "updatedAt": "2026-08-19T12:00:00Z",
+                                "workspaceIds": ["ws-1"]
+                            }]
+                        }
+                    })
+                    .to_string(),
+                    "agent.list" => json!({
+                        "id": "echo",
+                        "ok": { "items": [sample_agent("ag-1", "task-1", "idle")] }
+                    })
+                    .to_string(),
+                    "agent.get" => json!({
+                        "id": "echo",
+                        "ok": sample_agent("ag-1", "task-1", "idle")
+                    })
+                    .to_string(),
+                    "agent.get_context" => json!({
+                        "id": "echo",
+                        "ok": { "messages": [] }
+                    })
+                    .to_string(),
+                    "policy.get" => json!({
+                        "id": "echo",
+                        "ok": { "mode": "ask", "scope": "agent", "yolo": false, "source": "default" }
+                    })
+                    .to_string(),
+                    "git.status" => json!({
+                        "id": "echo",
+                        "ok": { "branch": "main", "dirty": false, "entries": [], "truncated": false }
+                    })
+                    .to_string(),
+                    "git.diff" => json!({
+                        "id": "echo",
+                        "ok": { "files": [], "truncated": false }
+                    })
+                    .to_string(),
+                    _ => json!({
+                        "id": "echo",
+                        "error": { "code": "unsupported_method", "message": "no" }
+                    })
+                    .to_string(),
+                };
+                write_http_json(&mut stream, &body);
+            }
+        });
+        SliceMock {
+            origin: format!("http://{addr}"),
+            hits,
+        }
+    }
+
+    #[test]
+    fn export_sends_sync_export_save_is_client_side() {
+        let mock = start_sync_state_mock();
+        let session = connect(&pid(&mock.origin)).expect("online");
+        let mut state = online_state(session);
+        let exported = state.export_sync().expect("export");
+        assert!(exported.0.ends_with(".json"));
+        assert!(exported.1.contains("rusttraycer.export"));
+        assert!(!exported.1.contains("should-strip"));
+        assert!(!exported.1.contains("sessionToken"));
+        let hits = mock.hits.lock().unwrap().clone();
+        let export = hits
+            .iter()
+            .find(|h| h.method == "sync.export")
+            .expect("sync.export");
+        assert_eq!(export.params["taskIds"], json!(["task-1"]));
+        assert!(export.params.get("token").is_none());
+        assert!(export.params.get("path").is_none());
+        assert!(!hits.iter().any(|h| h.method == "files.write"));
+    }
+
+    #[test]
+    fn import_requires_confirm_then_sends_sync_import() {
+        let mock = start_sync_state_mock();
+        let session = connect(&pid(&mock.origin)).expect("online");
+        let mut state = online_state(session);
+        let archive = sample_sync_archive();
+        state.confirm_sync_import_payload(archive.clone());
+        let before = mock
+            .hits
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|h| h.method == "sync.import")
+            .count();
+        assert_eq!(before, 0);
+        state.request_sync_import();
+        assert!(state.show_sync_import_confirm);
+        let mid = mock
+            .hits
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|h| h.method == "sync.import")
+            .count();
+        assert_eq!(mid, 0);
+        state.cancel_sync_import();
+        assert!(!state.show_sync_import_confirm);
+        state.request_sync_import();
+        state.confirm_sync_import_payload(archive);
+        assert!(!state.show_sync_import_confirm);
+        let hits = mock.hits.lock().unwrap().clone();
+        let import = hits
+            .iter()
+            .find(|h| h.method == "sync.import")
+            .expect("sync.import");
+        assert_eq!(import.params["workspaceId"], "ws-1");
+        assert_eq!(import.params["archive"]["kind"], "rusttraycer.export");
+        assert!(import.params["archive"].get("token").is_none());
+        assert!(import.params.get("token").is_none());
+        assert_eq!(
+            state.toast.as_deref(),
+            Some("импорт: tasks=1 agents=2 messages=10 artifacts=1 profilesImported=0 profilesSkipped=1 hostId=host-a")
+        );
+    }
+
+    #[test]
+    fn old_host_sync_toasts_and_does_not_panic() {
+        let mut state = AppState::new();
+        state.pending_discover = false;
+        state.demo = false;
+        state.host_status = HostStatus::Online;
+        state.session = Some(session_without_1_8());
+        state.workspace_id = Some("ws-1".into());
+        state.selected_task_id = Some("task-1".into());
+        state.selected_agent_id = Some("ag-1".into());
+        state.agents.push(AgentStub {
+            id: "ag-1".into(),
+            task_id: "task-1".into(),
+            parent_id: None,
+            provider: "cli.generic".into(),
+            status: AgentStatus::Idle,
+            interface: "chat".into(),
+        });
+        state.messages.push(ChatMessage {
+            id: "keep-1".into(),
+            role: "user".into(),
+            content: "stay".into(),
+        });
+        assert!(state.export_sync().is_none());
+        assert_eq!(state.toast.as_deref(), Some(SYNC_UNAVAILABLE));
+        assert_eq!(SYNC_UNAVAILABLE, "синк недоступен: host без 1.8");
+        state.request_sync_import();
+        assert!(!state.show_sync_import_confirm);
+        assert_eq!(state.toast.as_deref(), Some(SYNC_UNAVAILABLE));
+        let _ = state.composer_enabled();
+        let _ = state.write_ready();
+        let _ = state.terminal_host_ok();
+        let _ = state.artifacts_host_ok();
+        let _ = state.a2a_host_ok();
+        let _ = state.model_ux_host_ok();
+        let _ = state.workspace_host_ok();
         assert_eq!(state.messages.len(), 1);
         assert_eq!(state.messages[0].id, "keep-1");
         assert_eq!(state.agents.len(), 1);

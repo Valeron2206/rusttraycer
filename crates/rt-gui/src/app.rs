@@ -32,6 +32,7 @@ impl eframe::App for RtGuiApp {
         screens::canvas::show_ladder_dialogs(ctx, &mut self.state);
         screens::canvas::show_write_dialogs(ctx, &mut self.state);
         screens::canvas::show_artifact_dialogs(ctx, &mut self.state);
+        screens::host::show_sync_import_confirm(ctx, &mut self.state);
 
         if let Some(toast) = self.state.toast.clone() {
             egui::Window::new("Сообщение")

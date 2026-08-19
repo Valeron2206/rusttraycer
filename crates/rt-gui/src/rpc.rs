@@ -124,6 +124,11 @@ pub const WORKSPACE_METHODS: &[&str] = &[
     METHOD_AGENT_UPDATE,
 ];
 
+pub const METHOD_SYNC_EXPORT: &str = "sync.export";
+pub const METHOD_SYNC_IMPORT: &str = "sync.import";
+
+pub const SYNC_METHODS: &[&str] = &[METHOD_SYNC_EXPORT, METHOD_SYNC_IMPORT];
+
 #[derive(Debug, Clone)]
 pub struct Session {
     pub host_id: String,
@@ -196,6 +201,10 @@ impl ConnectError {
     }
 
     pub fn is_workspace_unsupported(&self) -> bool {
+        self.is_unsupported_method() || self.is_version_mismatch()
+    }
+
+    pub fn is_sync_unsupported(&self) -> bool {
         self.is_unsupported_method() || self.is_version_mismatch()
     }
 
@@ -314,6 +323,9 @@ fn hello_methods() -> Value {
     }
     for name in WORKSPACE_METHODS {
         map.insert(name.to_string(), json!({ "major": 1, "minor": 7 }));
+    }
+    for name in SYNC_METHODS {
+        map.insert(name.to_string(), json!({ "major": 1, "minor": 8 }));
     }
     Value::Object(map)
 }
@@ -1419,6 +1431,52 @@ impl Session {
         let agent = parse_ok::<rt_protocol::Agent>(ok)?;
         Ok((agent, role))
     }
+
+    pub fn sync_accepted(&self) -> bool {
+        fn ok(map: &BTreeMap<String, rt_protocol::MethodVersion>, name: &str) -> bool {
+            map.get(name)
+                .map(|v| v.major == 1 && v.minor >= 8)
+                .unwrap_or(false)
+        }
+        SYNC_METHODS.iter().all(|name| ok(&self.accepted, name))
+    }
+
+    pub fn sync_rejected(&self) -> bool {
+        SYNC_METHODS
+            .iter()
+            .any(|name| self.rejected.contains_key(*name))
+    }
+
+    pub fn sync_export(&self, task_ids: &[String]) -> Result<SyncExportOk, ConnectError> {
+        parse_sync_export(self.call(METHOD_SYNC_EXPORT, json!({ "taskIds": task_ids }))?)
+    }
+
+    pub fn sync_import(&self, workspace_id: &str, archive: Value) -> Result<Value, ConnectError> {
+        self.call(
+            METHOD_SYNC_IMPORT,
+            json!({ "workspaceId": workspace_id, "archive": archive }),
+        )
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncExportOk {
+    pub archive: Value,
+}
+
+fn parse_sync_export(ok: Value) -> Result<SyncExportOk, ConnectError> {
+    if ok.get("archive").is_some() {
+        return parse_ok(ok);
+    }
+    if ok
+        .get("kind")
+        .and_then(Value::as_str)
+        .is_some_and(|k| k == "rusttraycer.export")
+    {
+        return Ok(SyncExportOk { archive: ok });
+    }
+    parse_ok(ok)
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -3805,6 +3863,29 @@ mod tests {
         assert_eq!(hs.params["methods"]["agent.create"]["minor"], 0);
     }
 
+    #[test]
+    fn handshake_advertises_sync_methods_1_8() {
+        let mock = start_catalog_mock("host-a", "tok-1");
+        let _session = connect(&pid("host-a", &mock.origin)).expect("online");
+        let hs = mock
+            .hits
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|h| h.method == "handshake")
+            .cloned()
+            .expect("handshake");
+        for name in SYNC_METHODS {
+            assert_eq!(hs.params["methods"][name]["major"], 1, "{name}");
+            assert_eq!(hs.params["methods"][name]["minor"], 8, "{name}");
+        }
+        assert_eq!(hs.params["methods"]["sync.export"]["minor"], 8);
+        assert_eq!(hs.params["methods"]["sync.import"]["minor"], 8);
+        assert_eq!(hs.params["methods"]["workspace.guides.get"]["minor"], 7);
+        assert_eq!(hs.params["methods"]["agent.switch"]["minor"], 6);
+        assert_eq!(hs.params["methods"]["agent.create"]["minor"], 0);
+    }
+
     fn start_artifacts_rpc_mock() -> CatalogMock {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
@@ -4529,5 +4610,150 @@ mod tests {
         for name in &presets {
             assert!(["planning", "review", "debug", "document"].contains(&name.as_str()));
         }
+    }
+
+    fn sync_accepted_map() -> serde_json::Map<String, Value> {
+        let mut accepted = serde_json::Map::new();
+        for name in SYNC_METHODS {
+            accepted.insert(name.to_string(), json!({"major": 1, "minor": 8}));
+        }
+        accepted
+    }
+
+    fn sample_archive() -> Value {
+        json!({
+            "kind": "rusttraycer.export",
+            "exportVersion": 1,
+            "sourceHostId": "host-a",
+            "exportedAt": "2026-08-19T12:00:00Z",
+            "tasks": [],
+            "agents": [],
+            "messages": [],
+            "artifacts": [],
+            "commentThreads": [],
+            "comments": [],
+            "modelProfiles": []
+        })
+    }
+
+    fn start_sync_rpc_mock() -> CatalogMock {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(Mutex::new(Vec::new()));
+        let hits_t = hits.clone();
+        thread::spawn(move || {
+            for stream in listener.incoming().take(24) {
+                let Ok(mut stream) = stream else { break };
+                let (headers, body) = read_http_request(&mut stream);
+                let has_session = headers.to_ascii_lowercase().contains("x-rt-session:");
+                let parsed: Value = serde_json::from_slice(&body).unwrap_or(json!({}));
+                let method = if headers.starts_with("GET /health") {
+                    "GET /health".to_string()
+                } else {
+                    parsed
+                        .get("method")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("other")
+                        .to_string()
+                };
+                let params = parsed.get("params").cloned().unwrap_or(json!({}));
+                hits_t.lock().unwrap().push(RpcHit {
+                    method: method.clone(),
+                    params: params.clone(),
+                    has_session,
+                });
+                let body = match method.as_str() {
+                    "GET /health" => json!({"ok": true, "hostId": "host-a"}).to_string(),
+                    "handshake" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "hostId": "host-a",
+                            "hostVersion": "0.1.0",
+                            "sessionToken": "tok-1",
+                            "accepted": sync_accepted_map(),
+                            "rejected": {}
+                        }
+                    })
+                    .to_string(),
+                    "host.ping" => json!({
+                        "id": "echo",
+                        "ok": { "hostId": "host-a", "now": "2026-08-19T12:00:00Z" }
+                    })
+                    .to_string(),
+                    "sync.export" => json!({
+                        "id": "echo",
+                        "ok": { "archive": sample_archive() }
+                    })
+                    .to_string(),
+                    "sync.import" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "tasks": 1,
+                            "agents": 2,
+                            "messages": 10,
+                            "artifacts": 1,
+                            "profilesImported": 0,
+                            "profilesSkipped": 1
+                        }
+                    })
+                    .to_string(),
+                    _ => json!({
+                        "id": "echo",
+                        "error": { "code": "unsupported_method", "message": "no" }
+                    })
+                    .to_string(),
+                };
+                write_http_json(&mut stream, &body);
+            }
+        });
+        CatalogMock {
+            origin: format!("http://{addr}"),
+            hits,
+        }
+    }
+
+    #[test]
+    fn sync_export_sends_task_ids() {
+        let mock = start_sync_rpc_mock();
+        let session = connect(&pid("host-a", &mock.origin)).expect("online");
+        assert!(session.sync_accepted());
+        let ok = session.sync_export(&["task-1".into()]).expect("export");
+        assert_eq!(ok.archive["kind"], "rusttraycer.export");
+        assert_eq!(ok.archive["sourceHostId"], "host-a");
+        assert!(ok.archive.get("token").is_none());
+        let hit = mock
+            .hits
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|h| h.method == "sync.export")
+            .cloned()
+            .expect("sync.export");
+        assert_eq!(hit.params["taskIds"], json!(["task-1"]));
+        assert!(hit.params.get("token").is_none());
+        assert!(hit.params.get("apiKey").is_none());
+    }
+
+    #[test]
+    fn sync_import_sends_workspace_and_archive() {
+        let mock = start_sync_rpc_mock();
+        let session = connect(&pid("host-a", &mock.origin)).expect("online");
+        let archive = sample_archive();
+        let ok = session
+            .sync_import("ws-1", archive.clone())
+            .expect("import");
+        assert_eq!(ok["tasks"], 1);
+        assert_eq!(ok["agents"], 2);
+        let hit = mock
+            .hits
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|h| h.method == "sync.import")
+            .cloned()
+            .expect("sync.import");
+        assert_eq!(hit.params["workspaceId"], "ws-1");
+        assert_eq!(hit.params["archive"]["kind"], "rusttraycer.export");
+        assert!(hit.params.get("token").is_none());
     }
 }
