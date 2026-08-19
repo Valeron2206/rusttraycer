@@ -30,51 +30,51 @@ Sources (live, 2026-08-19):
 | C15 | `cli.generic` BYOA stdin JSON | runtime-adapters-v0 | shipped | — | — | 8 |
 | C16 | Worktree isolation (files not leaked) | e2e 0002 | shipped | — | — | 5 |
 | C17 | pid-lock / second host refused | e2e | shipped | — | — | 3 |
-| C18 | GUI harness picker (host allowlist + caps, not hardcode) | Desktop agents panel; directive E1 | partial | E1 | Ф1 | 10 |
-| C19 | GUI N agents on a Task + switch + turn status | Desktop; host already N | partial | E1 | Ф1 | 4 |
-| C20 | Split view (two tabs side-by-side) | changelog; 1.1.9 #594 | missing | E1 | Ф1 | — |
+| C18 | GUI harness picker (host allowlist + caps, not hardcode) | Desktop agents panel; directive E1 | shipped | E1 | Ф1 | 10 |
+| C19 | GUI N agents on a Task + switch + turn status | Desktop; host already N | shipped | E1 | Ф1 | 4 |
+| C20 | Split view (two tabs side-by-side) | changelog; 1.1.9 #594 | shipped | E1 | Ф1 | — |
 | C21 | Task / workspace / artifact search (branch, folder, PR) | changelog | missing | E1 | Ф1 | — |
-| C22 | Canvas tabs / workspace sub-tabs | docs tasks-and-workspace-folders | missing | E1 | Ф1 | — |
-| C23 | Permission ladder ask → allow-once → allow-always → deny | Desktop agents.md Supervised/Auto-accept/Full; brief №15 | missing | E2 | Ф1 | 15 |
-| C24 | Persistent policy per agent/workspace | directive E2 | missing | E2 | Ф1 | 15 |
-| C25 | Explicit Yolo (visible bypass, not extension YOLO) | directive E2; not `/extension/tasks/yolo-mode` | missing | E2 | Ф1 | 15 |
+| C22 | Canvas tabs / workspace sub-tabs | docs tasks-and-workspace-folders | shipped | E1 | Ф1 | — |
+| C23 | Permission ladder ask → allow-once → allow-always → deny | Desktop agents.md Supervised/Auto-accept/Full; brief №15 | shipped | E2 | Ф1 | 15 |
+| C24 | Persistent policy per agent/workspace | directive E2 | shipped | E2 | Ф1 | 15 |
+| C25 | Explicit Yolo (visible bypass, not extension YOLO) | directive E2; not `/extension/tasks/yolo-mode` | shipped | E2 | Ф1 | 15 |
 | C26 | Full-access default (Traycer 1.1.x changelog) | changelog; [e2-ladder-v2](e2-ladder-v2.md) | out-of-scope-by-ADR | — | — | 15 |
-| C27 | `files.write` / patch-apply behind ladder | directive E3 | missing | E3 | Ф2 | 9, 15 |
-| C28 | Diff review apply/revert in GUI | directive E3; git-diff panel | missing | E3 | Ф2 | 9 |
-| C29 | Open-in-editor (we are not an IDE) | brief №9 | missing | E3 | Ф2 | 9 |
-| C30 | `git.commit` + stage/unstage | directive E3 | missing | E3 | Ф2 | 9 |
-| C31 | `git.push` via system git, no stored creds | directive E3; ADR-0005 | missing | E3 | Ф2 | 9 |
-| C32 | Agent Terminal interface (PTY + Task context) | terminal-agents-vs-terminals; Claude/Codex/OpenCode | missing | E4 | Ф3 | 4, 13 |
-| C33 | Plain Shell entity (PTY, not an agent) | panels/terminals; brief №4 | missing | E4 | Ф3 | 4 |
-| C34 | Terminal mux | directive E4; pty.rs/mux.rs stubs | missing | E4 | Ф3 | 4 |
-| C35 | Resume via provider session id, not scrollback | brief №13; terminal-agents-vs-terminals | missing | E4 | Ф3 | 13 |
-| C36 | Chat transcript ≠ terminal scrollback (tested) | brief №1, №2 | missing | E4 | Ф3 | 2, 13 |
+| C27 | `files.write` / patch-apply behind ladder | directive E3 | shipped | E3 | Ф2 | 9, 15 |
+| C28 | Diff review apply/revert in GUI | directive E3; git-diff panel | shipped | E3 | Ф2 | 9 |
+| C29 | Open-in-editor (we are not an IDE) | brief №9 | shipped | E3 | Ф2 | 9 |
+| C30 | `git.commit` + stage/unstage | directive E3 | shipped | E3 | Ф2 | 9 |
+| C31 | `git.push` via system git, no stored creds | directive E3; ADR-0005 | shipped | E3 | Ф2 | 9 |
+| C32 | Agent Terminal interface (PTY + Task context) | terminal-agents-vs-terminals; Claude/Codex/OpenCode | shipped | E4 | Ф3 | 4, 13 |
+| C33 | Plain Shell entity (PTY, not an agent) | panels/terminals; brief №4 | shipped | E4 | Ф3 | 4 |
+| C34 | Terminal mux | directive E4; pty.rs/mux.rs stubs | shipped | E4 | Ф3 | 4 |
+| C35 | Resume via provider session id, not scrollback | brief №13; terminal-agents-vs-terminals | shipped | E4 | Ф3 | 13 |
+| C36 | Chat transcript ≠ terminal scrollback (tested) | brief №1, №2 | shipped | E4 | Ф3 | 2, 13 |
 | C37 | Terminals outside a Task / start without folder | changelog; [e4-terminal-v2](e4-terminal-v2.md) | missing | E4 | later | 4 |
-| C38 | Artifacts first-class (spec/ticket/story/review) | panels/artifacts | missing | E5 | Ф4 | 6 |
-| C39 | `artifact.create` (today stub: unsupported) | 0036 audit; protocol leftover | missing | E5 | Ф4 | 6 |
-| C40 | Artifact survives transcript delete | brief №6 | missing | E5 | Ф4 | 6 |
-| C41 | Artifact viewer + comments | panels/artifacts; comments; [e5-artifacts-v2](e5-artifacts-v2.md) | missing | E5 | Ф4 | 6 |
-| C42 | Export artifact Markdown/PDF | changelog; [e5-artifacts-v2](e5-artifacts-v2.md) MD must, PDF later | missing | E5 | Ф4 | 6 |
-| C43 | A2A reference (any agent) | concepts/agent-to-agent; brief №7; [e6-a2a-v2](e6-a2a-v2.md) | missing | E6 | Ф4 | 7 |
-| C44 | A2A transcript read (capability) | same | missing | E6 | Ф4 | 7 |
-| C45 | A2A delivery (capability; Terminal inbox Claude-only at Traycer) | same; 1.1.10 full-access for A2A | missing | E6 | Ф4 | 7 |
-| C46 | Child agents in a Task | directive E6; New Conversation child chats | missing | E6 | Ф4 | 7 |
-| C47 | Loops with max-iterations / stop / budget (infinite loop = P0) | directive E6 | missing | E6 | Ф4 | 7 |
-| C48 | Switch harness/model on same agent; transcript stays | directive E7; ADR-0007 | missing | E7 | Ф5 | 8, 11 |
-| C49 | Named model profiles (harness+params) | directive E7; ADR-0007 | missing | E7 | Ф5 | 8 |
-| C50 | Remembered model / effort / fast per harness | changelog | missing | E7 | Ф5 | 8 |
+| C38 | Artifacts first-class (spec/ticket/story/review) | panels/artifacts | shipped | E5 | Ф4 | 6 |
+| C39 | `artifact.create` (today stub: unsupported) | 0036 audit; protocol leftover | shipped | E5 | Ф4 | 6 |
+| C40 | Artifact survives transcript delete | brief №6 | shipped | E5 | Ф4 | 6 |
+| C41 | Artifact viewer + comments | panels/artifacts; comments; [e5-artifacts-v2](e5-artifacts-v2.md) | shipped | E5 | Ф4 | 6 |
+| C42 | Export artifact Markdown/PDF | changelog; [e5-artifacts-v2](e5-artifacts-v2.md) **MD shipped**, PDF later | shipped | E5 | Ф4 | 6 |
+| C43 | A2A reference (any agent) | concepts/agent-to-agent; brief №7; [e6-a2a-v2](e6-a2a-v2.md) | shipped | E6 | Ф4 | 7 |
+| C44 | A2A transcript read (capability) | same | shipped | E6 | Ф4 | 7 |
+| C45 | A2A delivery (capability; Terminal inbox Claude-only at Traycer) | same; 1.1.10 full-access for A2A | shipped | E6 | Ф4 | 7 |
+| C46 | Child agents in a Task | directive E6; New Conversation child chats | shipped | E6 | Ф4 | 7 |
+| C47 | Loops with max-iterations / stop / budget (infinite loop = P0) | directive E6 | shipped | E6 | Ф4 | 7 |
+| C48 | Switch harness/model on same agent; transcript stays | directive E7; ADR-0007 | shipped | E7 | Ф5 | 8, 11 |
+| C49 | Named model profiles (harness+params) | directive E7; ADR-0007 | shipped | E7 | Ф5 | 8 |
+| C50 | Remembered model / effort / fast per harness | changelog | shipped | E7 | Ф5 | 8 |
 | C51 | Multi-account per provider (switch per conversation) | changelog; [e7-model-ux-v2](e7-model-ux-v2.md) | missing | E7 | later | 8 |
-| C52 | Agent roles | changelog; CLI; [e8-workspace-v2](e8-workspace-v2.md) | missing | E8 | Ф5 | 4 |
+| C52 | Agent roles | changelog; CLI; [e8-workspace-v2](e8-workspace-v2.md) | shipped | E8 | Ф5 | 4 |
 | C53 | Mid-turn steer (⌘Enter) | changelog; 1.1.9; [e7-model-ux-v2](e7-model-ux-v2.md) | missing | E7 | later | — |
-| C54 | Read workspace `AGENTS.md` | brief №14; [e8-workspace-v2](e8-workspace-v2.md) | missing | E8 | Ф5 | 14 |
-| C55 | Agent-selection guide (global + optional `.traycer/…`) | settings/agents; ADR-0004; [e8-workspace-v2](e8-workspace-v2.md) | missing | E8 | Ф5 | 14 |
-| C56 | Local workflow presets planning/review/debug/document | directive E8; ADR-0004; [e8-workspace-v2](e8-workspace-v2.md) | missing | E8 | Ф5 | 14, 16 |
-| C57 | Export/import durable entities (clone-not-migrate) | directive E9; ADR-0003; [e9-sync-v2](e9-sync-v2.md) | missing | E9 | Ф6 | 2, 3 |
+| C54 | Read workspace `AGENTS.md` | brief №14; [e8-workspace-v2](e8-workspace-v2.md) | shipped | E8 | Ф5 | 14 |
+| C55 | Agent-selection guide (global + optional `.traycer/…`) | settings/agents; ADR-0004; [e8-workspace-v2](e8-workspace-v2.md) | shipped | E8 | Ф5 | 14 |
+| C56 | Local workflow presets planning/review/debug/document | directive E8; ADR-0004; [e8-workspace-v2](e8-workspace-v2.md) | shipped | E8 | Ф5 | 14, 16 |
+| C57 | Export/import durable entities (clone-not-migrate) | directive E9; ADR-0003; [e9-sync-v2](e9-sync-v2.md) | shipped | E9 | Ф6 | 2, 3 |
 | C58 | Self-hosted `rt-sync` | directive E9; ADR-0003; [e9-sync-v2](e9-sync-v2.md) | missing | E9 | later | 2 |
-| C59 | `GET /metrics` (loopback only) | directive E10; ADR-0008; [e10-ops-v2](e10-ops-v2.md) | missing | E10 | Ф6 | — |
-| C60 | CLI `status` / `logs` / `reset-db` | directive E10; [e10-ops-v2](e10-ops-v2.md) | missing | E10 | Ф6 | — |
-| C61 | Linux AppImage + .deb | install.md; ADR-0006; [e10-ops-v2](e10-ops-v2.md) | missing | E10 | Ф6 | — |
-| C62 | macOS aarch64 | install.md; ADR-0006; [e10-ops-v2](e10-ops-v2.md) | missing | E10 | Ф6 | — |
+| C59 | `GET /metrics` (loopback only) | directive E10; ADR-0008; [e10-ops-v2](e10-ops-v2.md) | shipped | E10 | Ф6 | — |
+| C60 | CLI `status` / `logs` / `reset-db` | directive E10; [e10-ops-v2](e10-ops-v2.md) | shipped | E10 | Ф6 | — |
+| C61 | Linux AppImage + .deb | install.md; ADR-0006; [e10-ops-v2](e10-ops-v2.md) | shipped | E10 | Ф6 | — |
+| C62 | macOS aarch64 | install.md; ADR-0006; [e10-ops-v2](e10-ops-v2.md) | shipped | E10 | Ф6 | — |
 | C63 | Resource monitor / notification hooks / prompt stash / drag-to-tile | changelog; 1.1.10 notes | missing | E1 | Ф1 | — |
 | C64 | Epic PR View (checks, commits, files, local diffs) | 1.1.10 #870; [e3-write-v2](e3-write-v2.md) | missing | E3 | later | 9 |
 | C65 | Worktree cleanup / PR context / branch prefix | changelog | partial | E1 | Ф1 | 5 |
@@ -96,7 +96,7 @@ Sources (live, 2026-08-19):
 | # | Invariant | Locked by |
 |---|---|---|
 | 1 | UI ≠ Host | shipped C01–C02; GUI spawn only `#[cfg(test)]`. **Needs dedicated prod-path test** (no `Command::new(rt-host)` outside tests). |
-| 2 | Durable vs live; clone-not-migrate | transcript shipped (C03). Export rules **[e9-sync-v2](e9-sync-v2.md)** / ADR-0003; **needs test** after code STAR. |
+| 2 | Durable vs live; clone-not-migrate | transcript shipped (C03). Export **C57 shipped** ([e9-sync-v2](e9-sync-v2.md)). C58 later. |
 | 3 | hostId canonical | restart e2e (C04, C17). Export **ADR-0003** + test in E9. |
 | 4 | Agent ≠ harness ≠ interface ≠ shell | types in protocol today (agent+harness). Interface+shell **E4 tests**. |
 | 5 | Worktree isolation | e2e worktree (C16). Cleanup UX missing (C65). |
@@ -107,9 +107,9 @@ Sources (live, 2026-08-19):
 | 10 | Capability matrix per harness | `HarnessCaps` in runtime; GUI picker **E1**. |
 | 11 | Three version planes | handshake tests (C14). New fields **minor bump** (ADR-0007). |
 | 12 | No CRDT unless live collab | **ADR-0003** (never in v2). |
-| 13 | Terminal resume via session id | **needs test in E4** (C35, C36). |
-| 14 | AGENTS.md + selection guide | shape **[e8-workspace-v2](e8-workspace-v2.md)** / ADR-0004; **needs test** after code STAR. |
-| 15 | Permission ladder every edit/exec turn | **needs test in E2** (C23–C25). C26 oos. |
+| 13 | Terminal resume via session id | **C35, C36 shipped** (e4). |
+| 14 | AGENTS.md + selection guide | **C54, C55 shipped** ([e8-workspace-v2](e8-workspace-v2.md)). Nested walk later. |
+| 15 | Permission ladder every edit/exec turn | **C23–C25 shipped**. C26 oos. |
 | 16 | We say Task, not epic | **ADR-0004**; no Epic Mode. |
 
 ## Roadmap (for Chief)
@@ -124,4 +124,4 @@ Sources (live, 2026-08-19):
 | Ф6 | E9 + E10 | C57, C59–C62 (C58 later, e9-sync-v2) |
 | Ф7 | harden / release | [f7-release-v2](f7-release-v2.md); must shipped/oos; later не блокер тега |
 
-DoD v2.0.0: every row `shipped` or `out-of-scope-by-ADR`. No `partial`/`missing` left.
+DoD v2.0.0 ([f7-release-v2](f7-release-v2.md)): every **must** row `shipped` or `out-of-scope-by-ADR`. **later** rows may stay `missing`/`partial` until v2.x; they do not block the tag.
