@@ -13,6 +13,7 @@ const MIGRATION_0003: &str = include_str!("../migrations/0003_policies.sql");
 const MIGRATION_0004: &str = include_str!("../migrations/0004_terminal.sql");
 const MIGRATION_0005: &str = include_str!("../migrations/0005_artifacts.sql");
 const MIGRATION_0006: &str = include_str!("../migrations/0006_loops.sql");
+const MIGRATION_0007: &str = include_str!("../migrations/0007_model_ux.sql");
 
 /// RFC3339 UTC timestamp (millis, Z suffix).
 pub fn now_rfc3339() -> String {
@@ -215,6 +216,39 @@ pub struct Agent {
     pub run_location: String,
     pub created_at: String,
     pub provider_session_id: Option<String>,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub fast: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AgentModelSpec {
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub fast: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelProfile {
+    pub id: String,
+    pub name: String,
+    pub provider: String,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub fast: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HarnessPref {
+    pub provider: String,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub fast: bool,
+    pub updated_at: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -436,6 +470,7 @@ impl Store {
                 conn.execute_batch(MIGRATION_0004)?;
                 conn.execute_batch(MIGRATION_0005)?;
                 conn.execute_batch(MIGRATION_0006)?;
+                conn.execute_batch(MIGRATION_0007)?;
                 Ok(())
             }
             Some("2") => {
@@ -443,24 +478,32 @@ impl Store {
                 conn.execute_batch(MIGRATION_0004)?;
                 conn.execute_batch(MIGRATION_0005)?;
                 conn.execute_batch(MIGRATION_0006)?;
+                conn.execute_batch(MIGRATION_0007)?;
                 Ok(())
             }
             Some("3") => {
                 conn.execute_batch(MIGRATION_0004)?;
                 conn.execute_batch(MIGRATION_0005)?;
                 conn.execute_batch(MIGRATION_0006)?;
+                conn.execute_batch(MIGRATION_0007)?;
                 Ok(())
             }
             Some("4") => {
                 conn.execute_batch(MIGRATION_0005)?;
                 conn.execute_batch(MIGRATION_0006)?;
+                conn.execute_batch(MIGRATION_0007)?;
                 Ok(())
             }
             Some("5") => {
                 conn.execute_batch(MIGRATION_0006)?;
+                conn.execute_batch(MIGRATION_0007)?;
                 Ok(())
             }
-            Some("6") => Ok(()),
+            Some("6") => {
+                conn.execute_batch(MIGRATION_0007)?;
+                Ok(())
+            }
+            Some("7") => Ok(()),
             Some(other) => Err(StorageError::UnsupportedSchema(other.to_string())),
             None => {
                 conn.execute_batch(MIGRATION_0001)?;
@@ -469,6 +512,7 @@ impl Store {
                 conn.execute_batch(MIGRATION_0004)?;
                 conn.execute_batch(MIGRATION_0005)?;
                 conn.execute_batch(MIGRATION_0006)?;
+                conn.execute_batch(MIGRATION_0007)?;
                 Ok(())
             }
         }
@@ -707,7 +751,7 @@ impl Store {
     pub fn agent_list(&self, task_id: &str) -> Result<Vec<Agent>> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
-            "SELECT id, task_id, host_id, parent_id, interface, provider, status, run_location, created_at, provider_session_id \
+            "SELECT id, task_id, host_id, parent_id, interface, provider, status, run_location, created_at, provider_session_id, model, effort, fast \
              FROM agents WHERE task_id = ?1 ORDER BY created_at ASC, id ASC",
         )?;
         let rows = stmt.query_map([task_id], map_agent_tuple)?;
@@ -735,7 +779,31 @@ impl Store {
         interface: &str,
         parent_id: Option<&str>,
     ) -> Result<Agent> {
+        self.agent_create_model(
+            task_id,
+            host_id,
+            provider,
+            interface,
+            parent_id,
+            AgentModelSpec::default(),
+        )
+    }
+
+    pub fn agent_create_model(
+        &self,
+        task_id: &str,
+        host_id: &str,
+        provider: impl Into<HarnessId>,
+        interface: &str,
+        parent_id: Option<&str>,
+        spec: AgentModelSpec,
+    ) -> Result<Agent> {
         let provider = provider.into();
+        let AgentModelSpec {
+            model,
+            effort,
+            fast,
+        } = spec;
         if interface != "chat" && interface != "terminal" {
             return Err(StorageError::InvalidParams(format!(
                 "interface must be chat|terminal, got {interface}"
@@ -752,8 +820,8 @@ impl Store {
         {
             let conn = self.lock()?;
             conn.execute(
-                "INSERT INTO agents (id, task_id, host_id, parent_id, interface, provider, status, run_location, created_at, provider_session_id) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'idle', 'local', ?7, NULL)",
+                "INSERT INTO agents (id, task_id, host_id, parent_id, interface, provider, status, run_location, created_at, provider_session_id, model, effort, fast) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'idle', 'local', ?7, NULL, ?8, ?9, ?10)",
                 params![
                     id,
                     task_id,
@@ -761,7 +829,10 @@ impl Store {
                     parent_id,
                     interface,
                     provider.as_str(),
-                    created_at
+                    created_at,
+                    model.as_deref(),
+                    effort.as_deref(),
+                    if fast { 1 } else { 0 }
                 ],
             )?;
         }
@@ -776,6 +847,9 @@ impl Store {
             run_location: "local".into(),
             created_at,
             provider_session_id: None,
+            model,
+            effort,
+            fast,
         })
     }
 
@@ -783,7 +857,7 @@ impl Store {
         let conn = self.lock()?;
         let row = conn
             .query_row(
-                "SELECT id, task_id, host_id, parent_id, interface, provider, status, run_location, created_at, provider_session_id \
+                "SELECT id, task_id, host_id, parent_id, interface, provider, status, run_location, created_at, provider_session_id, model, effort, fast \
                  FROM agents WHERE id = ?1",
                 [id],
                 map_agent_tuple,
@@ -830,6 +904,217 @@ impl Store {
             return Err(StorageError::NotFound);
         }
         Ok(())
+    }
+
+    pub fn agent_switch(
+        &self,
+        id: &str,
+        provider: impl Into<HarnessId>,
+        spec: AgentModelSpec,
+    ) -> Result<Agent> {
+        let provider = provider.into();
+        let n = {
+            let conn = self.lock()?;
+            conn.execute(
+                "UPDATE agents SET provider = ?1, model = ?2, effort = ?3, fast = ?4, provider_session_id = NULL \
+                 WHERE id = ?5",
+                params![
+                    provider.as_str(),
+                    spec.model.as_deref(),
+                    spec.effort.as_deref(),
+                    if spec.fast { 1 } else { 0 },
+                    id
+                ],
+            )?
+        };
+        if n == 0 {
+            return Err(StorageError::NotFound);
+        }
+        self.agent_get(id)?.ok_or(StorageError::NotFound)
+    }
+
+    pub fn profile_create(
+        &self,
+        name: &str,
+        provider: &str,
+        model: Option<&str>,
+        effort: Option<&str>,
+        fast: bool,
+    ) -> Result<ModelProfile> {
+        let name_len = name.chars().count();
+        if !(1..=80).contains(&name_len) {
+            return Err(StorageError::InvalidParams(
+                "profile name must be 1..80 characters".into(),
+            ));
+        }
+        let id = new_id();
+        let now = now_rfc3339();
+        let conn = self.lock()?;
+        match conn.execute(
+            "INSERT INTO model_profiles (id, name, provider, model, effort, fast, created_at, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
+            params![
+                id,
+                name,
+                provider,
+                model,
+                effort,
+                if fast { 1 } else { 0 },
+                now
+            ],
+        ) {
+            Ok(_) => {}
+            Err(e) if unique_violation(&e) => {
+                return Err(StorageError::InvalidParams(
+                    "profile name already exists".into(),
+                ));
+            }
+            Err(e) => return Err(e.into()),
+        }
+        Ok(ModelProfile {
+            id,
+            name: name.to_string(),
+            provider: provider.to_string(),
+            model: model.map(str::to_string),
+            effort: effort.map(str::to_string),
+            fast,
+            created_at: now.clone(),
+            updated_at: now,
+        })
+    }
+
+    pub fn profile_list(&self) -> Result<Vec<ModelProfile>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, name, provider, model, effort, fast, created_at, updated_at \
+             FROM model_profiles ORDER BY created_at ASC, id ASC",
+        )?;
+        let rows = stmt.query_map([], map_profile_row)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    pub fn profile_get(&self, id: &str) -> Result<Option<ModelProfile>> {
+        let conn = self.lock()?;
+        conn.query_row(
+            "SELECT id, name, provider, model, effort, fast, created_at, updated_at \
+             FROM model_profiles WHERE id = ?1",
+            [id],
+            map_profile_row,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    pub fn profile_update(
+        &self,
+        id: &str,
+        name: &str,
+        provider: &str,
+        model: Option<&str>,
+        effort: Option<&str>,
+        fast: bool,
+    ) -> Result<ModelProfile> {
+        let name_len = name.chars().count();
+        if !(1..=80).contains(&name_len) {
+            return Err(StorageError::InvalidParams(
+                "profile name must be 1..80 characters".into(),
+            ));
+        }
+        if self.profile_get(id)?.is_none() {
+            return Err(StorageError::NotFound);
+        }
+        let now = now_rfc3339();
+        {
+            let conn = self.lock()?;
+            match conn.execute(
+                "UPDATE model_profiles SET name = ?1, provider = ?2, model = ?3, effort = ?4, fast = ?5, updated_at = ?6 \
+                 WHERE id = ?7",
+                params![
+                    name,
+                    provider,
+                    model,
+                    effort,
+                    if fast { 1 } else { 0 },
+                    now,
+                    id
+                ],
+            ) {
+                Ok(0) => return Err(StorageError::NotFound),
+                Ok(_) => {}
+                Err(e) if unique_violation(&e) => {
+                    return Err(StorageError::InvalidParams(
+                        "profile name already exists".into(),
+                    ));
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+        self.profile_get(id)?.ok_or(StorageError::NotFound)
+    }
+
+    pub fn profile_delete(&self, id: &str) -> Result<()> {
+        let conn = self.lock()?;
+        let n = conn.execute("DELETE FROM model_profiles WHERE id = ?1", [id])?;
+        if n == 0 {
+            return Err(StorageError::NotFound);
+        }
+        Ok(())
+    }
+
+    pub fn harness_pref_get(&self, provider: &str) -> Result<Option<HarnessPref>> {
+        let conn = self.lock()?;
+        conn.query_row(
+            "SELECT provider, model, effort, fast, updated_at FROM harness_prefs WHERE provider = ?1",
+            [provider],
+            map_pref_row,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    pub fn harness_pref_list(&self) -> Result<Vec<HarnessPref>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT provider, model, effort, fast, updated_at FROM harness_prefs ORDER BY provider ASC",
+        )?;
+        let rows = stmt.query_map([], map_pref_row)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    pub fn harness_pref_upsert(
+        &self,
+        provider: &str,
+        model: Option<&str>,
+        effort: Option<&str>,
+        fast: bool,
+    ) -> Result<HarnessPref> {
+        let now = now_rfc3339();
+        let conn = self.lock()?;
+        conn.execute(
+            "INSERT INTO harness_prefs (provider, model, effort, fast, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(provider) DO UPDATE SET
+               model = excluded.model,
+               effort = excluded.effort,
+               fast = excluded.fast,
+               updated_at = excluded.updated_at",
+            params![provider, model, effort, if fast { 1 } else { 0 }, now],
+        )?;
+        Ok(HarnessPref {
+            provider: provider.to_string(),
+            model: model.map(str::to_string),
+            effort: effort.map(str::to_string),
+            fast,
+            updated_at: now,
+        })
     }
 
     pub fn message_append(
@@ -1848,6 +2133,9 @@ type AgentTuple = (
     String,
     String,
     Option<String>,
+    Option<String>,
+    Option<String>,
+    i64,
 );
 
 fn map_loop_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<LoopRow> {
@@ -1868,6 +2156,38 @@ fn map_loop_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<LoopRow> {
     })
 }
 
+fn unique_violation(err: &rusqlite::Error) -> bool {
+    matches!(
+        err,
+        rusqlite::Error::SqliteFailure(e, _) if e.code == rusqlite::ErrorCode::ConstraintViolation
+    )
+}
+
+fn map_profile_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ModelProfile> {
+    let fast: i64 = r.get(5)?;
+    Ok(ModelProfile {
+        id: r.get(0)?,
+        name: r.get(1)?,
+        provider: r.get(2)?,
+        model: r.get(3)?,
+        effort: r.get(4)?,
+        fast: fast != 0,
+        created_at: r.get(6)?,
+        updated_at: r.get(7)?,
+    })
+}
+
+fn map_pref_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<HarnessPref> {
+    let fast: i64 = r.get(3)?;
+    Ok(HarnessPref {
+        provider: r.get(0)?,
+        model: r.get(1)?,
+        effort: r.get(2)?,
+        fast: fast != 0,
+        updated_at: r.get(4)?,
+    })
+}
+
 fn map_agent_tuple(r: &rusqlite::Row<'_>) -> rusqlite::Result<AgentTuple> {
     Ok((
         r.get(0)?,
@@ -1880,6 +2200,9 @@ fn map_agent_tuple(r: &rusqlite::Row<'_>) -> rusqlite::Result<AgentTuple> {
         r.get(7)?,
         r.get(8)?,
         r.get(9)?,
+        r.get(10)?,
+        r.get(11)?,
+        r.get(12)?,
     ))
 }
 
@@ -1895,6 +2218,9 @@ fn agent_from_tuple(t: AgentTuple) -> Result<Agent> {
         run_location,
         created_at,
         provider_session_id,
+        model,
+        effort,
+        fast,
     ) = t;
     Ok(Agent {
         id,
@@ -1907,6 +2233,9 @@ fn agent_from_tuple(t: AgentTuple) -> Result<Agent> {
         run_location,
         created_at,
         provider_session_id,
+        model,
+        effort,
+        fast: fast != 0,
     })
 }
 
@@ -2051,7 +2380,7 @@ mod tests {
         {
             let conn = store.lock().unwrap();
             conn.execute(
-                "UPDATE schema_meta SET value = '7' WHERE key = 'schema'",
+                "UPDATE schema_meta SET value = '8' WHERE key = 'schema'",
                 [],
             )
             .unwrap();
@@ -2060,7 +2389,7 @@ mod tests {
         let err = Store::open(&db).unwrap_err();
         assert_eq!(err.code(), "internal");
         match &err {
-            StorageError::UnsupportedSchema(v) => assert_eq!(v, "7"),
+            StorageError::UnsupportedSchema(v) => assert_eq!(v, "8"),
             other => panic!("expected UnsupportedSchema, got {other:?}"),
         }
     }
@@ -2129,7 +2458,7 @@ mod tests {
     }
 
     #[test]
-    fn fresh_db_is_schema_six() {
+    fn fresh_db_is_schema_seven() {
         let (_tmp, store) = open_store();
         let conn = rusqlite::Connection::open(store.path()).unwrap();
         let schema: String = conn
@@ -2139,7 +2468,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(schema, "6");
+        assert_eq!(schema, "7");
         let n: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'artifacts'",
@@ -2167,6 +2496,22 @@ mod tests {
         let n: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'policies'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1);
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'model_profiles'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1);
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'harness_prefs'",
                 [],
                 |r| r.get(0),
             )
@@ -2207,7 +2552,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(schema, "6");
+        assert_eq!(schema, "7");
         let n: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'worktrees'",
@@ -2539,7 +2884,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(schema, "6");
+        assert_eq!(schema, "7");
         let n: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'policies'",
@@ -2751,7 +3096,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(schema, "6");
+        assert_eq!(schema, "7");
         let n: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('shells', 'pty_sessions')",
@@ -2854,7 +3199,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(schema, "6");
+        assert_eq!(schema, "7");
         let n: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'artifacts'",
@@ -3097,7 +3442,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(schema, "6");
+        assert_eq!(schema, "7");
         let n: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'loops'",
@@ -3201,5 +3546,165 @@ mod tests {
         let n = store.agent_lift_children(&a.id).unwrap();
         assert_eq!(n, 1);
         assert!(store.agent_get(&c.id).unwrap().unwrap().parent_id.is_none());
+    }
+    #[test]
+    fn migration_0007_matches_contract() {
+        assert!(MIGRATION_0007.contains("ALTER TABLE agents ADD COLUMN model TEXT"));
+        assert!(MIGRATION_0007.contains("ALTER TABLE agents ADD COLUMN effort TEXT"));
+        assert!(MIGRATION_0007
+            .contains("ALTER TABLE agents ADD COLUMN fast INTEGER NOT NULL DEFAULT 0"));
+        assert!(MIGRATION_0007.contains("CREATE TABLE model_profiles"));
+        assert!(MIGRATION_0007.contains("CREATE TABLE harness_prefs"));
+        assert!(MIGRATION_0007.contains("name       TEXT NOT NULL UNIQUE"));
+        assert!(MIGRATION_0007
+            .contains("INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('schema', '7')"));
+        assert!(!MIGRATION_0007.to_ascii_lowercase().contains("token"));
+        assert!(!MIGRATION_0007.to_ascii_lowercase().contains("pat"));
+        assert!(!MIGRATION_0007.to_ascii_lowercase().contains("account"));
+        assert!(!MIGRATION_0007.contains("api_key"));
+        assert!(!MIGRATION_0001.contains("CREATE TABLE model_profiles"));
+        assert!(!MIGRATION_0006.contains("CREATE TABLE model_profiles"));
+    }
+
+    #[test]
+    fn migrate_from_six_applies_0007() {
+        let dir = tempdir().unwrap();
+        let db = dir.path().join("host.db");
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute_batch(MIGRATION_0001).unwrap();
+            conn.execute_batch(MIGRATION_0002).unwrap();
+            conn.execute_batch(MIGRATION_0003).unwrap();
+            conn.execute_batch(MIGRATION_0004).unwrap();
+            conn.execute_batch(MIGRATION_0005).unwrap();
+            conn.execute_batch(MIGRATION_0006).unwrap();
+            let schema: String = conn
+                .query_row(
+                    "SELECT value FROM schema_meta WHERE key = 'schema'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(schema, "6");
+        }
+        let store = Store::open(&db).unwrap();
+        let conn = rusqlite::Connection::open(store.path()).unwrap();
+        let schema: String = conn
+            .query_row(
+                "SELECT value FROM schema_meta WHERE key = 'schema'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(schema, "7");
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'model_profiles'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1);
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'harness_prefs'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn profile_name_unique_and_fast_default_zero() {
+        let (_tmp, store) = open_store();
+        let host_id = new_id();
+        store.host_insert_if_absent(&host_id, "h").unwrap();
+        let ws = store.workspace_add("/p", "p").unwrap();
+        let task = store.task_create("t", &ws.id).unwrap();
+        let agent = store
+            .agent_create(&task.id, &host_id, "cli.generic")
+            .unwrap();
+        assert!(agent.model.is_none());
+        assert!(agent.effort.is_none());
+        assert!(!agent.fast);
+        let conn = rusqlite::Connection::open(store.path()).unwrap();
+        let fast: i64 = conn
+            .query_row("SELECT fast FROM agents WHERE id = ?1", [&agent.id], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(fast, 0);
+
+        let p = store
+            .profile_create("work", "cli.claude", Some("opus"), Some("high"), true)
+            .unwrap();
+        assert_eq!(p.name, "work");
+        assert!(p.fast);
+        let err = store
+            .profile_create("work", "cli.generic", None, None, false)
+            .unwrap_err();
+        assert_eq!(err.code(), "invalid_params");
+        let listed = store.profile_list().unwrap();
+        assert_eq!(listed.len(), 1);
+        store.profile_delete(&p.id).unwrap();
+        assert!(store.profile_list().unwrap().is_empty());
+        store
+            .harness_pref_upsert("cli.generic", Some("gpt"), Some("low"), true)
+            .unwrap();
+        let pref = store.harness_pref_get("cli.generic").unwrap().unwrap();
+        assert_eq!(pref.model.as_deref(), Some("gpt"));
+        assert!(pref.fast);
+        let switched = store
+            .agent_switch(
+                &agent.id,
+                "cli.claude",
+                AgentModelSpec {
+                    model: Some("sonnet".into()),
+                    effort: Some("high".into()),
+                    fast: false,
+                },
+            )
+            .unwrap();
+        assert_eq!(switched.id, agent.id);
+        assert_eq!(switched.provider.as_str(), "cli.claude");
+        assert_eq!(switched.model.as_deref(), Some("sonnet"));
+        assert!(switched.provider_session_id.is_none());
+        assert_eq!(store.message_list(&agent.id).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn no_secret_columns_after_migrate() {
+        let (_tmp, store) = open_store();
+        let conn = rusqlite::Connection::open(store.path()).unwrap();
+        let mut stmt = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
+            .unwrap();
+        let tables: Vec<String> = stmt
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        for t in tables {
+            let mut info = conn
+                .prepare(&format!("PRAGMA table_info(\"{t}\")"))
+                .unwrap();
+            let cols: Vec<String> = info
+                .query_map([], |r| r.get::<_, String>(1))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect();
+            for c in cols {
+                let low = c.to_ascii_lowercase();
+                let secret = low == "token"
+                    || low == "pat"
+                    || low == "account"
+                    || low == "password"
+                    || low.contains("secret")
+                    || low.contains("api_key")
+                    || (low == "key" && t != "schema_meta");
+                assert!(!secret, "secret-like column {c} on {t}");
+            }
+        }
     }
 }

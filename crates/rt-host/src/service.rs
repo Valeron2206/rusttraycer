@@ -8,12 +8,13 @@ use std::time::Duration;
 use rt_protocol::{
     ApprovalDecision, ApprovalRespondOk, ApprovalRespondParams, CancelOk,
     HarnessCaps as HarnessCapsWire, PolicyGetParams, PolicyMode, PolicyScope, PolicySetParams,
-    PolicySource, PolicyView,
+    PolicySource, PolicyView, PrefsGetOk, PrefsItem, Profile, ProfileCreateParams,
+    ProfileDeleteParams, ProfileGetParams, ProfileListOk, ProfileUpdateParams,
 };
 use rt_runtime::{AgentBackend, TurnRequest, WireMessage, WireRole};
 use rt_storage::{
-    Agent, AgentStatus, HarnessId, Message, MessageRole, Store, Task, TaskFilter, TaskStatus,
-    Workspace,
+    Agent, AgentModelSpec, AgentStatus, HarnessId, Message, MessageRole, ModelProfile, Store, Task,
+    TaskFilter, TaskStatus, Workspace,
 };
 use serde::Serialize;
 
@@ -135,6 +136,17 @@ pub struct DoctorResult {
     pub yolo: bool,
 }
 
+pub struct AgentCreateArgs<'a> {
+    pub task_id: &'a str,
+    pub provider: Option<&'a str>,
+    pub interface: Option<&'a str>,
+    pub launch_args: Option<Vec<String>>,
+    pub parent_id: Option<&'a str>,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub fast: Option<bool>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentView {
@@ -150,6 +162,9 @@ pub struct AgentView {
     pub last_message_at: Option<String>,
     pub yolo: bool,
     pub provider_session_id: Option<String>,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub fast: bool,
 }
 
 impl From<Agent> for AgentView {
@@ -167,6 +182,9 @@ impl From<Agent> for AgentView {
             last_message_at: None,
             yolo: false,
             provider_session_id: a.provider_session_id,
+            model: a.model,
+            effort: a.effort,
+            fast: a.fast,
         }
     }
 }
@@ -208,6 +226,44 @@ fn check_title(title: &str) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+const ALLOWED_HARNESSES: [&str; 3] = ["cli.generic", "cli.claude", "cli.codex"];
+
+fn allowlisted_provider(provider: &str) -> bool {
+    ALLOWED_HARNESSES.contains(&provider)
+}
+
+fn reject_provider(provider: &str) -> Result<()> {
+    if provider == "native" || !allowlisted_provider(provider) {
+        return Err(HostError::InvalidParams(format!(
+            "provider must be cli.generic|cli.claude|cli.codex, got {provider}"
+        )));
+    }
+    Ok(())
+}
+
+fn check_profile_name(name: &str) -> Result<()> {
+    let n = name.chars().count();
+    if !(1..=80).contains(&n) {
+        return Err(HostError::InvalidParams(
+            "profile name must be 1..80 characters".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn profile_from_row(row: ModelProfile) -> Profile {
+    Profile {
+        id: row.id,
+        name: row.name,
+        provider: row.provider,
+        model: row.model,
+        effort: row.effort,
+        fast: row.fast,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+    }
 }
 
 impl HostService {
@@ -427,23 +483,31 @@ impl HostService {
     }
 
     pub fn agent_create(&self, task_id: &str, provider: Option<&str>) -> Result<Agent> {
-        self.agent_create_ex(task_id, provider, None, None, None)
+        self.agent_create_ex(AgentCreateArgs {
+            task_id,
+            provider,
+            interface: None,
+            launch_args: None,
+            parent_id: None,
+            model: None,
+            effort: None,
+            fast: None,
+        })
     }
 
-    pub fn agent_create_ex(
-        &self,
-        task_id: &str,
-        provider: Option<&str>,
-        interface: Option<&str>,
-        launch_args: Option<Vec<String>>,
-        parent_id: Option<&str>,
-    ) -> Result<Agent> {
+    pub fn agent_create_ex(&self, args: AgentCreateArgs<'_>) -> Result<Agent> {
+        let AgentCreateArgs {
+            task_id,
+            provider,
+            interface,
+            launch_args,
+            parent_id,
+            model,
+            effort,
+            fast,
+        } = args;
         let provider = provider.unwrap_or("cli.generic");
-        if !matches!(provider, "cli.generic" | "cli.claude" | "cli.codex") {
-            return Err(HostError::InvalidParams(format!(
-                "provider must be cli.generic|cli.claude|cli.codex, got {provider}"
-            )));
-        }
+        reject_provider(provider)?;
         let interface = interface.unwrap_or("chat");
         if interface != "chat" && interface != "terminal" {
             return Err(HostError::InvalidParams(format!(
@@ -475,12 +539,20 @@ impl HostService {
             }
         }
         // available=false does not block create
-        let agent = self.store.agent_create_interface(
+        let spec = self.resolve_model_spec(provider, model, effort, fast)?;
+        let agent = self.store.agent_create_model(
             task_id,
             &self.host_id,
             provider,
             interface,
             parent_id,
+            spec.clone(),
+        )?;
+        self.store.harness_pref_upsert(
+            provider,
+            spec.model.as_deref(),
+            spec.effort.as_deref(),
+            spec.fast,
         )?;
         if interface == "terminal" && !launch_args.is_empty() {
             let mut g = self
@@ -490,6 +562,163 @@ impl HostService {
             g.insert(agent.id.clone(), launch_args);
         }
         Ok(agent)
+    }
+
+    fn resolve_model_spec(
+        &self,
+        provider: &str,
+        model: Option<String>,
+        effort: Option<String>,
+        fast: Option<bool>,
+    ) -> Result<AgentModelSpec> {
+        let prefs = self.store.harness_pref_get(provider)?;
+        Ok(AgentModelSpec {
+            model: model.or_else(|| prefs.as_ref().and_then(|p| p.model.clone())),
+            effort: effort.or_else(|| prefs.as_ref().and_then(|p| p.effort.clone())),
+            fast: fast.unwrap_or_else(|| prefs.as_ref().map(|p| p.fast).unwrap_or(false)),
+        })
+    }
+
+    pub fn agent_switch(
+        &self,
+        agent_id: &str,
+        provider: Option<&str>,
+        model: Option<String>,
+        effort: Option<String>,
+        fast: Option<bool>,
+        profile_id: Option<&str>,
+    ) -> Result<AgentView> {
+        let agent = self
+            .store
+            .agent_get(agent_id)?
+            .ok_or_else(|| HostError::NotFound(format!("agent {agent_id}")))?;
+        if agent.status == AgentStatus::Running {
+            return Err(HostError::AgentBusy);
+        }
+        let (provider, spec) = if let Some(pid) = profile_id {
+            let profile = self
+                .store
+                .profile_get(pid)?
+                .ok_or_else(|| HostError::NotFound(format!("profile {pid}")))?;
+            let provider = provider.unwrap_or(profile.provider.as_str()).to_string();
+            reject_provider(&provider)?;
+            let spec = AgentModelSpec {
+                model: model.or(profile.model),
+                effort: effort.or(profile.effort),
+                fast: fast.unwrap_or(profile.fast),
+            };
+            (provider, spec)
+        } else {
+            let provider = provider
+                .unwrap_or_else(|| agent.provider.as_str())
+                .to_string();
+            reject_provider(&provider)?;
+            let spec = self.resolve_model_spec(&provider, model, effort, fast)?;
+            (provider, spec)
+        };
+        if agent.interface == "terminal" {
+            let pty = self
+                .backends
+                .get(provider.as_str())
+                .map(|b| b.caps().pty)
+                .unwrap_or(false);
+            if !pty {
+                return Err(HostError::NotPty);
+            }
+        }
+        let updated = self
+            .store
+            .agent_switch(agent_id, provider.as_str(), spec.clone())?;
+        self.store.harness_pref_upsert(
+            provider.as_str(),
+            spec.model.as_deref(),
+            spec.effort.as_deref(),
+            spec.fast,
+        )?;
+        let mut view = AgentView::from(updated);
+        view.last_message_at = self.store.last_message_at(agent_id)?;
+        view.yolo = self.resolve_policy_for_agent(agent_id)?.yolo;
+        Ok(view)
+    }
+
+    pub fn profile_create(&self, p: ProfileCreateParams) -> Result<Profile> {
+        check_profile_name(&p.name)?;
+        reject_provider(&p.provider)?;
+        let row = self.store.profile_create(
+            &p.name,
+            &p.provider,
+            p.model.as_deref(),
+            p.effort.as_deref(),
+            p.fast.unwrap_or(false),
+        )?;
+        Ok(profile_from_row(row))
+    }
+
+    pub fn profile_list(&self) -> Result<ProfileListOk> {
+        let items = self
+            .store
+            .profile_list()?
+            .into_iter()
+            .map(profile_from_row)
+            .collect();
+        Ok(ProfileListOk { items })
+    }
+
+    pub fn profile_get(&self, p: &ProfileGetParams) -> Result<Profile> {
+        let row = self
+            .store
+            .profile_get(&p.profile_id)?
+            .ok_or_else(|| HostError::NotFound(format!("profile {}", p.profile_id)))?;
+        Ok(profile_from_row(row))
+    }
+
+    pub fn profile_update(&self, p: ProfileUpdateParams) -> Result<Profile> {
+        let current = self
+            .store
+            .profile_get(&p.profile_id)?
+            .ok_or_else(|| HostError::NotFound(format!("profile {}", p.profile_id)))?;
+        let name = p.name.unwrap_or(current.name);
+        check_profile_name(&name)?;
+        let provider = p.provider.unwrap_or(current.provider);
+        reject_provider(&provider)?;
+        let model = p.model.or(current.model);
+        let effort = p.effort.or(current.effort);
+        let fast = p.fast.unwrap_or(current.fast);
+        let row = self.store.profile_update(
+            &p.profile_id,
+            &name,
+            &provider,
+            model.as_deref(),
+            effort.as_deref(),
+            fast,
+        )?;
+        Ok(profile_from_row(row))
+    }
+
+    pub fn profile_delete(&self, p: &ProfileDeleteParams) -> Result<()> {
+        self.store.profile_delete(&p.profile_id)?;
+        Ok(())
+    }
+
+    pub fn prefs_get(&self) -> Result<PrefsGetOk> {
+        let mut items = Vec::with_capacity(ALLOWED_HARNESSES.len());
+        for provider in ALLOWED_HARNESSES {
+            match self.store.harness_pref_get(provider)? {
+                Some(row) => items.push(PrefsItem {
+                    provider: row.provider,
+                    model: row.model,
+                    effort: row.effort,
+                    fast: row.fast,
+                }),
+                None => items.push(PrefsItem {
+                    provider: (*provider).to_string(),
+                    model: None,
+                    effort: None,
+                    fast: false,
+                }),
+            }
+        }
+        Ok(PrefsGetOk { items })
     }
 
     pub fn agent_get(&self, id: &str) -> Result<AgentView> {
