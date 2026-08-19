@@ -1,7 +1,9 @@
 use crate::ladder::{
     AgentPolicy, PaneKind, PolicyMode, APPROVAL_ALWAYS, APPROVAL_DENY, APPROVAL_ONCE,
-    APPROVAL_TITLE, CAPS_LABEL, PICKER_EMPTY, PICKER_HINT, PICKER_LABEL, PICKER_UNAVAILABLE,
-    POLICY_LABEL, YOLO_CONFIRM_BODY, YOLO_CONFIRM_OK, YOLO_CONFIRM_TITLE, YOLO_OFF, YOLO_ON_BUTTON,
+    APPROVAL_TITLE, CAPS_LABEL, COMMIT_BUTTON, COMMIT_HINT, OPEN_IN_EDITOR, PICKER_EMPTY,
+    PICKER_HINT, PICKER_LABEL, PICKER_UNAVAILABLE, POLICY_LABEL, PUSH_BUTTON, PUSH_CONFIRM_BODY,
+    PUSH_CONFIRM_OK, PUSH_CONFIRM_TITLE, REVERT_BUTTON, STAGE_BUTTON, UNSTAGE_BUTTON,
+    YOLO_CONFIRM_BODY, YOLO_CONFIRM_OK, YOLO_CONFIRM_TITLE, YOLO_OFF, YOLO_ON_BUTTON,
 };
 use crate::rpc::HarnessCapsView;
 use crate::state::{AgentStatus, AppState, FileKind, FilePreview};
@@ -72,6 +74,10 @@ pub fn show(ctx: &egui::Context, state: &mut AppState) {
 pub fn show_ladder_dialogs(ctx: &egui::Context, state: &mut AppState) {
     show_yolo_confirm(ctx, state);
     show_approval_card(ctx, state);
+}
+
+pub fn show_write_dialogs(ctx: &egui::Context, state: &mut AppState) {
+    show_push_confirm(ctx, state);
 }
 
 fn show_task_tabs(ctx: &egui::Context, state: &mut AppState) {
@@ -182,6 +188,33 @@ fn show_yolo_confirm(ctx: &egui::Context, state: &mut AppState) {
         });
     if !open {
         state.cancel_yolo_confirm();
+    }
+}
+
+fn show_push_confirm(ctx: &egui::Context, state: &mut AppState) {
+    if !state.show_push_confirm {
+        return;
+    }
+    let mut open = true;
+    egui::Window::new(PUSH_CONFIRM_TITLE)
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ctx, |ui| {
+            ui.label(PUSH_CONFIRM_BODY);
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button(PUSH_CONFIRM_OK).clicked() {
+                    state.confirm_push();
+                }
+                if ui.button("Отмена").clicked() {
+                    state.cancel_push_confirm();
+                }
+            });
+        });
+    if !open {
+        state.cancel_push_confirm();
     }
 }
 
@@ -398,7 +431,7 @@ fn show_policy_controls(ui: &mut egui::Ui, state: &mut AppState) {
 
 fn show_git(ui: &mut egui::Ui, state: &mut AppState) {
     ui.heading("Git");
-    ui.weak("только чтение · git не спавним");
+    ui.weak("host git · GUI git не спавнит");
     ui.add_space(4.0);
     ui.add_enabled_ui(state.can_isolate_agent(), |ui| {
         if ui
@@ -422,6 +455,9 @@ fn show_git(ui: &mut egui::Ui, state: &mut AppState) {
     if let Some(note) = &state.git_note {
         ui.label(note.clone());
     }
+    if let Some(status) = &state.write_status {
+        ui.weak(status.clone());
+    }
     if let Some(status) = state.git_status.clone() {
         ui.label(format!(
             "{}{}",
@@ -436,19 +472,70 @@ fn show_git(ui: &mut egui::Ui, state: &mut AppState) {
             ui.weak("список усечён");
         }
         let selected = state.git_selected_path.clone();
-        for entry in status.entries {
-            let label = format!("{}  {}", entry.status, entry.path);
-            if ui
-                .selectable_label(selected.as_deref() == Some(entry.path.as_str()), label)
-                .clicked()
-            {
-                state.select_git_path(entry.path);
-            }
+        let mut stage_path = None;
+        let mut unstage_path = None;
+        let mut select_path = None;
+        for entry in &status.entries {
+            ui.horizontal(|ui| {
+                let mut checked = state.git_staged.contains(&entry.path);
+                if ui.checkbox(&mut checked, "").changed() {
+                    if checked {
+                        stage_path = Some(entry.path.clone());
+                    } else {
+                        unstage_path = Some(entry.path.clone());
+                    }
+                }
+                let label = format!("{}  {}", entry.status, entry.path);
+                if ui
+                    .selectable_label(selected.as_deref() == Some(entry.path.as_str()), label)
+                    .clicked()
+                {
+                    select_path = Some(entry.path.clone());
+                }
+            });
+        }
+        if let Some(path) = select_path {
+            state.select_git_path(path);
+        }
+        if let Some(path) = stage_path {
+            state.stage_paths(vec![path]);
+        }
+        if let Some(path) = unstage_path {
+            state.unstage_paths(vec![path]);
         }
     }
+    ui.add_space(6.0);
+    ui.add(
+        egui::TextEdit::singleline(&mut state.git_commit_message)
+            .desired_width(f32::INFINITY)
+            .hint_text(COMMIT_HINT),
+    );
+    ui.horizontal(|ui| {
+        if ui.button(COMMIT_BUTTON).clicked() {
+            state.commit_git();
+        }
+        if ui.button(PUSH_BUTTON).clicked() {
+            state.request_push();
+        }
+    });
+    ui.add_space(6.0);
+    ui.strong("diff");
+    ui.horizontal(|ui| {
+        if ui.button(STAGE_BUTTON).clicked() {
+            if let Some(path) = state.git_selected_path.clone() {
+                state.stage_paths(vec![path]);
+            }
+        }
+        if ui.button(UNSTAGE_BUTTON).clicked() {
+            if let Some(path) = state.git_selected_path.clone() {
+                state.unstage_paths(vec![path]);
+            }
+        }
+        if ui.button(REVERT_BUTTON).clicked() {
+            state.restore_selected();
+        }
+    });
     if let Some(diff) = &state.git_diff {
-        ui.add_space(6.0);
-        ui.strong("diff");
         if diff.truncated {
             ui.weak("патч усечён");
         }
@@ -480,7 +567,15 @@ fn show_git(ui: &mut egui::Ui, state: &mut AppState) {
 
 fn show_file_tree(ui: &mut egui::Ui, state: &mut AppState) {
     ui.heading("Файлы");
-    ui.weak("только чтение, без std::fs");
+    ui.weak("без std::fs · превью RO · редактор внешний");
+    ui.add_space(4.0);
+    ui.add_enabled_ui(state.selected_file.is_some() && state.can_rpc(), |ui| {
+        if ui.button(OPEN_IN_EDITOR).clicked() {
+            if let Some(path) = state.selected_file.clone() {
+                state.open_in_editor(path);
+            }
+        }
+    });
     ui.add_space(4.0);
 
     if !state.can_rpc() && state.file_tree.is_empty() {
@@ -550,6 +645,7 @@ fn show_file_tree(ui: &mut egui::Ui, state: &mut AppState) {
 fn show_preview(ui: &mut egui::Ui, ctx: &egui::Context, state: &mut AppState) {
     ui.heading("Превью");
     ui.add_space(6.0);
+    let mut open_editor = None;
     match &state.file_preview {
         Some(FilePreview::Text {
             path,
@@ -558,10 +654,15 @@ fn show_preview(ui: &mut egui::Ui, ctx: &egui::Context, state: &mut AppState) {
         }) => {
             ui.label(path);
             ui.add_space(4.0);
-            if ui.small_button("Копировать путь").clicked() {
-                ctx.copy_text(path.clone());
-                state.copied_flash = Some("путь скопирован".into());
-            }
+            ui.horizontal(|ui| {
+                if ui.small_button("Копировать путь").clicked() {
+                    ctx.copy_text(path.clone());
+                    state.copied_flash = Some("путь скопирован".into());
+                }
+                if ui.small_button(OPEN_IN_EDITOR).clicked() {
+                    open_editor = Some(path.clone());
+                }
+            });
             if *truncated {
                 ui.weak("файл усечён");
             }
@@ -575,10 +676,15 @@ fn show_preview(ui: &mut egui::Ui, ctx: &egui::Context, state: &mut AppState) {
         Some(FilePreview::Message { path, text }) => {
             ui.label(path);
             ui.add_space(4.0);
-            if ui.small_button("Копировать путь").clicked() {
-                ctx.copy_text(path.clone());
-                state.copied_flash = Some("путь скопирован".into());
-            }
+            ui.horizontal(|ui| {
+                if ui.small_button("Копировать путь").clicked() {
+                    ctx.copy_text(path.clone());
+                    state.copied_flash = Some("путь скопирован".into());
+                }
+                if ui.small_button(OPEN_IN_EDITOR).clicked() {
+                    open_editor = Some(path.clone());
+                }
+            });
             ui.add_space(8.0);
             ui.colored_label(egui::Color32::from_rgb(230, 180, 140), text);
         }
@@ -592,6 +698,9 @@ fn show_preview(ui: &mut egui::Ui, ctx: &egui::Context, state: &mut AppState) {
                 ui.weak("Выберите файл в дереве. Превью — сплит, не модалка.");
             }
         },
+    }
+    if let Some(path) = open_editor {
+        state.open_in_editor(path);
     }
 }
 

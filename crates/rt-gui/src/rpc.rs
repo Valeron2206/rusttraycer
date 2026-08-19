@@ -10,11 +10,31 @@ use serde_json::{json, Value};
 use crate::state::PidInfo;
 
 const TIMEOUT: Duration = Duration::from_secs(2);
+const WRITE_TIMEOUT: Duration = Duration::from_secs(120);
 const CLIENT_VERSION: &str = rt_protocol::CRATE_VERSION;
 
 pub const METHOD_POLICY_GET: &str = "policy.get";
 pub const METHOD_POLICY_SET: &str = "policy.set";
 pub const METHOD_APPROVAL_RESPOND: &str = "approval.respond";
+pub const METHOD_FILES_WRITE: &str = "files.write";
+pub const METHOD_FILES_PATCH: &str = "files.patch";
+pub const METHOD_FILES_OPEN: &str = "files.open";
+pub const METHOD_GIT_STAGE: &str = "git.stage";
+pub const METHOD_GIT_UNSTAGE: &str = "git.unstage";
+pub const METHOD_GIT_RESTORE: &str = "git.restore";
+pub const METHOD_GIT_COMMIT: &str = "git.commit";
+pub const METHOD_GIT_PUSH: &str = "git.push";
+
+pub const WRITE_METHODS: &[&str] = &[
+    METHOD_FILES_WRITE,
+    METHOD_FILES_PATCH,
+    METHOD_FILES_OPEN,
+    METHOD_GIT_STAGE,
+    METHOD_GIT_UNSTAGE,
+    METHOD_GIT_RESTORE,
+    METHOD_GIT_COMMIT,
+    METHOD_GIT_PUSH,
+];
 
 #[derive(Debug, Clone)]
 pub struct Session {
@@ -58,6 +78,17 @@ impl ConnectError {
             self,
             Self::Rpc { code, .. } if code == rt_protocol::error_codes::UNSUPPORTED_METHOD
         )
+    }
+
+    pub fn is_version_mismatch(&self) -> bool {
+        matches!(
+            self,
+            Self::Rpc { code, .. } if code == rt_protocol::error_codes::VERSION_MISMATCH
+        )
+    }
+
+    pub fn is_write_unsupported(&self) -> bool {
+        self.is_unsupported_method() || self.is_version_mismatch()
     }
 
     pub fn as_label(&self) -> String {
@@ -109,6 +140,18 @@ fn agent() -> ureq::Agent {
     ureq::AgentBuilder::new().timeout(TIMEOUT).build()
 }
 
+fn write_agent() -> ureq::Agent {
+    ureq::AgentBuilder::new().timeout(WRITE_TIMEOUT).build()
+}
+
+fn git_root_params(workspace_id: &str, worktree_id: Option<&str>) -> Value {
+    let mut params = json!({ "workspaceId": workspace_id });
+    if let Some(id) = worktree_id {
+        params["worktreeId"] = json!(id);
+    }
+    params
+}
+
 fn rpc_origin(rpc_url: &str) -> String {
     rpc_url.trim().trim_end_matches('/').to_string()
 }
@@ -137,6 +180,9 @@ fn hello_methods() -> Value {
         METHOD_APPROVAL_RESPOND,
     ] {
         map.insert(name.to_string(), json!({ "major": 1, "minor": 1 }));
+    }
+    for name in WRITE_METHODS {
+        map.insert(name.to_string(), json!({ "major": 1, "minor": 2 }));
     }
     Value::Object(map)
 }
@@ -567,6 +613,107 @@ impl Session {
             }),
         )?)
     }
+
+    pub fn write_accepted(&self) -> bool {
+        fn ok(map: &BTreeMap<String, rt_protocol::MethodVersion>, name: &str) -> bool {
+            map.get(name)
+                .map(|v| v.major == 1 && v.minor >= 2)
+                .unwrap_or(false)
+        }
+        WRITE_METHODS.iter().all(|name| ok(&self.accepted, name))
+    }
+
+    pub fn write_rejected(&self) -> bool {
+        WRITE_METHODS
+            .iter()
+            .any(|name| self.rejected.contains_key(*name))
+    }
+
+    fn call_write(&self, method: &str, params: Value) -> Result<Value, ConnectError> {
+        let http = write_agent();
+        let value = post_rpc(
+            &http,
+            &self.rpc_url,
+            method,
+            params,
+            Some(&self.session_token),
+        )?;
+        Ok(value["ok"].clone())
+    }
+
+    pub fn files_open(
+        &self,
+        workspace_id: &str,
+        worktree_id: Option<&str>,
+        path: &str,
+    ) -> Result<FilesOpenOk, ConnectError> {
+        let mut params = git_root_params(workspace_id, worktree_id);
+        params["path"] = json!(path);
+        parse_ok(self.call_write(METHOD_FILES_OPEN, params)?)
+    }
+
+    pub fn git_stage(
+        &self,
+        workspace_id: &str,
+        worktree_id: Option<&str>,
+        paths: &[&str],
+    ) -> Result<GitStatusOk, ConnectError> {
+        let mut params = git_root_params(workspace_id, worktree_id);
+        params["paths"] = json!(paths);
+        parse_ok(self.call_write(METHOD_GIT_STAGE, params)?)
+    }
+
+    pub fn git_unstage(
+        &self,
+        workspace_id: &str,
+        worktree_id: Option<&str>,
+        paths: &[&str],
+    ) -> Result<GitStatusOk, ConnectError> {
+        let mut params = git_root_params(workspace_id, worktree_id);
+        params["paths"] = json!(paths);
+        parse_ok(self.call_write(METHOD_GIT_UNSTAGE, params)?)
+    }
+
+    pub fn git_restore(
+        &self,
+        workspace_id: &str,
+        worktree_id: Option<&str>,
+        paths: &[&str],
+        staged: bool,
+    ) -> Result<GitStatusOk, ConnectError> {
+        let mut params = git_root_params(workspace_id, worktree_id);
+        params["paths"] = json!(paths);
+        params["staged"] = json!(staged);
+        parse_ok(self.call_write(METHOD_GIT_RESTORE, params)?)
+    }
+
+    pub fn git_commit(
+        &self,
+        workspace_id: &str,
+        worktree_id: Option<&str>,
+        message: &str,
+    ) -> Result<GitCommitOk, ConnectError> {
+        let mut params = git_root_params(workspace_id, worktree_id);
+        params["message"] = json!(message);
+        parse_ok(self.call_write(METHOD_GIT_COMMIT, params)?)
+    }
+
+    pub fn git_push(
+        &self,
+        workspace_id: &str,
+        worktree_id: Option<&str>,
+        remote: Option<&str>,
+        git_ref: Option<&str>,
+    ) -> Result<GitPushOk, ConnectError> {
+        let mut params = git_root_params(workspace_id, worktree_id);
+        if let Some(remote) = remote {
+            params["remote"] = json!(remote);
+        }
+        if let Some(git_ref) = git_ref {
+            params["ref"] = json!(git_ref);
+        }
+        parse_ok(self.call_write(METHOD_GIT_PUSH, params)?)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -699,6 +846,29 @@ pub struct PolicyOk {
 pub struct ApprovalRespondOk {
     #[serde(default)]
     pub applied: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FilesOpenOk {
+    #[serde(default)]
+    pub opened: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitCommitOk {
+    pub commit: String,
+    pub branch: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitPushOk {
+    pub remote: String,
+    #[serde(rename = "ref")]
+    pub git_ref: String,
+    pub ok: bool,
 }
 
 pub fn keepalive(session: &Session) -> Result<(), ConnectError> {
@@ -2204,6 +2374,212 @@ mod tests {
         let label = err.as_label();
         assert!(label.contains("unsupported_method"), "{label}");
         let err = session.host_doctor().unwrap_err();
+        assert!(err.is_unsupported_method());
+        let _ = mock;
+    }
+
+    fn write_accepted_map() -> Value {
+        let mut accepted = serde_json::Map::new();
+        for name in WRITE_METHODS {
+            accepted.insert(name.to_string(), json!({"major": 1, "minor": 2}));
+        }
+        Value::Object(accepted)
+    }
+
+    fn git_status_ok() -> Value {
+        json!({
+            "branch": "main",
+            "dirty": true,
+            "truncated": false,
+            "entries": [{ "path": "src/lib.rs", "status": "modified" }]
+        })
+    }
+
+    fn start_write_mock(mode: &'static str) -> CatalogMock {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(Mutex::new(Vec::new()));
+        let hits_t = hits.clone();
+        thread::spawn(move || {
+            for stream in listener.incoming().take(40) {
+                let Ok(mut stream) = stream else { break };
+                let (headers, body) = read_http_request(&mut stream);
+                let has_session = headers.to_ascii_lowercase().contains("x-rt-session:");
+                let (method, params) = if headers.starts_with("GET /health") {
+                    ("GET /health".to_string(), json!({}))
+                } else {
+                    let parsed: Value = serde_json::from_slice(&body).unwrap_or(json!({}));
+                    (
+                        parsed
+                            .get("method")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("other")
+                            .to_string(),
+                        parsed.get("params").cloned().unwrap_or(json!({})),
+                    )
+                };
+                hits_t.lock().unwrap().push(RpcHit {
+                    method: method.clone(),
+                    params: params.clone(),
+                    has_session,
+                });
+                let body = match (mode, method.as_str()) {
+                    (_, "GET /health") => json!({"ok": true, "hostId": "host-a"}).to_string(),
+                    ("ok", "handshake") => json!({
+                        "id": "echo",
+                        "ok": {
+                            "hostId": "host-a",
+                            "hostVersion": "0.1.0",
+                            "sessionToken": "tok-1",
+                            "accepted": write_accepted_map(),
+                            "rejected": {}
+                        }
+                    })
+                    .to_string(),
+                    ("old", "handshake") => json!({
+                        "id": "echo",
+                        "ok": {
+                            "hostId": "host-a",
+                            "hostVersion": "0.1.0",
+                            "sessionToken": "tok-1",
+                            "accepted": {},
+                            "rejected": {
+                                "git.stage": {"reason": "unsupported"},
+                                "git.unstage": {"reason": "unsupported"},
+                                "git.commit": {"reason": "unsupported"},
+                                "git.push": {"reason": "unsupported"},
+                                "git.restore": {"reason": "unsupported"},
+                                "files.open": {"reason": "unsupported"},
+                                "files.write": {"reason": "unsupported"},
+                                "files.patch": {"reason": "unsupported"}
+                            }
+                        }
+                    })
+                    .to_string(),
+                    (_, "host.ping") => json!({
+                        "id": "echo",
+                        "ok": { "hostId": "host-a", "now": "2026-08-17T12:00:00Z" }
+                    })
+                    .to_string(),
+                    ("ok", "git.stage" | "git.unstage" | "git.restore") => json!({
+                        "id": "echo",
+                        "ok": git_status_ok()
+                    })
+                    .to_string(),
+                    ("ok", "git.commit") => json!({
+                        "id": "echo",
+                        "ok": { "commit": "abc1234", "branch": "main" }
+                    })
+                    .to_string(),
+                    ("ok", "git.push") => json!({
+                        "id": "echo",
+                        "ok": { "remote": "origin", "ref": "main", "ok": true }
+                    })
+                    .to_string(),
+                    ("ok", "files.open") => json!({
+                        "id": "echo",
+                        "ok": { "opened": true }
+                    })
+                    .to_string(),
+                    _ => json!({
+                        "id": "echo",
+                        "error": { "code": "unsupported_method", "message": "no 1.2" }
+                    })
+                    .to_string(),
+                };
+                write_http_json(&mut stream, &body);
+            }
+        });
+        CatalogMock {
+            origin: format!("http://{addr}"),
+            hits,
+        }
+    }
+
+    #[test]
+    fn handshake_advertises_write_methods_1_2() {
+        let mock = start_catalog_mock("host-a", "tok-1");
+        let _session = connect(&pid("host-a", &mock.origin)).expect("online");
+        let hs = mock
+            .hits
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|h| h.method == "handshake")
+            .cloned()
+            .expect("handshake");
+        for name in WRITE_METHODS {
+            assert_eq!(hs.params["methods"][name]["major"], 1, "{name}");
+            assert_eq!(hs.params["methods"][name]["minor"], 2, "{name}");
+        }
+    }
+
+    #[test]
+    fn write_rpcs_send_right_methods_and_params() {
+        let mock = start_write_mock("ok");
+        let session = connect(&pid("host-a", &mock.origin)).expect("online");
+        assert!(session.write_accepted());
+        let staged = session
+            .git_stage("ws-1", Some("wt-1"), &["src/lib.rs"])
+            .expect("stage");
+        assert_eq!(staged.branch, "main");
+        let unstaged = session
+            .git_unstage("ws-1", Some("wt-1"), &["src/lib.rs"])
+            .expect("unstage");
+        assert!(unstaged.dirty);
+        let restored = session
+            .git_restore("ws-1", Some("wt-1"), &["src/lib.rs"], false)
+            .expect("restore");
+        assert_eq!(restored.entries[0].path, "src/lib.rs");
+        let commit = session
+            .git_commit("ws-1", Some("wt-1"), "feat: demo")
+            .expect("commit");
+        assert_eq!(commit.commit, "abc1234");
+        assert_eq!(commit.branch, "main");
+        let push = session
+            .git_push("ws-1", Some("wt-1"), None, None)
+            .expect("push");
+        assert!(push.ok);
+        assert_eq!(push.remote, "origin");
+        assert_eq!(push.git_ref, "main");
+        let opened = session
+            .files_open("ws-1", Some("wt-1"), "src/lib.rs")
+            .expect("open");
+        assert!(opened.opened);
+
+        let hits = mock.hits.lock().unwrap().clone();
+        let stage = hits.iter().find(|h| h.method == "git.stage").unwrap();
+        assert_eq!(stage.params["workspaceId"], "ws-1");
+        assert_eq!(stage.params["worktreeId"], "wt-1");
+        assert_eq!(stage.params["paths"][0], "src/lib.rs");
+        assert!(stage.has_session);
+        let unstage = hits.iter().find(|h| h.method == "git.unstage").unwrap();
+        assert_eq!(unstage.params["paths"][0], "src/lib.rs");
+        let restore = hits.iter().find(|h| h.method == "git.restore").unwrap();
+        assert_eq!(restore.params["paths"][0], "src/lib.rs");
+        assert_eq!(restore.params["staged"], false);
+        let commit_hit = hits.iter().find(|h| h.method == "git.commit").unwrap();
+        assert_eq!(commit_hit.params["message"], "feat: demo");
+        let push_hit = hits.iter().find(|h| h.method == "git.push").unwrap();
+        assert_eq!(push_hit.params["workspaceId"], "ws-1");
+        assert!(push_hit.params.get("remote").is_none());
+        let open = hits.iter().find(|h| h.method == "files.open").unwrap();
+        assert_eq!(open.params["path"], "src/lib.rs");
+        assert_eq!(open.params["workspaceId"], "ws-1");
+        assert_eq!(open.params["worktreeId"], "wt-1");
+    }
+
+    #[test]
+    fn old_host_write_methods_error_not_panic() {
+        let mock = start_write_mock("old");
+        let session = connect(&pid("host-a", &mock.origin)).expect("online");
+        assert!(!session.write_accepted());
+        assert!(session.write_rejected());
+        let err = session.git_push("ws-1", None, None, None).unwrap_err();
+        assert!(err.is_write_unsupported(), "{err:?}");
+        let label = err.as_label();
+        assert!(label.contains("unsupported_method"), "{label}");
+        let err = session.files_open("ws-1", None, "src/lib.rs").unwrap_err();
         assert!(err.is_unsupported_method());
         let _ = mock;
     }

@@ -9,6 +9,22 @@ pub const PICKER_UNAVAILABLE: &str = "недоступен — host всё ра�
 pub const CAPS_LABEL: &str = "Возможности";
 pub const POLICY_LABEL: &str = "Разрешения";
 pub const LADDER_UNAVAILABLE: &str = "лестница недоступна: host без 1.1";
+pub const WRITE_UNAVAILABLE: &str = "запись недоступна: host без 1.2";
+
+pub const PUSH_BUTTON: &str = "Push";
+pub const PUSH_CONFIRM_TITLE: &str = "Отправить в remote?";
+pub const PUSH_CONFIRM_BODY: &str =
+    "Push вызывает system git. Креды — helper или gh на машине. Поля пароля и токена нет.";
+pub const PUSH_CONFIRM_OK: &str = "Отправить";
+
+pub const COMMIT_BUTTON: &str = "Закоммитить";
+pub const COMMIT_HINT: &str = "сообщение коммита";
+pub const STAGE_BUTTON: &str = "В индекс";
+pub const UNSTAGE_BUTTON: &str = "Убрать из индекса";
+pub const REVERT_BUTTON: &str = "Вернуть";
+pub const OPEN_IN_EDITOR: &str = "Открыть в редакторе";
+pub const GIT_IDENTITY_HINT: &str = "настрой `git config user.email`";
+pub const GIT_AUTH_HINT: &str = "войди в git/gh на машине";
 
 pub const YOLO_CONFIRM_TITLE: &str = "Включить Yolo?";
 pub const YOLO_CONFIRM_BODY: &str =
@@ -269,5 +285,20 @@ mod tests {
         assert_eq!(APPROVAL_ONCE, "Разрешить один раз");
         assert_eq!(APPROVAL_ALWAYS, "Всегда (этот агент)");
         assert_eq!(APPROVAL_DENY, "Отказать");
+        assert_eq!(WRITE_UNAVAILABLE, "запись недоступна: host без 1.2");
+        assert_eq!(PUSH_CONFIRM_TITLE, "Отправить в remote?");
+        assert_eq!(
+            PUSH_CONFIRM_BODY,
+            "Push вызывает system git. Креды — helper или gh на машине. Поля пароля и токена нет."
+        );
+        assert_eq!(PUSH_CONFIRM_OK, "Отправить");
+        assert_eq!(PUSH_BUTTON, "Push");
+        assert_eq!(REVERT_BUTTON, "Вернуть");
+        assert_eq!(OPEN_IN_EDITOR, "Открыть в редакторе");
+        assert_eq!(STAGE_BUTTON, "В индекс");
+        assert_eq!(UNSTAGE_BUTTON, "Убрать из индекса");
+        assert_eq!(COMMIT_BUTTON, "Закоммитить");
+        assert_eq!(GIT_IDENTITY_HINT, "настрой `git config user.email`");
+        assert_eq!(GIT_AUTH_HINT, "войди в git/gh на машине");
     }
 }
