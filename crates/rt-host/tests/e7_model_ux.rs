@@ -2,7 +2,6 @@
 
 use std::path::Path;
 use std::pin::Pin;
-use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -938,31 +937,48 @@ async fn client_without_1_6_send_artifact_a2a_live_switch_mismatch() {
 }
 
 #[test]
-fn migrations_0001_to_0006_byte_identical_to_ba44d6d() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../rt-storage/migrations");
-    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    for name in [
-        "0001_init.sql",
-        "0002_worktrees.sql",
-        "0003_policies.sql",
-        "0004_terminal.sql",
-        "0005_artifacts.sql",
-        "0006_loops.sql",
-    ] {
-        let disk = std::fs::read(root.join(name)).unwrap();
-        let git = Command::new("git")
-            .args([
-                "show",
-                &format!("ba44d6d:crates/rt-storage/migrations/{name}"),
-            ])
-            .current_dir(&repo)
+fn migrations_0001_to_0006_byte_identical_to_freeze() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let frozen = [
+        (
+            "0001_init.sql",
+            "1a331f2fd958ca9ed19261cfd696c1aad2c8d309aeb2d908953446b316bcbc7c",
+        ),
+        (
+            "0002_worktrees.sql",
+            "7a56889d97b25d9cba5effec10564b7a7f06acbaa836278e5518cb29bf1b68e3",
+        ),
+        (
+            "0003_policies.sql",
+            "b7a3a099705e845771312c6e56ef44fb286277c2d911763cf54c60bea9a7f398",
+        ),
+        (
+            "0004_terminal.sql",
+            "b7a6863b5fd47347c6cb87255e2eebb6a0913a2c20abef438d8e26a7593c756a",
+        ),
+        (
+            "0005_artifacts.sql",
+            "628be3a01bb1527fe06ca6a3a985abb0269080f6b5854d2cadfb85275381fd81",
+        ),
+        (
+            "0006_loops.sql",
+            "1021badfe2cb976217aa7accb7110f1ccceee7b5bd82ac49957f0a7e5fedf5b8",
+        ),
+    ];
+    for (name, expected) in frozen {
+        let path = root.join("crates/rt-storage/migrations").join(name);
+        let _current = std::fs::read(&path).unwrap_or_else(|_| panic!("{name}"));
+        let out = std::process::Command::new("sha256sum")
+            .arg(&path)
             .output()
-            .expect("git show");
+            .unwrap();
         assert!(
-            git.status.success(),
-            "git show ba44d6d:{name} failed: {}",
-            String::from_utf8_lossy(&git.stderr)
+            out.status.success(),
+            "{name}: {}",
+            String::from_utf8_lossy(&out.stderr)
         );
-        assert_eq!(disk, git.stdout, "{name} drifted from ba44d6d");
+        let got = String::from_utf8(out.stdout).unwrap();
+        let got = got.split_whitespace().next().unwrap();
+        assert_eq!(got, expected, "{name}");
     }
 }
