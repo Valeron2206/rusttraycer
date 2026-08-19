@@ -341,7 +341,7 @@ async fn handshake_new_methods_1_7() {
     assert_eq!(hs["ok"]["accepted"]["preset.list"]["minor"], 7);
     assert_eq!(hs["ok"]["accepted"]["agent.update"]["minor"], 7);
     assert_eq!(hs["ok"]["accepted"]["agent.switch"]["minor"], 6);
-    assert_eq!(hs["ok"]["accepted"]["agent.create"]["minor"], 5);
+    assert_eq!(hs["ok"]["accepted"]["agent.create"]["minor"], 9);
     assert_eq!(hs["ok"]["accepted"]["task.create"]["minor"], 0);
     assert_eq!(hs["ok"]["accepted"]["host.ping"]["minor"], 0);
     let _ = tx.send(());

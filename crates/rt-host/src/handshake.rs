@@ -1,4 +1,4 @@
-//! Per-method {major,minor} negotiation. Existing methods stay 1.0; policy.* is 1.1; write/git mutate is 1.2; shell/pty are 1.3; artifacts/comments/clear_transcript are 1.4; agent.create + a2a/loop are 1.5; agent.switch/profile.*/prefs.get are 1.6; workspace.guides/settings.guide/preset.list/agent.update are 1.7; sync.export/import are 1.8; artifact.export/search.query/worktree.gc are 1.9.
+//! Per-method {major,minor} negotiation. Existing methods stay 1.0; policy.* is 1.1; write/git mutate is 1.2; shell/pty are 1.3; artifacts/comments/clear_transcript are 1.4; a2a/loop are 1.5; agent.switch/profile.*/prefs.get are 1.6; workspace.guides/settings.guide/preset.list/agent.update are 1.7; sync.export/import are 1.8; artifact.export/search.query/worktree.gc/agent.create/shell.create are 1.9.
 
 use std::collections::BTreeMap;
 
@@ -276,7 +276,7 @@ mod tests {
         e4.insert("host.ping".into(), MethodVersion { major: 1, minor: 0 });
         let (acc, rej) = negotiate(&e4);
         assert!(rej.is_empty(), "{rej:?}");
-        assert_eq!(acc["agent.create"], MethodVersion { major: 1, minor: 5 });
+        assert_eq!(acc["agent.create"], MethodVersion { major: 1, minor: 9 });
         assert_eq!(acc["pty.open"], MethodVersion { major: 1, minor: 3 });
         assert_eq!(acc["files.write"], MethodVersion { major: 1, minor: 2 });
         assert_eq!(acc["host.ping"], MethodVersion { major: 1, minor: 0 });
@@ -297,13 +297,13 @@ mod tests {
         client.insert("files.write".into(), MethodVersion { major: 1, minor: 2 });
         let (acc, rej) = negotiate(&client);
         assert!(rej.is_empty(), "{rej:?}");
-        assert_eq!(acc["agent.create"], MethodVersion { major: 1, minor: 5 });
+        assert_eq!(acc["agent.create"], MethodVersion { major: 1, minor: 9 });
         assert_eq!(acc["a2a.deliver"], MethodVersion { major: 1, minor: 5 });
         assert_eq!(acc["loop.start"], MethodVersion { major: 1, minor: 5 });
         assert_eq!(acc["files.write"], MethodVersion { major: 1, minor: 2 });
         assert_eq!(
             host_methods()["agent.create"],
-            MethodVersion { major: 1, minor: 5 }
+            MethodVersion { major: 1, minor: 9 }
         );
         assert_eq!(
             host_methods()["files.write"],
@@ -330,7 +330,7 @@ mod tests {
         assert_eq!(acc["agent.switch"], MethodVersion { major: 1, minor: 6 });
         assert_eq!(acc["profile.create"], MethodVersion { major: 1, minor: 6 });
         assert_eq!(acc["prefs.get"], MethodVersion { major: 1, minor: 6 });
-        assert_eq!(acc["agent.create"], MethodVersion { major: 1, minor: 5 });
+        assert_eq!(acc["agent.create"], MethodVersion { major: 1, minor: 9 });
         assert_eq!(acc["a2a.deliver"], MethodVersion { major: 1, minor: 5 });
         assert_eq!(acc["files.write"], MethodVersion { major: 1, minor: 2 });
         assert_eq!(acc["host.ping"], MethodVersion { major: 1, minor: 0 });
@@ -340,7 +340,7 @@ mod tests {
         );
         assert_eq!(
             host_methods()["agent.create"],
-            MethodVersion { major: 1, minor: 5 }
+            MethodVersion { major: 1, minor: 9 }
         );
     }
 
@@ -373,7 +373,7 @@ mod tests {
         assert_eq!(acc["preset.list"], MethodVersion { major: 1, minor: 7 });
         assert_eq!(acc["agent.update"], MethodVersion { major: 1, minor: 7 });
         assert_eq!(acc["agent.switch"], MethodVersion { major: 1, minor: 6 });
-        assert_eq!(acc["agent.create"], MethodVersion { major: 1, minor: 5 });
+        assert_eq!(acc["agent.create"], MethodVersion { major: 1, minor: 9 });
         assert_eq!(acc["task.create"], MethodVersion { major: 1, minor: 0 });
         assert_eq!(
             host_methods()["workspace.guides.get"],
@@ -402,7 +402,7 @@ mod tests {
             MethodVersion { major: 1, minor: 7 }
         );
         assert_eq!(acc["agent.switch"], MethodVersion { major: 1, minor: 6 });
-        assert_eq!(acc["agent.create"], MethodVersion { major: 1, minor: 5 });
+        assert_eq!(acc["agent.create"], MethodVersion { major: 1, minor: 9 });
         assert_eq!(acc["host.ping"], MethodVersion { major: 1, minor: 0 });
         assert_eq!(
             host_methods()["sync.export"],
@@ -484,5 +484,37 @@ mod tests {
         assert!(acc.contains_key("artifact.export"));
         assert!(!acc.contains_key("search.query"));
         assert!(!acc.contains_key("worktree.gc"));
+    }
+
+    #[test]
+    fn create_methods_accepted_at_1_9_client_1_8_still_ok() {
+        let mut client = BTreeMap::new();
+        client.insert("agent.create".into(), MethodVersion { major: 1, minor: 9 });
+        client.insert("shell.create".into(), MethodVersion { major: 1, minor: 9 });
+        client.insert("shell.list".into(), MethodVersion { major: 1, minor: 3 });
+        client.insert("sync.export".into(), MethodVersion { major: 1, minor: 8 });
+        let (acc, rej) = negotiate(&client);
+        assert!(rej.is_empty(), "{rej:?}");
+        assert_eq!(acc["agent.create"], MethodVersion { major: 1, minor: 9 });
+        assert_eq!(acc["shell.create"], MethodVersion { major: 1, minor: 9 });
+        assert_eq!(acc["shell.list"], MethodVersion { major: 1, minor: 3 });
+        assert_eq!(
+            host_methods()["agent.create"],
+            MethodVersion { major: 1, minor: 9 }
+        );
+        assert_eq!(
+            host_methods()["shell.create"],
+            MethodVersion { major: 1, minor: 9 }
+        );
+
+        let mut older = BTreeMap::new();
+        older.insert("agent.create".into(), MethodVersion { major: 1, minor: 5 });
+        older.insert("shell.create".into(), MethodVersion { major: 1, minor: 3 });
+        older.insert("sync.export".into(), MethodVersion { major: 1, minor: 8 });
+        let (acc, rej) = negotiate(&older);
+        assert!(rej.is_empty(), "{rej:?}");
+        assert_eq!(acc["agent.create"], MethodVersion { major: 1, minor: 9 });
+        assert_eq!(acc["shell.create"], MethodVersion { major: 1, minor: 9 });
+        assert_eq!(acc["sync.export"], MethodVersion { major: 1, minor: 8 });
     }
 }

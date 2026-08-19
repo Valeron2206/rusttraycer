@@ -575,7 +575,7 @@ fn schema_0009_is_nine_no_secret_columns_0001_to_0008_byte_identical() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(schema, "9");
+    assert_eq!(schema, "10");
     for name in [
         "provider_accounts",
         "user_presets",

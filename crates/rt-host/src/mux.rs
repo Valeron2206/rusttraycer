@@ -20,6 +20,7 @@ pub struct PtySession {
     pub cols: u16,
     pub rows: u16,
     pub task_id: String,
+    pub workspace_id: String,
     pub cwd: String,
 }
 
@@ -164,6 +165,19 @@ impl Mux {
     }
 
     pub fn list_shells(&self, task_id: &str) -> Result<Vec<PtySession>, String> {
+        self.list_shells_matching(|s| !task_id.is_empty() && s.task_id == task_id)
+    }
+
+    pub fn list_shells_for_workspace(&self, workspace_id: &str) -> Result<Vec<PtySession>, String> {
+        self.list_shells_matching(|s| {
+            s.task_id.is_empty() && !workspace_id.is_empty() && s.workspace_id == workspace_id
+        })
+    }
+
+    fn list_shells_matching(
+        &self,
+        pred: impl Fn(&PtySession) -> bool,
+    ) -> Result<Vec<PtySession>, String> {
         let mut g = self.lock()?;
         let mut dead = Vec::new();
         let mut out = Vec::new();
@@ -175,7 +189,7 @@ impl Mux {
                 dead.push(id.clone());
                 continue;
             }
-            if live.session.task_id == task_id {
+            if pred(&live.session) {
                 out.push(live.session.clone());
             }
         }

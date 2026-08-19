@@ -408,7 +408,7 @@ fn assert_no_secret_columns(db: &Path) {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(schema, "9", "schema={schema}");
+    assert_eq!(schema, "10", "schema={schema}");
     let mut stmt = conn
         .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
         .unwrap();
@@ -452,7 +452,7 @@ async fn handshake_new_methods_1_6_older_keep_minors() {
     assert_eq!(hs["ok"]["accepted"]["agent.switch"]["minor"], 6);
     assert_eq!(hs["ok"]["accepted"]["profile.create"]["minor"], 6);
     assert_eq!(hs["ok"]["accepted"]["prefs.get"]["minor"], 6);
-    assert_eq!(hs["ok"]["accepted"]["agent.create"]["minor"], 5);
+    assert_eq!(hs["ok"]["accepted"]["agent.create"]["minor"], 9);
     assert_eq!(hs["ok"]["accepted"]["a2a.deliver"]["minor"], 5);
     assert_eq!(hs["ok"]["accepted"]["files.write"]["minor"], 2);
     assert_eq!(hs["ok"]["accepted"]["host.ping"]["minor"], 0);

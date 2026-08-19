@@ -201,18 +201,22 @@ async fn dispatch_method(
             Ok(serde_json::to_value(svc.task_archive(id)?)?)
         }
         "agent.list" => {
-            let task_id = params
-                .get("taskId")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| HostError::InvalidParams("taskId is required".into()))?;
-            let items = svc.agent_list(task_id)?;
+            let task_id = optional_id(&params, "taskId")?;
+            let workspace_id = optional_id(&params, "workspaceId")?;
+            let items = match (task_id, workspace_id) {
+                (Some(task_id), _) => svc.agent_list(task_id)?,
+                (None, Some(workspace_id)) => svc.agent_list_for_workspace(workspace_id)?,
+                (None, None) => {
+                    return Err(HostError::InvalidParams(
+                        "workspaceId is required when taskId is omitted".into(),
+                    ));
+                }
+            };
             Ok(json!({ "items": items }))
         }
         "agent.create" => {
-            let task_id = params
-                .get("taskId")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| HostError::InvalidParams("taskId is required".into()))?;
+            let task_id = optional_id(&params, "taskId")?;
+            let workspace_id = optional_id(&params, "workspaceId")?;
             let provider = params.get("provider").and_then(|v| v.as_str());
             let interface = params.get("interface").and_then(|v| v.as_str());
             let launch_args = match params.get("launchArgs") {
@@ -271,6 +275,7 @@ async fn dispatch_method(
             Ok(serde_json::to_value(svc.agent_create_ex(
                 crate::service::AgentCreateArgs {
                     task_id,
+                    workspace_id,
                     provider,
                     interface,
                     launch_args,
@@ -494,14 +499,10 @@ async fn dispatch_method(
             svc.pty_close(pty_id)
         }
         "shell.create" => {
-            let task_id = params
-                .get("taskId")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| HostError::InvalidParams("taskId is required".into()))?;
-            let workspace_id = params
-                .get("workspaceId")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| HostError::InvalidParams("workspaceId is required".into()))?;
+            let task_id = optional_id(&params, "taskId")?;
+            let workspace_id = optional_id(&params, "workspaceId")?.ok_or_else(|| {
+                HostError::InvalidParams("workspaceId is required when taskId is omitted".into())
+            })?;
             let worktree_id = params.get("worktreeId").and_then(|v| v.as_str());
             let cols = params
                 .get("cols")
@@ -519,11 +520,9 @@ async fn dispatch_method(
             svc.shell_create(task_id, workspace_id, worktree_id, cols as u16, rows as u16)
         }
         "shell.list" => {
-            let task_id = params
-                .get("taskId")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| HostError::InvalidParams("taskId is required".into()))?;
-            svc.shell_list(task_id)
+            let task_id = optional_id(&params, "taskId")?;
+            let workspace_id = optional_id(&params, "workspaceId")?;
+            svc.shell_list(task_id, workspace_id)
         }
         "shell.close" => {
             let shell_id = params
@@ -737,6 +736,15 @@ async fn dispatch_method(
         Err(e) => tracing::info!(method, code = e.code(), "rpc error"),
     }
     result
+}
+
+fn optional_id<'a>(params: &'a Value, key: &str) -> Result<Option<&'a str>, HostError> {
+    match params.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) if s.is_empty() => Ok(None),
+        Some(Value::String(s)) => Ok(Some(s.as_str())),
+        Some(_) => Err(HostError::InvalidParams(format!("{key} must be a string"))),
+    }
 }
 
 fn require_id(params: &Value) -> Result<&str, HostError> {

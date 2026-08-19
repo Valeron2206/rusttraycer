@@ -201,12 +201,12 @@ pub fn host_method_version() -> MethodVersion {
 
 /// Per-method negotiated version. Policy/approval methods are 1.1; write/git
 /// mutate methods are 1.2; shell/pty methods are 1.3; artifact/comment/
-/// `agent.clear_transcript` methods are 1.4; `agent.create` and A2A/loop
-/// methods are 1.5; model-ux methods (`agent.switch`, `profile.*`, `prefs.get`)
-/// are 1.6; workspace/guides/preset/`agent.update` methods are 1.7;
+/// `agent.clear_transcript` methods are 1.4; A2A/loop methods are 1.5;
+/// model-ux methods (`agent.switch`, `profile.*`, `prefs.get`) are 1.6;
+/// workspace/guides/preset/`agent.update` methods are 1.7;
 /// `sync.export`/`sync.import` are 1.8; `artifact.export`, `search.query`,
-/// and `worktree.gc` are 1.9; all other tradable methods stay 1.0
-/// (`HOST_METHOD_MINOR` is not bumped).
+/// `worktree.gc`, `agent.create`, and `shell.create` are 1.9; all other
+/// tradable methods stay 1.0 (`HOST_METHOD_MINOR` is not bumped).
 /// Unknown names return `None`.
 pub fn method_version(name: &str) -> Option<MethodVersion> {
     if !TRADABLE_METHODS.iter().any(|m| *m == name) {
@@ -220,10 +220,8 @@ pub fn method_version(name: &str) -> Option<MethodVersion> {
         | METHOD_GIT_UNSTAGE | METHOD_GIT_RESTORE | METHOD_GIT_COMMIT | METHOD_GIT_PUSH => {
             Some(MethodVersion { major: 1, minor: 2 })
         }
-        METHOD_SHELL_CREATE | METHOD_SHELL_LIST | METHOD_SHELL_CLOSE | METHOD_PTY_OPEN
-        | METHOD_PTY_WRITE | METHOD_PTY_RESIZE | METHOD_PTY_CLOSE => {
-            Some(MethodVersion { major: 1, minor: 3 })
-        }
+        METHOD_SHELL_LIST | METHOD_SHELL_CLOSE | METHOD_PTY_OPEN | METHOD_PTY_WRITE
+        | METHOD_PTY_RESIZE | METHOD_PTY_CLOSE => Some(MethodVersion { major: 1, minor: 3 }),
         METHOD_ARTIFACT_CREATE
         | METHOD_ARTIFACT_GET
         | METHOD_ARTIFACT_LIST
@@ -233,11 +231,12 @@ pub fn method_version(name: &str) -> Option<MethodVersion> {
         | METHOD_COMMENT_LIST
         | METHOD_COMMENT_RESOLVE
         | METHOD_AGENT_CLEAR_TRANSCRIPT => Some(MethodVersion { major: 1, minor: 4 }),
-        METHOD_ARTIFACT_EXPORT | METHOD_SEARCH_QUERY | METHOD_WORKTREE_GC => {
-            Some(MethodVersion { major: 1, minor: 9 })
-        }
-        METHOD_AGENT_CREATE
-        | METHOD_A2A_TRANSCRIPT
+        METHOD_ARTIFACT_EXPORT
+        | METHOD_SEARCH_QUERY
+        | METHOD_WORKTREE_GC
+        | METHOD_AGENT_CREATE
+        | METHOD_SHELL_CREATE => Some(MethodVersion { major: 1, minor: 9 }),
+        METHOD_A2A_TRANSCRIPT
         | METHOD_A2A_DELIVER
         | METHOD_LOOP_START
         | METHOD_LOOP_GET
@@ -1397,11 +1396,11 @@ mod tests {
         );
         assert_eq!(
             method_version(METHOD_AGENT_CREATE),
-            Some(MethodVersion { major: 1, minor: 5 })
+            Some(MethodVersion { major: 1, minor: 9 })
         );
         assert_eq!(
             method_version(METHOD_SHELL_CREATE),
-            Some(MethodVersion { major: 1, minor: 3 })
+            Some(MethodVersion { major: 1, minor: 9 })
         );
         assert_eq!(
             method_version(METHOD_SHELL_LIST),
@@ -1824,7 +1823,7 @@ mod tests {
         assert_eq!(error_codes::PTY_DEAD, "pty_dead");
         assert_eq!(
             method_version(METHOD_AGENT_CREATE),
-            Some(MethodVersion { major: 1, minor: 5 })
+            Some(MethodVersion { major: 1, minor: 9 })
         );
         assert_eq!(
             method_version(METHOD_HOST_PING),
@@ -1947,7 +1946,7 @@ mod tests {
     fn e6_a2a_loop_types_camel_case() {
         assert_eq!(
             method_version(METHOD_AGENT_CREATE),
-            Some(MethodVersion { major: 1, minor: 5 })
+            Some(MethodVersion { major: 1, minor: 9 })
         );
         assert_eq!(
             method_version(METHOD_A2A_TRANSCRIPT),
@@ -2069,7 +2068,7 @@ mod tests {
         );
         assert_eq!(
             method_version(METHOD_AGENT_CREATE),
-            Some(MethodVersion { major: 1, minor: 5 })
+            Some(MethodVersion { major: 1, minor: 9 })
         );
         assert_eq!(
             method_version(METHOD_HOST_PING),
@@ -2174,7 +2173,7 @@ mod tests {
         );
         assert_eq!(
             method_version(METHOD_AGENT_CREATE),
-            Some(MethodVersion { major: 1, minor: 5 })
+            Some(MethodVersion { major: 1, minor: 9 })
         );
         assert_eq!(
             method_version(METHOD_TASK_CREATE),
@@ -2312,7 +2311,7 @@ mod tests {
         );
         assert_eq!(
             method_version(METHOD_AGENT_CREATE),
-            Some(MethodVersion { major: 1, minor: 5 })
+            Some(MethodVersion { major: 1, minor: 9 })
         );
         assert_eq!(
             method_version(METHOD_HOST_PING),
