@@ -231,6 +231,8 @@ pub struct Agent {
     pub role: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -250,6 +252,15 @@ impl Default for AgentModelSpec {
             role: "coder".into(),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderAccount {
+    pub id: String,
+    pub provider: String,
+    pub label: String,
+    pub created_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -945,7 +956,7 @@ impl Store {
     pub fn agent_list(&self, task_id: &str) -> Result<Vec<Agent>> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
-            "SELECT id, task_id, host_id, parent_id, interface, provider, status, run_location, created_at, provider_session_id, model, effort, fast, role, workspace_id \
+            "SELECT id, task_id, host_id, parent_id, interface, provider, status, run_location, created_at, provider_session_id, model, effort, fast, role, workspace_id, account_id \
              FROM agents WHERE task_id = ?1 ORDER BY created_at ASC, id ASC",
         )?;
         let rows = stmt.query_map([task_id], map_agent_tuple)?;
@@ -959,7 +970,7 @@ impl Store {
     pub fn agent_list_for_workspace(&self, workspace_id: &str) -> Result<Vec<Agent>> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
-            "SELECT id, task_id, host_id, parent_id, interface, provider, status, run_location, created_at, provider_session_id, model, effort, fast, role, workspace_id              FROM agents WHERE task_id IS NULL AND workspace_id = ?1 ORDER BY created_at ASC, id ASC",
+            "SELECT id, task_id, host_id, parent_id, interface, provider, status, run_location, created_at, provider_session_id, model, effort, fast, role, workspace_id, account_id              FROM agents WHERE task_id IS NULL AND workspace_id = ?1 ORDER BY created_at ASC, id ASC",
         )?;
         let rows = stmt.query_map([workspace_id], map_agent_tuple)?;
         let mut out = Vec::new();
@@ -1061,6 +1072,7 @@ impl Store {
             fast,
             role,
             workspace_id: None,
+            account_id: None,
         })
     }
 
@@ -1128,6 +1140,7 @@ impl Store {
             fast,
             role,
             workspace_id: Some(workspace_id.to_string()),
+            account_id: None,
         })
     }
 
@@ -1135,7 +1148,7 @@ impl Store {
         let conn = self.lock()?;
         let row = conn
             .query_row(
-                "SELECT id, task_id, host_id, parent_id, interface, provider, status, run_location, created_at, provider_session_id, model, effort, fast, role, workspace_id \
+                "SELECT id, task_id, host_id, parent_id, interface, provider, status, run_location, created_at, provider_session_id, model, effort, fast, role, workspace_id, account_id \
                  FROM agents WHERE id = ?1",
                 [id],
                 map_agent_tuple,
@@ -1217,6 +1230,79 @@ impl Store {
                     if spec.fast { 1 } else { 0 },
                     id
                 ],
+            )?
+        };
+        if n == 0 {
+            return Err(StorageError::NotFound);
+        }
+        self.agent_get(id)?.ok_or(StorageError::NotFound)
+    }
+
+    pub fn account_create(&self, provider: &str, label: &str) -> Result<ProviderAccount> {
+        let label_len = label.chars().count();
+        if !(1..=200).contains(&label_len) {
+            return Err(StorageError::InvalidParams(
+                "account label must be 1..200 characters".into(),
+            ));
+        }
+        if provider.is_empty() {
+            return Err(StorageError::InvalidParams(
+                "account provider is required".into(),
+            ));
+        }
+        let id = new_id();
+        let created_at = now_rfc3339();
+        let conn = self.lock()?;
+        match conn.execute(
+            "INSERT INTO provider_accounts (id, provider, label, created_at) VALUES (?1, ?2, ?3, ?4)",
+            params![id, provider, label, created_at],
+        ) {
+            Ok(_) => {}
+            Err(e) if unique_violation(&e) => {
+                return Err(StorageError::InvalidParams(
+                    "account label already exists for this provider".into(),
+                ));
+            }
+            Err(e) => return Err(e.into()),
+        }
+        Ok(ProviderAccount {
+            id,
+            provider: provider.to_string(),
+            label: label.to_string(),
+            created_at,
+        })
+    }
+
+    pub fn account_list(&self) -> Result<Vec<ProviderAccount>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, provider, label, created_at FROM provider_accounts              ORDER BY created_at ASC, id ASC",
+        )?;
+        let rows = stmt.query_map([], map_account_row)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    pub fn account_get(&self, id: &str) -> Result<Option<ProviderAccount>> {
+        let conn = self.lock()?;
+        conn.query_row(
+            "SELECT id, provider, label, created_at FROM provider_accounts WHERE id = ?1",
+            [id],
+            map_account_row,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    pub fn agent_set_account_id(&self, id: &str, account_id: Option<&str>) -> Result<Agent> {
+        let n = {
+            let conn = self.lock()?;
+            conn.execute(
+                "UPDATE agents SET account_id = ?1 WHERE id = ?2",
+                params![account_id, id],
             )?
         };
         if n == 0 {
@@ -2571,6 +2657,7 @@ type AgentTuple = (
     i64,
     String,
     Option<String>,
+    Option<String>,
 );
 
 fn map_loop_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<LoopRow> {
@@ -2895,6 +2982,15 @@ fn unique_violation(err: &rusqlite::Error) -> bool {
     )
 }
 
+fn map_account_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ProviderAccount> {
+    Ok(ProviderAccount {
+        id: r.get(0)?,
+        provider: r.get(1)?,
+        label: r.get(2)?,
+        created_at: r.get(3)?,
+    })
+}
+
 fn map_profile_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ModelProfile> {
     let fast: i64 = r.get(5)?;
     Ok(ModelProfile {
@@ -2937,6 +3033,7 @@ fn map_agent_tuple(r: &rusqlite::Row<'_>) -> rusqlite::Result<AgentTuple> {
         r.get(12)?,
         r.get(13)?,
         r.get(14)?,
+        r.get(15)?,
     ))
 }
 
@@ -2957,6 +3054,7 @@ fn agent_from_tuple(t: AgentTuple) -> Result<Agent> {
         fast,
         role,
         workspace_id,
+        account_id,
     ) = t;
     Ok(Agent {
         id,
@@ -2974,6 +3072,7 @@ fn agent_from_tuple(t: AgentTuple) -> Result<Agent> {
         fast: fast != 0,
         role,
         workspace_id,
+        account_id,
     })
 }
 
@@ -4815,5 +4914,33 @@ mod tests {
             .unwrap();
         store.worktree_delete(&wt.id).unwrap();
         assert!(store.worktree_get(&wt.id).unwrap().is_none());
+    }
+
+    #[test]
+    fn account_create_list_unique_and_no_secret_fields() {
+        let (_tmp, store) = open_store();
+        let a = store.account_create("cli.claude", "work").unwrap();
+        assert_eq!(a.provider, "cli.claude");
+        assert_eq!(a.label, "work");
+        let listed = store.account_list().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, a.id);
+        let v = serde_json::to_value(&a).unwrap();
+        assert!(v.get("token").is_none());
+        assert!(v.get("pat").is_none());
+        assert!(v.get("password").is_none());
+        let err = store.account_create("cli.claude", "work").unwrap_err();
+        assert_eq!(err.code(), "invalid_params");
+        let host_id = new_id();
+        store.host_insert_if_absent(&host_id, "h").unwrap();
+        let ws = store.workspace_add("/acc-ws", "acc-ws").unwrap();
+        let task = store.task_create("t", &ws.id).unwrap();
+        let agent = store
+            .agent_create(&task.id, &host_id, "cli.claude")
+            .unwrap();
+        let bound = store.agent_set_account_id(&agent.id, Some(&a.id)).unwrap();
+        assert_eq!(bound.account_id.as_deref(), Some(a.id.as_str()));
+        let cleared = store.agent_set_account_id(&agent.id, None).unwrap();
+        assert!(cleared.account_id.is_none());
     }
 }

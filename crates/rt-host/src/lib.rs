@@ -74,6 +74,8 @@ pub enum HostError {
     LoopExhausted,
     #[error("conflict: {0}")]
     Conflict(String),
+    #[error("not supported: {0}")]
+    NotSupported(String),
     #[error("{0}")]
     Internal(String),
     #[error("already running (pid {pid})")]
@@ -108,6 +110,7 @@ impl HostError {
             Self::NoInbox => "no_inbox",
             Self::LoopExhausted => "loop_exhausted",
             Self::Conflict(_) => "conflict",
+            Self::NotSupported(_) => "not_supported",
             Self::Internal(_) | Self::Io(_) | Self::Json(_) => "internal",
             Self::AlreadyRunning { .. } => "already_running",
         }

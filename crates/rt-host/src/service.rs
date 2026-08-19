@@ -6,11 +6,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use rt_protocol::{
-    ApprovalDecision, ApprovalRespondOk, ApprovalRespondParams, CancelOk,
-    HarnessCaps as HarnessCapsWire, PolicyGetParams, PolicyMode, PolicyScope, PolicySetParams,
-    PolicySource, PolicyView, PrefsGetOk, PrefsItem, PresetListOk, Profile, ProfileCreateParams,
-    ProfileDeleteParams, ProfileGetParams, ProfileListOk, ProfileUpdateParams, SearchItem,
-    SearchKind, SearchQueryOk, SearchQueryParams, SettingsGuide, WorkspaceGuidesOk,
+    AccountListOk, AgentSteerOk, AgentSwitchParams, ApprovalDecision, ApprovalRespondOk,
+    ApprovalRespondParams, CancelOk, HarnessCaps as HarnessCapsWire, PolicyGetParams, PolicyMode,
+    PolicyScope, PolicySetParams, PolicySource, PolicyView, PrefsGetOk, PrefsItem, PresetListOk,
+    Profile, ProfileCreateParams, ProfileDeleteParams, ProfileGetParams, ProfileListOk,
+    ProfileUpdateParams, ProviderAccount, SearchItem, SearchKind, SearchQueryOk, SearchQueryParams,
+    SettingsGuide, WorkspaceGuidesOk,
 };
 use rt_runtime::{AgentBackend, TurnRequest, WireMessage, WireRole};
 use rt_storage::{
@@ -159,6 +160,7 @@ pub struct AgentCreateArgs<'a> {
     pub effort: Option<String>,
     pub fast: Option<bool>,
     pub role: Option<&'a str>,
+    pub account_id: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -183,6 +185,8 @@ pub struct AgentView {
     pub role: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
 }
 
 impl From<Agent> for AgentView {
@@ -205,11 +209,16 @@ impl From<Agent> for AgentView {
             fast: a.fast,
             role: a.role,
             workspace_id: a.workspace_id,
+            account_id: a.account_id,
         }
     }
 }
 
-fn harness_caps_wire(caps: rt_runtime::HarnessCaps) -> HarnessCapsWire {
+fn provider_supports_steer(provider: &str) -> bool {
+    matches!(provider, "cli.claude" | "cli.codex")
+}
+
+fn harness_caps_wire(provider: &str, caps: rt_runtime::HarnessCaps) -> HarnessCapsWire {
     HarnessCapsWire {
         one_shot: caps.one_shot,
         long_lived: caps.long_lived,
@@ -218,6 +227,7 @@ fn harness_caps_wire(caps: rt_runtime::HarnessCaps) -> HarnessCapsWire {
         session_resume: caps.session_resume,
         a2a_inbox: caps.a2a_inbox,
         pty: caps.pty,
+        steer: provider_supports_steer(provider),
         needs_api_key: caps.needs_api_key,
         api_key_env: caps.api_key_env.map(str::to_string),
     }
@@ -261,6 +271,34 @@ fn reject_provider(provider: &str) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+fn account_secret_env_name(provider: &str, label: &str) -> String {
+    let mut out = String::from("RUSTTRAYCER_");
+    for c in provider.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_uppercase());
+        } else {
+            out.push('_');
+        }
+    }
+    out.push('_');
+    for c in label.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_uppercase());
+        } else {
+            out.push('_');
+        }
+    }
+    out
+}
+
+fn account_secret_from_env(provider: &str, label: &str) -> Option<(String, String)> {
+    let key = account_secret_env_name(provider, label);
+    match std::env::var(&key) {
+        Ok(v) if !v.is_empty() => Some((key, v)),
+        _ => None,
+    }
 }
 
 fn check_profile_name(name: &str) -> Result<()> {
@@ -400,7 +438,7 @@ impl HostService {
                     id: backend.id().to_string(),
                     available: avail.available,
                     detail: avail.detail,
-                    caps: harness_caps_wire(backend.caps()),
+                    caps: harness_caps_wire(backend.id(), backend.caps()),
                 }
             })
             .collect();
@@ -571,6 +609,7 @@ rusttraycer_tasks{{status="archived"}} {archived}
             effort: None,
             fast: None,
             role: None,
+            account_id: None,
         })
     }
 
@@ -586,6 +625,7 @@ rusttraycer_tasks{{status="archived"}} {archived}
             effort,
             fast,
             role,
+            account_id,
         } = args;
         let provider = provider.unwrap_or("cli.generic");
         reject_provider(provider)?;
@@ -668,7 +708,94 @@ rusttraycer_tasks{{status="archived"}} {archived}
                 .map_err(|_| HostError::Internal("launch_args lock poisoned".into()))?;
             g.insert(agent.id.clone(), launch_args);
         }
+        if let Some(account_id) = account_id {
+            self.bind_account(&agent.id, agent.provider.as_str(), Some(account_id))?;
+            return self
+                .store
+                .agent_get(&agent.id)?
+                .ok_or_else(|| HostError::NotFound(format!("agent {}", agent.id)));
+        }
         Ok(agent)
+    }
+
+    fn bind_account(&self, agent_id: &str, provider: &str, account_id: Option<&str>) -> Result<()> {
+        let Some(account_id) = account_id.filter(|s| !s.is_empty()) else {
+            self.store.agent_set_account_id(agent_id, None)?;
+            return Ok(());
+        };
+        let acc = self
+            .store
+            .account_get(account_id)?
+            .ok_or_else(|| HostError::InvalidParams(format!("unknown accountId {account_id}")))?;
+        if acc.provider != provider {
+            return Err(HostError::InvalidParams(
+                "accountId provider does not match agent provider".into(),
+            ));
+        }
+        self.store
+            .agent_set_account_id(agent_id, Some(account_id))?;
+        Ok(())
+    }
+
+    pub fn account_create(&self, provider: &str, label: &str) -> Result<ProviderAccount> {
+        reject_provider(provider)?;
+        let row = self.store.account_create(provider, label)?;
+        Ok(ProviderAccount {
+            id: row.id,
+            provider: row.provider,
+            label: row.label,
+        })
+    }
+
+    pub fn account_list(&self) -> Result<AccountListOk> {
+        let items = self
+            .store
+            .account_list()?
+            .into_iter()
+            .map(|row| ProviderAccount {
+                id: row.id,
+                provider: row.provider,
+                label: row.label,
+            })
+            .collect();
+        Ok(AccountListOk { items })
+    }
+
+    pub fn agent_steer(&self, agent_id: &str, content: &str) -> Result<AgentSteerOk> {
+        if content.is_empty() || content.len() > MAX_CONTENT {
+            return Err(HostError::InvalidParams(
+                "content must be 1..=1048576 bytes".into(),
+            ));
+        }
+        let agent = self
+            .store
+            .agent_get(agent_id)?
+            .ok_or_else(|| HostError::NotFound(format!("agent {agent_id}")))?;
+        if agent.status != AgentStatus::Running {
+            return Err(HostError::InvalidParams(
+                "agent.steer requires status=running".into(),
+            ));
+        }
+        match agent.provider.as_str() {
+            "cli.generic" => {
+                return Err(HostError::NotSupported(
+                    "cli.generic does not support steer".into(),
+                ));
+            }
+            "cli.claude" | "cli.codex" => {}
+            other => {
+                return Err(HostError::InvalidParams(format!(
+                    "provider must be cli.generic|cli.claude|cli.codex, got {other}"
+                )));
+            }
+        }
+        if let Ok(Some(live)) = self.mux.live_for_entity(PtyKind::Agent, agent_id) {
+            if let Err(e) = self.mux.write(&live.pty_id, content.as_bytes()) {
+                tracing::warn!(agent_id, error = ?e, "steer pty write");
+            }
+        }
+        let _injected = self.inflight.push_steer(agent_id, content)?;
+        Ok(AgentSteerOk { steered: true })
     }
 
     fn resolve_role(&self, task: &Task, role: Option<&str>) -> Result<String> {
@@ -770,15 +897,8 @@ rusttraycer_tasks{{status="archived"}} {archived}
         })
     }
 
-    pub fn agent_switch(
-        &self,
-        agent_id: &str,
-        provider: Option<&str>,
-        model: Option<String>,
-        effort: Option<String>,
-        fast: Option<bool>,
-        profile_id: Option<&str>,
-    ) -> Result<AgentView> {
+    pub fn agent_switch(&self, p: AgentSwitchParams) -> Result<AgentView> {
+        let agent_id = p.agent_id.as_str();
         let agent = self
             .store
             .agent_get(agent_id)?
@@ -786,26 +906,32 @@ rusttraycer_tasks{{status="archived"}} {archived}
         if agent.status == AgentStatus::Running {
             return Err(HostError::AgentBusy);
         }
-        let (provider, spec) = if let Some(pid) = profile_id {
+        let (provider, spec) = if let Some(pid) = p.profile_id.as_deref() {
             let profile = self
                 .store
                 .profile_get(pid)?
                 .ok_or_else(|| HostError::NotFound(format!("profile {pid}")))?;
-            let provider = provider.unwrap_or(profile.provider.as_str()).to_string();
+            let provider = p
+                .provider
+                .as_deref()
+                .unwrap_or(profile.provider.as_str())
+                .to_string();
             reject_provider(&provider)?;
             let spec = AgentModelSpec {
-                model: model.or(profile.model),
-                effort: effort.or(profile.effort),
-                fast: fast.unwrap_or(profile.fast),
+                model: p.model.or(profile.model),
+                effort: p.effort.or(profile.effort),
+                fast: p.fast.unwrap_or(profile.fast),
                 role: agent.role.clone(),
             };
             (provider, spec)
         } else {
-            let provider = provider
+            let provider = p
+                .provider
+                .as_deref()
                 .unwrap_or_else(|| agent.provider.as_str())
                 .to_string();
             reject_provider(&provider)?;
-            let spec = self.resolve_model_spec(&provider, model, effort, fast)?;
+            let spec = self.resolve_model_spec(&provider, p.model, p.effort, p.fast)?;
             (provider, spec)
         };
         if agent.interface == "terminal" {
@@ -818,15 +944,27 @@ rusttraycer_tasks{{status="archived"}} {archived}
                 return Err(HostError::NotPty);
             }
         }
-        let updated = self
-            .store
+        self.store
             .agent_switch(agent_id, provider.as_str(), spec.clone())?;
+        if p.account_id.is_some() {
+            self.bind_account(agent_id, provider.as_str(), p.account_id.as_deref())?;
+        } else if let Some(existing) = agent.account_id.as_deref() {
+            if let Some(acc) = self.store.account_get(existing)? {
+                if acc.provider != provider {
+                    self.store.agent_set_account_id(agent_id, None)?;
+                }
+            }
+        }
         self.store.harness_pref_upsert(
             provider.as_str(),
             spec.model.as_deref(),
             spec.effort.as_deref(),
             spec.fast,
         )?;
+        let updated = self
+            .store
+            .agent_get(agent_id)?
+            .ok_or_else(|| HostError::NotFound(format!("agent {agent_id}")))?;
         let mut view = AgentView::from(updated);
         view.last_message_at = self.store.last_message_at(agent_id)?;
         view.yolo = self.resolve_policy_for_agent(agent_id)?.yolo;
@@ -1745,6 +1883,16 @@ rusttraycer_tasks{{status="archived"}} {archived}
                 let mut env = BTreeMap::new();
                 env.insert("RUSTTRAYCER_AGENT_ID".into(), agent_id.clone());
                 env.insert("RUSTTRAYCER_TASK_ID".into(), task_id.clone());
+                if let Some(agent) = self.store.agent_get(&agent_id)? {
+                    if let Some(acc_id) = agent.account_id.as_deref() {
+                        if let Some(acc) = self.store.account_get(acc_id)? {
+                            if let Some((k, v)) = account_secret_from_env(&acc.provider, &acc.label)
+                            {
+                                env.insert(k, v);
+                            }
+                        }
+                    }
+                }
                 env
             },
         };
@@ -1972,6 +2120,13 @@ rusttraycer_tasks{{status="archived"}} {archived}
         if resumed {
             if let Some(sid) = &agent.provider_session_id {
                 env.push(("RUSTTRAYCER_PROVIDER_SESSION_ID".into(), sid.clone()));
+            }
+        }
+        if let Some(acc_id) = agent.account_id.as_deref() {
+            if let Some(acc) = self.store.account_get(acc_id)? {
+                if let Some((k, v)) = account_secret_from_env(&acc.provider, &acc.label) {
+                    env.push((k, v));
+                }
             }
         }
         let session = self.spawn_into_mux(&SpawnInto {

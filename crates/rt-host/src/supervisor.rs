@@ -28,6 +28,7 @@ struct Slot {
 pub struct Inflight {
     inner: Arc<Mutex<HashMap<String, Slot>>>,
     next_gen: Arc<AtomicU64>,
+    steers: Arc<Mutex<HashMap<String, Vec<String>>>>,
 }
 
 impl Default for Inflight {
@@ -35,6 +36,7 @@ impl Default for Inflight {
         Self {
             inner: Arc::new(Mutex::new(HashMap::new())),
             next_gen: Arc::new(AtomicU64::new(1)),
+            steers: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -87,6 +89,21 @@ impl Inflight {
 
     pub fn contains(&self, agent_id: &str) -> Result<bool, HostError> {
         Ok(self.lock_map()?.contains_key(agent_id))
+    }
+
+    /// Inject mid-turn content into a live slot. `false` if no inflight turn.
+    pub fn push_steer(&self, agent_id: &str, content: &str) -> Result<bool, HostError> {
+        if !self.contains(agent_id)? {
+            return Ok(false);
+        }
+        let mut g = self
+            .steers
+            .lock()
+            .map_err(|_| HostError::Internal("steer lock poisoned".into()))?;
+        g.entry(agent_id.to_string())
+            .or_default()
+            .push(content.to_string());
+        Ok(true)
     }
 
     /// True if `gen` still owns the slot for `agent_id`.
