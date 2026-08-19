@@ -29,21 +29,25 @@
 
 ## Freeze — later (v2.x, не тег)
 
-| ID / тема | Почему не 2.0.0 |
-|---|---|
-| C37 terminals outside Task | e4-terminal-v2 |
-| C42 PDF | MD must, PDF later |
-| C51 multi-account | e7-model-ux-v2 |
-| C53 mid-turn steer | e7-model-ux-v2 |
-| C58 `rt-sync` | e9-sync-v2 |
-| C64 Epic PR View | e3-write-v2 |
-| C63 chrome (monitor/hooks/stash/drag) | не must эпиков |
-| C65 worktree cleanup / branch prefix | C08/C16 must; cleanup later |
-| Nested AGENTS.md, user presets, disable-detection | e8-workspace-v2 |
-| Intel Mac, macOS signed dmg/notarize | e10-ops-v2 |
-| Windows / WSL package (C73) | ADR-0006, v2.x |
-| `.rpm` | ADR-0006 optional |
-| `logs --follow` | e10-ops-v2 |
+На теге **v2.0.0** эти строки были later (не блокер). **v2.1 закрыл матричные later** ([v21-complete-v2](v21-complete-v2.md)): 0 `missing`/`partial`.
+
+| ID / тема | v2.0.0 | v2.1 |
+|---|---|---|
+| C21 search | later | shipped |
+| C37 terminals outside Task | later | shipped |
+| C42 PDF | later | shipped |
+| C51 multi-account | later | shipped |
+| C53 mid-turn steer | later | shipped |
+| C58 `rt-sync` | later | shipped |
+| C64 Epic PR View | later | shipped |
+| C63 chrome (monitor/hooks/stash/drag) | later | shipped |
+| C65 worktree cleanup / branch prefix | later | shipped |
+| Nested AGENTS.md, user presets | later | shipped |
+| `logs --follow` | later | shipped |
+| Disable-detection AGENTS.md | later | later (не must) |
+| Intel Mac, macOS signed dmg/notarize | later | later (не C-row) |
+| `.rpm` | later | later (не C-row) |
+| Windows / WSL package (C73) | oos ADR-0006 | oos |
 
 Oos без later: C26, C66–C75 (ADR).
 
