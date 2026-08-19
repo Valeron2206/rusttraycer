@@ -24,6 +24,10 @@ use crate::model_ux::{
     MODEL_UNAVAILABLE, PROFILES_LABEL, PROFILE_APPLY, PROFILE_EMPTY, PROFILE_HINT,
     PROFILE_NAME_HINT, PROFILE_SAVE, SWITCH_BUTTON,
 };
+use crate::pr_ux::{
+    PR_CHECKS_HEADING, PR_COMMITS_HEADING, PR_DIFF_HEADING, PR_EMPTY, PR_FILES_HEADING, PR_HEADING,
+    PR_NUMBER_HINT, PR_NUMBER_LABEL, PR_OPEN_BUTTON, PR_URL_HINT,
+};
 use crate::rpc::HarnessCapsView;
 use crate::search_ux::{GC_BUTTON, GC_CONFIRM_BODY, GC_CONFIRM_OK, GC_CONFIRM_TITLE};
 use crate::state::{AppState, FileKind, FilePreview};
@@ -1071,6 +1075,76 @@ fn show_git(ui: &mut egui::Ui, state: &mut AppState) {
                     }
                 }
             });
+    }
+    show_pr_panel(ui, state);
+}
+
+fn show_pr_panel(ui: &mut egui::Ui, state: &mut AppState) {
+    ui.add_space(10.0);
+    ui.separator();
+    ui.heading(PR_HEADING);
+    ui.horizontal(|ui| {
+        ui.label(PR_NUMBER_LABEL);
+        ui.add(
+            egui::TextEdit::singleline(&mut state.pr_number)
+                .desired_width(72.0)
+                .hint_text(PR_NUMBER_HINT),
+        );
+    });
+    ui.add(
+        egui::TextEdit::singleline(&mut state.pr_url)
+            .desired_width(f32::INFINITY)
+            .hint_text(PR_URL_HINT),
+    );
+    ui.add_enabled_ui(state.can_rpc(), |ui| {
+        if ui
+            .add_sized(
+                [ui.available_width(), 28.0],
+                egui::Button::new(PR_OPEN_BUTTON),
+            )
+            .clicked()
+        {
+            state.open_pr();
+        }
+    });
+    let Some(view) = state.pr_view.clone() else {
+        return;
+    };
+    if let Some(title) = &view.title {
+        ui.strong(title);
+    }
+    show_pr_lines(ui, PR_CHECKS_HEADING, &view.checks);
+    show_pr_lines(ui, PR_COMMITS_HEADING, &view.commits);
+    show_pr_lines(ui, PR_FILES_HEADING, &view.files);
+    ui.strong(PR_DIFF_HEADING);
+    match &view.local_diff {
+        Some(diff) if !diff.is_empty() => {
+            egui::ScrollArea::vertical()
+                .id_salt("pr_local_diff")
+                .max_height(160.0)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(diff).monospace())
+                            .wrap()
+                            .selectable(true),
+                    );
+                });
+        }
+        _ => {
+            ui.weak(PR_EMPTY);
+        }
+    }
+}
+
+fn show_pr_lines(ui: &mut egui::Ui, heading: &str, items: &[String]) {
+    ui.strong(heading);
+    if items.is_empty() {
+        ui.weak(PR_EMPTY);
+        return;
+    }
+    for item in items {
+        ui.label(item);
     }
 }
 

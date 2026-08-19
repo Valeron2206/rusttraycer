@@ -139,6 +139,10 @@ pub const METHOD_AGENT_STEER: &str = "agent.steer";
 
 pub const ACCOUNT_STEER_METHODS: &[&str] = &[METHOD_ACCOUNT_LIST, METHOD_AGENT_STEER];
 
+pub const METHOD_PR_GET: &str = "pr.get";
+
+pub const PR_METHODS: &[&str] = &[METHOD_PR_GET];
+
 #[derive(Debug, Clone)]
 pub struct Session {
     pub host_id: String,
@@ -231,6 +235,10 @@ impl ConnectError {
     }
 
     pub fn is_steer_unsupported(&self) -> bool {
+        self.is_unsupported_method() || self.is_version_mismatch()
+    }
+
+    pub fn is_pr_unsupported(&self) -> bool {
         self.is_unsupported_method() || self.is_version_mismatch()
     }
 
@@ -357,6 +365,9 @@ fn hello_methods() -> Value {
         map.insert(name.to_string(), json!({ "major": 1, "minor": 9 }));
     }
     for name in ACCOUNT_STEER_METHODS {
+        map.insert(name.to_string(), json!({ "major": 1, "minor": 9 }));
+    }
+    for name in PR_METHODS {
         map.insert(name.to_string(), json!({ "major": 1, "minor": 9 }));
     }
     Value::Object(map)
@@ -1565,6 +1576,30 @@ impl Session {
             return Ok(json!({}));
         };
         self.call(METHOD_AGENT_STEER, params)
+    }
+
+    pub fn pr_accepted(&self) -> bool {
+        self.accepted
+            .get(METHOD_PR_GET)
+            .map(|v| v.major == 1 && v.minor >= 9)
+            .unwrap_or(false)
+    }
+
+    pub fn pr_rejected(&self) -> bool {
+        self.rejected.contains_key(METHOD_PR_GET)
+    }
+
+    pub fn pr_get(
+        &self,
+        workspace_id: &str,
+        number: &str,
+        url: &str,
+    ) -> Result<crate::pr_ux::PrView, ConnectError> {
+        let Some(params) = crate::pr_ux::pr_get_params(workspace_id, number, url) else {
+            return Ok(crate::pr_ux::PrView::default());
+        };
+        let ok = self.call(METHOD_PR_GET, params)?;
+        Ok(crate::pr_ux::parse_pr_get(&ok))
     }
 }
 
@@ -5393,5 +5428,141 @@ mod tests {
         assert_eq!(steers[0]["agentId"], "ag-1");
         assert_eq!(steers[0]["content"], "nudge");
         assert!(hits.iter().all(|h| h.method != "agent.send"));
+    }
+
+    fn pr_accepted_map() -> serde_json::Map<String, Value> {
+        let mut accepted = serde_json::Map::new();
+        for name in PR_METHODS {
+            accepted.insert(name.to_string(), json!({"major": 1, "minor": 9}));
+        }
+        accepted
+    }
+
+    fn start_pr_rpc_mock() -> CatalogMock {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(Mutex::new(Vec::new()));
+        let hits_t = hits.clone();
+        thread::spawn(move || {
+            for stream in listener.incoming().take(24) {
+                let Ok(mut stream) = stream else { break };
+                let (headers, body) = read_http_request(&mut stream);
+                let has_session = headers.to_ascii_lowercase().contains("x-rt-session:");
+                let parsed: Value = serde_json::from_slice(&body).unwrap_or(json!({}));
+                let method = if headers.starts_with("GET /health") {
+                    "GET /health".to_string()
+                } else {
+                    parsed
+                        .get("method")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("other")
+                        .to_string()
+                };
+                let params = parsed.get("params").cloned().unwrap_or(json!({}));
+                hits_t.lock().unwrap().push(RpcHit {
+                    method: method.clone(),
+                    params: params.clone(),
+                    has_session,
+                });
+                let body = match method.as_str() {
+                    "GET /health" => json!({"ok": true, "hostId": "host-a"}).to_string(),
+                    "handshake" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "hostId": "host-a",
+                            "hostVersion": "0.1.0",
+                            "sessionToken": "tok-1",
+                            "accepted": pr_accepted_map(),
+                            "rejected": {}
+                        }
+                    })
+                    .to_string(),
+                    "host.ping" => json!({
+                        "id": "echo",
+                        "ok": { "hostId": "host-a", "now": "2026-08-19T12:00:00Z" }
+                    })
+                    .to_string(),
+                    "pr.get" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "title": "Panel",
+                            "number": params.get("number").cloned().unwrap_or(json!(0)),
+                            "checks": [{ "name": "ci", "status": "success" }],
+                            "commits": [{ "sha": "abc", "message": "feat" }],
+                            "files": [{ "path": "a.rs" }],
+                            "localDiff": "diff --git"
+                        }
+                    })
+                    .to_string(),
+                    _ => json!({
+                        "id": "echo",
+                        "error": { "code": "unsupported_method", "message": "no" }
+                    })
+                    .to_string(),
+                };
+                write_http_json(&mut stream, &body);
+            }
+        });
+        CatalogMock {
+            origin: format!("http://{addr}"),
+            hits,
+        }
+    }
+
+    #[test]
+    fn handshake_advertises_pr_get_1_9_and_keeps_1_8() {
+        let mock = start_catalog_mock("host-a", "tok-1");
+        let _session = connect(&pid("host-a", &mock.origin)).expect("online");
+        let hs = mock
+            .hits
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|h| h.method == "handshake")
+            .cloned()
+            .expect("handshake");
+        assert_eq!(hs.params["methods"]["pr.get"]["major"], 1);
+        assert_eq!(hs.params["methods"]["pr.get"]["minor"], 9);
+        assert_eq!(hs.params["methods"]["search.query"]["minor"], 9);
+        assert_eq!(hs.params["methods"]["agent.steer"]["minor"], 9);
+        assert_eq!(hs.params["methods"]["sync.export"]["minor"], 8);
+        assert_eq!(hs.params["methods"]["sync.import"]["minor"], 8);
+        assert_eq!(hs.params["methods"]["agent.switch"]["minor"], 6);
+        assert_eq!(hs.params["client"], "gui");
+    }
+
+    #[test]
+    fn pr_get_sends_workspace_and_number_or_url() {
+        let mock = start_pr_rpc_mock();
+        let session = connect(&pid("host-a", &mock.origin)).expect("online");
+        assert!(session.pr_accepted());
+        let view = session.pr_get("ws-1", "91", "").expect("number");
+        assert_eq!(view.title.as_deref(), Some("Panel"));
+        assert_eq!(view.checks, vec!["ci · success"]);
+        let _ = session
+            .pr_get("ws-1", "", "https://example.com/pr/91")
+            .expect("url");
+        let empty = session.pr_get("ws-1", "  ", "  ").expect("empty");
+        assert!(empty.checks.is_empty());
+        let none_ws = session.pr_get("  ", "91", "").expect("no ws");
+        assert!(none_ws.checks.is_empty());
+        let hits = mock.hits.lock().unwrap().clone();
+        let gets: Vec<Value> = hits
+            .iter()
+            .filter(|h| h.method == "pr.get")
+            .map(|h| h.params.clone())
+            .collect();
+        assert_eq!(gets.len(), 2);
+        assert_eq!(gets[0]["workspaceId"], "ws-1");
+        assert_eq!(gets[0]["number"], 91);
+        assert!(gets[0].get("url").is_none());
+        assert_eq!(gets[1]["workspaceId"], "ws-1");
+        assert_eq!(gets[1]["url"], "https://example.com/pr/91");
+        assert!(gets[1].get("number").is_none());
+        assert!(gets.iter().all(|p| p.get("token").is_none()));
+        assert!(hits
+            .iter()
+            .filter(|h| h.method == "pr.get")
+            .all(|h| h.has_session));
     }
 }

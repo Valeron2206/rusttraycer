@@ -19,6 +19,7 @@ use crate::ladder::{
     PICKER_HINT,
 };
 use crate::model_ux::{self, ModelParams, ModelPrefs, MODEL_UNAVAILABLE, PROFILE_NAME_BAD};
+use crate::pr_ux::{self, PrView, PR_NEED_WORKSPACE, PR_UNAVAILABLE};
 use crate::rpc::{
     AgentModelView, AgentSwitchParams, CancelOk, ConnectError, DoctorOk, DoctorProvider, GitDiffOk,
     GitStatusOk, PrefsItem, PresetItem, ProfileOk, SettingsGuide, WorkspaceGuides, Worktree,
@@ -385,6 +386,9 @@ pub struct AppState {
     pub search_status: Option<String>,
     pub search_ran: bool,
     pub show_worktree_gc_confirm: bool,
+    pub pr_number: String,
+    pub pr_url: String,
+    pub pr_view: Option<PrView>,
     search_edited_at: Option<Instant>,
     last_search_q: Option<String>,
     pending_cancel: Option<String>,
@@ -524,6 +528,9 @@ impl AppState {
             search_status: None,
             search_ran: false,
             show_worktree_gc_confirm: false,
+            pr_number: String::new(),
+            pr_url: String::new(),
+            pr_view: None,
             search_edited_at: None,
             last_search_q: None,
             pending_cancel: None,
@@ -4147,6 +4154,48 @@ impl AppState {
                 self.load_git_panel();
             }
             Err(err) => self.surface_gc_error(err),
+        }
+    }
+
+    pub fn pr_host_ok(&self) -> bool {
+        self.session
+            .as_ref()
+            .map(|s| s.pr_accepted() && !s.pr_rejected())
+            .unwrap_or(false)
+    }
+
+    fn surface_pr_unavailable(&mut self) {
+        self.toast = Some(PR_UNAVAILABLE.into());
+    }
+
+    fn surface_pr_error(&mut self, err: ConnectError) {
+        if err.is_pr_unsupported() {
+            self.surface_pr_unavailable();
+        } else {
+            self.toast = Some(err.as_label());
+        }
+    }
+
+    pub fn open_pr(&mut self) {
+        let Some(workspace_id) = self.workspace_id.clone() else {
+            self.toast = Some(PR_NEED_WORKSPACE.into());
+            return;
+        };
+        if pr_ux::pr_get_params(&workspace_id, &self.pr_number, &self.pr_url).is_none() {
+            return;
+        }
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        if !self.pr_host_ok() && session.pr_rejected() {
+            self.surface_pr_unavailable();
+            return;
+        }
+        match session.pr_get(&workspace_id, &self.pr_number, &self.pr_url) {
+            Ok(view) => {
+                self.pr_view = Some(view);
+            }
+            Err(err) => self.surface_pr_error(err),
         }
     }
 
@@ -8997,5 +9046,323 @@ mod tests {
         let _ = state.workspace_host_ok();
         let _ = state.sync_host_ok();
         let _ = state.search_host_ok();
+    }
+
+    fn pr_accepted_map() -> serde_json::Map<String, Value> {
+        let mut accepted = serde_json::Map::new();
+        for name in crate::rpc::PR_METHODS {
+            accepted.insert(name.to_string(), json!({"major": 1, "minor": 9}));
+        }
+        accepted
+    }
+
+    fn session_without_pr() -> crate::rpc::Session {
+        use std::collections::BTreeMap;
+        let mut rejected = BTreeMap::new();
+        rejected.insert(crate::rpc::METHOD_PR_GET.to_string(), "unsupported".into());
+        crate::rpc::Session {
+            host_id: "host-a".into(),
+            host_version: "0.1.0".into(),
+            session_token: "tok-1".into(),
+            rpc_url: "http://127.0.0.1:1".into(),
+            ws_url: None,
+            accepted: BTreeMap::new(),
+            rejected,
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum PrReply {
+        Ok,
+        AuthRequired,
+    }
+
+    fn start_pr_state_mock(reply: PrReply) -> SliceMock {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(Mutex::new(Vec::new()));
+        let hits_t = hits.clone();
+        thread::spawn(move || {
+            for stream in listener.incoming().take(64) {
+                let Ok(mut stream) = stream else { break };
+                let (headers, body) = read_http_request(&mut stream);
+                let parsed: Value = serde_json::from_slice(&body).unwrap_or(json!({}));
+                let method = if headers.starts_with("GET /health") {
+                    "GET /health".to_string()
+                } else {
+                    parsed
+                        .get("method")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("other")
+                        .to_string()
+                };
+                let params = parsed.get("params").cloned().unwrap_or(json!({}));
+                hits_t.lock().unwrap().push(RpcHit {
+                    method: method.clone(),
+                    params: params.clone(),
+                });
+                let body = match method.as_str() {
+                    "GET /health" => json!({"ok": true, "hostId": "host-a"}).to_string(),
+                    "handshake" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "hostId": "host-a",
+                            "hostVersion": "0.1.0",
+                            "sessionToken": "tok-1",
+                            "accepted": pr_accepted_map(),
+                            "rejected": {}
+                        }
+                    })
+                    .to_string(),
+                    "host.ping" => json!({
+                        "id": "echo",
+                        "ok": { "hostId": "host-a", "now": "2026-08-19T12:00:00Z" }
+                    })
+                    .to_string(),
+                    "pr.get" => match reply {
+                        PrReply::Ok => json!({
+                            "id": "echo",
+                            "ok": {
+                                "title": "Panel",
+                                "checks": [{ "name": "ci", "status": "success" }],
+                                "commits": [{ "sha": "abc", "message": "feat" }],
+                                "files": [{ "path": "a.rs" }],
+                                "localDiff": "diff --git"
+                            }
+                        })
+                        .to_string(),
+                        PrReply::AuthRequired => json!({
+                            "id": "echo",
+                            "error": {
+                                "code": "auth_required",
+                                "message": "gh not logged in"
+                            }
+                        })
+                        .to_string(),
+                    },
+                    _ => json!({
+                        "id": "echo",
+                        "error": { "code": "unsupported_method", "message": "no" }
+                    })
+                    .to_string(),
+                };
+                write_http_json(&mut stream, &body);
+            }
+        });
+        SliceMock {
+            origin: format!("http://{addr}"),
+            hits,
+        }
+    }
+
+    fn start_missing_method_pr_mock() -> SliceMock {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(Mutex::new(Vec::new()));
+        let hits_t = hits.clone();
+        thread::spawn(move || {
+            for stream in listener.incoming().take(24) {
+                let Ok(mut stream) = stream else { break };
+                let (headers, body) = read_http_request(&mut stream);
+                let parsed: Value = serde_json::from_slice(&body).unwrap_or(json!({}));
+                let method = if headers.starts_with("GET /health") {
+                    "GET /health".to_string()
+                } else {
+                    parsed
+                        .get("method")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("other")
+                        .to_string()
+                };
+                let params = parsed.get("params").cloned().unwrap_or(json!({}));
+                hits_t.lock().unwrap().push(RpcHit {
+                    method: method.clone(),
+                    params: params.clone(),
+                });
+                let body = match method.as_str() {
+                    "GET /health" => json!({"ok": true, "hostId": "host-a"}).to_string(),
+                    "handshake" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "hostId": "host-a",
+                            "hostVersion": "0.1.0",
+                            "sessionToken": "tok-1",
+                            "accepted": {},
+                            "rejected": {}
+                        }
+                    })
+                    .to_string(),
+                    "host.ping" => json!({
+                        "id": "echo",
+                        "ok": { "hostId": "host-a", "now": "2026-08-19T12:00:00Z" }
+                    })
+                    .to_string(),
+                    _ => json!({
+                        "id": "echo",
+                        "error": { "code": "unsupported_method", "message": "no" }
+                    })
+                    .to_string(),
+                };
+                write_http_json(&mut stream, &body);
+            }
+        });
+        SliceMock {
+            origin: format!("http://{addr}"),
+            hits,
+        }
+    }
+
+    #[test]
+    fn pr_get_sends_workspace_and_number_or_url() {
+        let mock = start_pr_state_mock(PrReply::Ok);
+        let session = connect(&pid(&mock.origin)).expect("online");
+        let mut state = online_state(session);
+        state.pr_number = "91".into();
+        state.open_pr();
+        let view = state.pr_view.clone().expect("view");
+        assert_eq!(view.title.as_deref(), Some("Panel"));
+        assert_eq!(view.checks, vec!["ci · success"]);
+        assert_eq!(view.commits, vec!["abc · feat"]);
+        assert_eq!(view.files, vec!["a.rs"]);
+        assert_eq!(view.local_diff.as_deref(), Some("diff --git"));
+        state.pr_number.clear();
+        state.pr_url = "https://example.com/pr/91".into();
+        state.open_pr();
+        let hits = mock.hits.lock().unwrap().clone();
+        let gets: Vec<Value> = hits
+            .iter()
+            .filter(|h| h.method == "pr.get")
+            .map(|h| h.params.clone())
+            .collect();
+        assert_eq!(gets.len(), 2);
+        assert_eq!(gets[0]["workspaceId"], "ws-1");
+        assert_eq!(gets[0]["number"], 91);
+        assert!(gets[0].get("url").is_none());
+        assert_eq!(gets[1]["workspaceId"], "ws-1");
+        assert_eq!(gets[1]["url"], "https://example.com/pr/91");
+        assert!(gets[1].get("number").is_none());
+        assert!(gets.iter().all(|p| p.get("token").is_none()));
+        assert!(gets.iter().all(|p| p.get("pat").is_none()));
+    }
+
+    #[test]
+    fn pr_no_workspace_or_empty_query_sends_no_rpc() {
+        let mock = start_pr_state_mock(PrReply::Ok);
+        let session = connect(&pid(&mock.origin)).expect("online");
+        let mut state = online_state(session);
+        state.workspace_id = None;
+        state.pr_number = "91".into();
+        state.open_pr();
+        assert_eq!(state.toast.as_deref(), Some(PR_NEED_WORKSPACE));
+        assert_eq!(PR_NEED_WORKSPACE, "нет workspace");
+        assert!(state.pr_view.is_none());
+        state.workspace_id = Some("ws-1".into());
+        state.pr_number.clear();
+        state.pr_url.clear();
+        state.toast = None;
+        state.open_pr();
+        assert!(state.toast.is_none());
+        assert!(state.pr_view.is_none());
+        let gets = mock
+            .hits
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|h| h.method == "pr.get")
+            .count();
+        assert_eq!(gets, 0);
+    }
+
+    #[test]
+    fn old_host_pr_toasts_without_panic() {
+        let mut state = AppState::new();
+        state.pending_discover = false;
+        state.demo = false;
+        state.host_status = HostStatus::Online;
+        state.session = Some(session_without_pr());
+        state.workspace_id = Some("ws-1".into());
+        state.selected_task_id = Some("task-1".into());
+        state.selected_agent_id = Some("ag-1".into());
+        state.agents.push(AgentStub {
+            id: "ag-1".into(),
+            task_id: "task-1".into(),
+            parent_id: None,
+            provider: "cli.generic".into(),
+            status: AgentStatus::Idle,
+            interface: "chat".into(),
+        });
+        state.messages.push(ChatMessage {
+            id: "keep-1".into(),
+            role: "user".into(),
+            content: "stay".into(),
+        });
+        state.pr_number = "91".into();
+        assert!(!state.pr_host_ok());
+        state.open_pr();
+        assert_eq!(state.toast.as_deref(), Some(PR_UNAVAILABLE));
+        assert_eq!(PR_UNAVAILABLE, "PR недоступен: host без 1.9");
+        assert!(state.pr_view.is_none());
+        let _ = state.composer_enabled();
+        let _ = state.write_ready();
+        let _ = state.terminal_host_ok();
+        let _ = state.artifacts_host_ok();
+        let _ = state.a2a_host_ok();
+        let _ = state.model_ux_host_ok();
+        let _ = state.workspace_host_ok();
+        let _ = state.sync_host_ok();
+        let _ = state.search_host_ok();
+        let _ = state.steer_host_ok();
+        assert_eq!(state.messages.len(), 1);
+        assert_eq!(state.messages[0].id, "keep-1");
+        assert_eq!(state.agents.len(), 1);
+    }
+
+    #[test]
+    fn missing_method_pr_toasts_without_panic() {
+        let mock = start_missing_method_pr_mock();
+        let session = connect(&pid(&mock.origin)).expect("online");
+        let mut state = online_state(session);
+        state.messages.push(ChatMessage {
+            id: "keep-1".into(),
+            role: "user".into(),
+            content: "stay".into(),
+        });
+        state.pr_number = "91".into();
+        state.open_pr();
+        assert_eq!(state.toast.as_deref(), Some(PR_UNAVAILABLE));
+        assert!(state.pr_view.is_none());
+        let _ = state.composer_enabled();
+        let _ = state.write_ready();
+        let _ = state.terminal_host_ok();
+        let _ = state.search_host_ok();
+        let _ = state.steer_host_ok();
+        assert_eq!(state.messages.len(), 1);
+    }
+
+    #[test]
+    fn pr_auth_required_toasts_without_token_prompt() {
+        let mock = start_pr_state_mock(PrReply::AuthRequired);
+        let session = connect(&pid(&mock.origin)).expect("online");
+        let mut state = online_state(session);
+        state.pr_number = "91".into();
+        state.open_pr();
+        let toast = state.toast.clone().expect("toast via Сообщение");
+        assert!(toast.contains("auth_required"), "{toast}");
+        assert!(toast.contains("gh not logged in"), "{toast}");
+        assert!(state.pr_view.is_none());
+        assert!(!toast.contains("token"));
+        assert!(!toast.contains("PAT"));
+        assert!(!toast.contains("секрет"));
+        let hit = mock
+            .hits
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|h| h.method == "pr.get")
+            .cloned()
+            .expect("pr.get");
+        assert!(hit.params.get("token").is_none());
+        assert!(hit.params.get("pat").is_none());
+        assert!(hit.params.get("secret").is_none());
     }
 }

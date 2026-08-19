@@ -9,6 +9,7 @@ mod chrome;
 mod discovery;
 mod ladder;
 mod model_ux;
+mod pr_ux;
 mod rpc;
 mod screens;
 mod search_ux;
