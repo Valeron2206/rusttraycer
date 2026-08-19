@@ -1,4 +1,5 @@
-//! HTTP JSON-RPC (`POST /rpc`), `GET /health`, `GET /metrics`, `GET /ws`.
+//! HTTP JSON-RPC (`POST /rpc`), `GET /health`, `GET /metrics`, `GET /ws`,
+//! and host-to-host `POST /sync/v1/export` / `POST /sync/v1/import`.
 
 use std::sync::Arc;
 
@@ -27,6 +28,8 @@ pub fn router(service: HostService) -> Router {
         .route("/health", get(health_handler))
         .route("/metrics", get(metrics_handler))
         .route("/ws", get(ws_upgrade))
+        .route("/sync/v1/export", post(sync_v1_export))
+        .route("/sync/v1/import", post(sync_v1_import))
         .with_state(AppState { service })
 }
 
@@ -69,6 +72,100 @@ async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
             tracing::error!(code = e.code(), error = %e, "metrics");
             (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
         }
+    }
+}
+
+const SYNC_SECRET_HEADER: &str = "X-Rt-Sync-Secret";
+
+fn require_sync_secret(headers: &HeaderMap) -> Result<(), HostError> {
+    let Some(expected) = crate::sync::sync_secret_from_env() else {
+        return Ok(());
+    };
+    let provided = headers
+        .get(SYNC_SECRET_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if crate::sync::secrets_equal(&expected, provided) {
+        Ok(())
+    } else {
+        Err(HostError::AuthRequired("sync secret required".into()))
+    }
+}
+
+fn peer_error(err: HostError) -> (StatusCode, Json<Value>) {
+    let status = match &err {
+        HostError::AuthRequired(_) => StatusCode::UNAUTHORIZED,
+        HostError::NotFound(_) => StatusCode::NOT_FOUND,
+        HostError::Conflict(_) => StatusCode::CONFLICT,
+        HostError::InvalidParams(_) => StatusCode::BAD_REQUEST,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    (
+        status,
+        Json(json!({
+            "error": { "code": err.code(), "message": err.to_string() }
+        })),
+    )
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PeerExportBody {
+    #[serde(default)]
+    task_ids: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PeerImportBody {
+    #[serde(default)]
+    workspace_id: Option<String>,
+    archive: rt_protocol::ExportArchive,
+}
+
+async fn sync_v1_export(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<PeerExportBody>,
+) -> impl IntoResponse {
+    if let Err(e) = require_sync_secret(&headers) {
+        return peer_error(e).into_response();
+    }
+    let ids = match state
+        .service
+        .resolve_export_task_ids(body.task_ids.as_deref())
+    {
+        Ok(v) => v,
+        Err(e) => return peer_error(e).into_response(),
+    };
+    match state.service.sync_export(&ids) {
+        Ok(ok) => (StatusCode::OK, Json(ok)).into_response(),
+        Err(e) => peer_error(e).into_response(),
+    }
+}
+
+async fn sync_v1_import(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<PeerImportBody>,
+) -> impl IntoResponse {
+    if let Err(e) = require_sync_secret(&headers) {
+        return peer_error(e).into_response();
+    }
+    let workspace_id = match state
+        .service
+        .resolve_import_workspace(body.workspace_id.as_deref())
+    {
+        Ok(v) => v,
+        Err(e) => return peer_error(e).into_response(),
+    };
+    let params = rt_protocol::SyncImportParams {
+        workspace_id,
+        archive: body.archive,
+    };
+    match state.service.sync_import(params) {
+        Ok(ok) => (StatusCode::OK, Json(ok)).into_response(),
+        Err(e) => peer_error(e).into_response(),
     }
 }
 
@@ -719,7 +816,22 @@ async fn dispatch_method(
                 .map_err(|e| HostError::InvalidParams(e.to_string()))?;
             Ok(serde_json::to_value(svc.settings_guide_set(&p.content)?)?)
         }
-        "preset.list" => Ok(serde_json::to_value(svc.preset_list())?),
+        "preset.list" => Ok(serde_json::to_value(svc.preset_list()?)?),
+        "preset.create" => {
+            let p: rt_protocol::PresetCreateParams = serde_json::from_value(params)
+                .map_err(|e| HostError::InvalidParams(e.to_string()))?;
+            Ok(serde_json::to_value(svc.preset_create(&p)?)?)
+        }
+        "preset.update" => {
+            let p: rt_protocol::PresetUpdateParams = serde_json::from_value(params)
+                .map_err(|e| HostError::InvalidParams(e.to_string()))?;
+            Ok(serde_json::to_value(svc.preset_update(&p)?)?)
+        }
+        "preset.delete" => {
+            let p: rt_protocol::PresetDeleteParams = serde_json::from_value(params)
+                .map_err(|e| HostError::InvalidParams(e.to_string()))?;
+            Ok(serde_json::to_value(svc.preset_delete(&p.id)?)?)
+        }
         "agent.update" => {
             let p: rt_protocol::AgentUpdateParams = serde_json::from_value(params)
                 .map_err(|e| HostError::InvalidParams(e.to_string()))?;
@@ -736,6 +848,16 @@ async fn dispatch_method(
             let p: rt_protocol::SyncImportParams = serde_json::from_value(params)
                 .map_err(|e| HostError::InvalidParams(e.to_string()))?;
             Ok(serde_json::to_value(svc.sync_import(p)?)?)
+        }
+        "sync.push" => {
+            let p: rt_protocol::SyncPushParams = serde_json::from_value(params)
+                .map_err(|e| HostError::InvalidParams(e.to_string()))?;
+            Ok(serde_json::to_value(svc.sync_push(p).await?)?)
+        }
+        "sync.pull" => {
+            let p: rt_protocol::SyncPullParams = serde_json::from_value(params)
+                .map_err(|e| HostError::InvalidParams(e.to_string()))?;
+            Ok(serde_json::to_value(svc.sync_pull(p).await?)?)
         }
         "search.query" => {
             let p: rt_protocol::SearchQueryParams = serde_json::from_value(params)

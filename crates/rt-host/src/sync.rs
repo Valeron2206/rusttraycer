@@ -1,15 +1,19 @@
-//! E9 durable export/import (protocol 1.8). Host does not write the archive file.
+//! E9 durable export/import (protocol 1.8) and C58 host-to-host push/pull.
+//! Host does not write the archive file. Sync secret is env-only.
 
 use std::collections::HashSet;
 
 use rt_protocol::{
     ExportAgent, ExportArchive, ExportComment, ExportCommentThread, ExportTask, Profile,
-    SyncExportOk, SyncImportOk, SyncImportParams, EXPORT_KIND, EXPORT_VERSION, MAX_EXPORT_TASKS,
+    SyncExportOk, SyncImportOk, SyncImportParams, SyncPullParams, SyncPushParams, EXPORT_KIND,
+    EXPORT_VERSION, MAX_EXPORT_TASKS,
 };
 use rt_storage::{
     ImportAgent, ImportArtifact, ImportBundle, ImportComment, ImportCommentThread, ImportMessage,
-    ImportTask, ModelProfile,
+    ImportTask, ModelProfile, TaskFilter,
 };
+use serde::Deserialize;
+use serde_json::Value;
 
 use crate::service::HostService;
 use crate::{HostError, Result};
@@ -156,6 +160,68 @@ impl HostService {
             artifacts: u32_from_usize(result.artifacts)?,
             profiles_imported: u32_from_usize(result.profiles_imported)?,
             profiles_skipped: u32_from_usize(result.profiles_skipped)?,
+        })
+    }
+
+    pub fn resolve_export_task_ids(&self, task_ids: Option<&[String]>) -> Result<Vec<String>> {
+        match task_ids {
+            Some(ids) if !ids.is_empty() => Ok(ids.to_vec()),
+            _ => {
+                let all = self.store.task_list(TaskFilter::All)?;
+                Ok(all.into_iter().map(|t| t.id).collect())
+            }
+        }
+    }
+
+    pub fn resolve_import_workspace(&self, workspace_id: Option<&str>) -> Result<String> {
+        if let Some(id) = workspace_id {
+            if !id.is_empty() {
+                return Ok(id.to_string());
+            }
+        }
+        let list = self.store.workspace_list()?;
+        if list.len() == 1 {
+            return Ok(list[0].id.clone());
+        }
+        Err(HostError::InvalidParams(
+            "workspaceId is required when the host does not have exactly one workspace".into(),
+        ))
+    }
+
+    pub async fn sync_push(&self, params: SyncPushParams) -> Result<SyncImportOk> {
+        let peer = validate_peer_url(&params.peer_url)?;
+        let task_ids = self.resolve_export_task_ids(params.task_ids.as_deref())?;
+        let exported = self.sync_export(&task_ids)?;
+        let mut body = serde_json::Map::new();
+        if let Some(ws) = params.workspace_id.as_deref() {
+            if !ws.is_empty() {
+                body.insert("workspaceId".into(), Value::String(ws.to_string()));
+            }
+        }
+        body.insert("archive".into(), serde_json::to_value(&exported.archive)?);
+        let url = format!("{peer}/sync/v1/import");
+        let resp = peer_post(&url, Value::Object(body)).await?;
+        serde_json::from_value(resp).map_err(|e| HostError::Internal(e.to_string()))
+    }
+
+    pub async fn sync_pull(&self, params: SyncPullParams) -> Result<SyncImportOk> {
+        let peer = validate_peer_url(&params.peer_url)?;
+        if params.workspace_id.is_empty() {
+            return Err(HostError::InvalidParams("workspaceId is required".into()));
+        }
+        let mut body = serde_json::Map::new();
+        if let Some(ids) = params.task_ids.as_ref() {
+            if !ids.is_empty() {
+                body.insert("taskIds".into(), serde_json::to_value(ids)?);
+            }
+        }
+        let url = format!("{peer}/sync/v1/export");
+        let resp = peer_post(&url, Value::Object(body)).await?;
+        let exported: PeerExportOk = serde_json::from_value(resp)
+            .map_err(|e| HostError::InvalidParams(format!("peer export: {e}")))?;
+        self.sync_import(SyncImportParams {
+            workspace_id: params.workspace_id,
+            archive: exported.archive,
         })
     }
 }
@@ -317,4 +383,126 @@ fn archive_to_bundle(
 
 fn u32_from_usize(n: usize) -> Result<u32> {
     u32::try_from(n).map_err(|_| HostError::Internal("import count overflow".into()))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PeerExportOk {
+    archive: ExportArchive,
+}
+
+#[derive(Debug, Deserialize)]
+struct PeerErrorBody {
+    error: rt_protocol::ErrorBody,
+}
+
+pub(crate) fn sync_secret_from_env() -> Option<String> {
+    match std::env::var("RUSTTRAYCER_SYNC_SECRET") {
+        Ok(s) if !s.is_empty() => Some(s),
+        _ => None,
+    }
+}
+
+pub(crate) fn secrets_equal(expected: &str, provided: &str) -> bool {
+    let a = expected.as_bytes();
+    let b = provided.as_bytes();
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut acc = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        acc |= x ^ y;
+    }
+    acc == 0
+}
+
+fn validate_peer_url(raw: &str) -> Result<String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Err(HostError::InvalidParams("peerUrl is required".into()));
+    }
+    let parsed = reqwest::Url::parse(raw).map_err(|_| {
+        HostError::InvalidParams("peerUrl must be an absolute http or https URL".into())
+    })?;
+    match parsed.scheme() {
+        "http" | "https" => {}
+        _ => {
+            return Err(HostError::InvalidParams(
+                "peerUrl must be http or https".into(),
+            ));
+        }
+    }
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| HostError::InvalidParams("peerUrl must include a host".into()))?;
+    if host.is_empty() {
+        return Err(HostError::InvalidParams(
+            "peerUrl must include a host".into(),
+        ));
+    }
+    let host_l = host.to_ascii_lowercase();
+    if host_l.contains("traycer.ai")
+        || host_l.contains("traycer.com")
+        || host_l.contains("sync.traycer")
+    {
+        return Err(HostError::InvalidParams(
+            "managed cloud sync is not supported".into(),
+        ));
+    }
+    let mut s = parsed.as_str().to_string();
+    if s.ends_with('/') {
+        s.pop();
+    }
+    Ok(s)
+}
+
+fn http_client() -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| HostError::Internal(format!("http client: {e}")))
+}
+
+async fn peer_post(url: &str, body: Value) -> Result<Value> {
+    let client = http_client()?;
+    let mut req = client.post(url).json(&body);
+    if let Some(secret) = sync_secret_from_env() {
+        req = req.header("X-Rt-Sync-Secret", secret);
+    }
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| HostError::Internal(format!("peer request failed: {e}")))?;
+    let status = resp.status();
+    let text = resp
+        .text()
+        .await
+        .map_err(|e| HostError::Internal(format!("peer body: {e}")))?;
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        if let Ok(parsed) = serde_json::from_str::<PeerErrorBody>(&text) {
+            return Err(HostError::AuthRequired(parsed.error.message));
+        }
+        return Err(HostError::AuthRequired("peer rejected sync secret".into()));
+    }
+    if let Ok(parsed) = serde_json::from_str::<PeerErrorBody>(&text) {
+        return Err(map_peer_code(&parsed.error.code, parsed.error.message));
+    }
+    if !status.is_success() {
+        return Err(HostError::Internal(format!(
+            "peer HTTP {}: {text}",
+            status.as_u16()
+        )));
+    }
+    serde_json::from_str(&text).map_err(|e| HostError::Internal(format!("peer JSON: {e}")))
+}
+
+fn map_peer_code(code: &str, message: String) -> HostError {
+    match code {
+        "auth_required" => HostError::AuthRequired(message),
+        "invalid_params" => HostError::InvalidParams(message),
+        "not_found" => HostError::NotFound(message),
+        "conflict" => HostError::Conflict(message),
+        "unauthorized" => HostError::Unauthorized,
+        _ => HostError::Internal(format!("peer {code}: {message}")),
+    }
 }

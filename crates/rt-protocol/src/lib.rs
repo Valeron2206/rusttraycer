@@ -121,6 +121,11 @@ pub const METHOD_PR_GET: &str = "pr.get";
 pub const METHOD_STASH_LIST: &str = "stash.list";
 pub const METHOD_STASH_ADD: &str = "stash.add";
 pub const METHOD_STASH_DELETE: &str = "stash.delete";
+pub const METHOD_SYNC_PUSH: &str = "sync.push";
+pub const METHOD_SYNC_PULL: &str = "sync.pull";
+pub const METHOD_PRESET_CREATE: &str = "preset.create";
+pub const METHOD_PRESET_UPDATE: &str = "preset.update";
+pub const METHOD_PRESET_DELETE: &str = "preset.delete";
 
 pub const EXPORT_KIND: &str = "rusttraycer.export";
 pub const EXPORT_VERSION: u32 = 1;
@@ -206,6 +211,11 @@ pub const TRADABLE_METHODS: &[&str] = &[
     METHOD_STASH_LIST,
     METHOD_STASH_ADD,
     METHOD_STASH_DELETE,
+    METHOD_SYNC_PUSH,
+    METHOD_SYNC_PULL,
+    METHOD_PRESET_CREATE,
+    METHOD_PRESET_UPDATE,
+    METHOD_PRESET_DELETE,
 ];
 
 pub fn host_method_version() -> MethodVersion {
@@ -222,8 +232,9 @@ pub fn host_method_version() -> MethodVersion {
 /// workspace/guides/preset/`agent.update` methods are 1.7;
 /// `sync.export`/`sync.import` are 1.8; `artifact.export`, `search.query`,
 /// `worktree.gc`, `agent.create`, `shell.create`, `account.list`,
-/// `account.create`, `agent.steer`, `pr.get`, and `stash.list`/`stash.add`/
-/// `stash.delete` are 1.9; all other
+/// `account.create`, `agent.steer`, `pr.get`, `stash.list`/`stash.add`/
+/// `stash.delete`, `sync.push`/`sync.pull`, and `preset.create`/
+/// `preset.update`/`preset.delete` are 1.9; all other
 /// tradable methods stay 1.0 (`HOST_METHOD_MINOR` is not bumped).
 /// Unknown names return `None`.
 pub fn method_version(name: &str) -> Option<MethodVersion> {
@@ -260,7 +271,12 @@ pub fn method_version(name: &str) -> Option<MethodVersion> {
         | METHOD_PR_GET
         | METHOD_STASH_LIST
         | METHOD_STASH_ADD
-        | METHOD_STASH_DELETE => Some(MethodVersion { major: 1, minor: 9 }),
+        | METHOD_STASH_DELETE
+        | METHOD_SYNC_PUSH
+        | METHOD_SYNC_PULL
+        | METHOD_PRESET_CREATE
+        | METHOD_PRESET_UPDATE
+        | METHOD_PRESET_DELETE => Some(MethodVersion { major: 1, minor: 9 }),
         METHOD_A2A_TRANSCRIPT
         | METHOD_A2A_DELIVER
         | METHOD_LOOP_START
@@ -1028,6 +1044,12 @@ pub struct PresetItem {
     pub id: String,
     pub title: String,
     pub default_role: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title_hint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1142,6 +1164,65 @@ pub struct SyncImportOk {
     pub artifacts: u32,
     pub profiles_imported: u32,
     pub profiles_skipped: u32,
+}
+
+pub type SyncPushOk = SyncImportOk;
+pub type SyncPullOk = SyncImportOk;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncPushParams {
+    pub peer_url: String,
+    #[serde(default)]
+    pub task_ids: Option<Vec<String>>,
+    #[serde(default)]
+    pub workspace_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncPullParams {
+    pub peer_url: String,
+    pub workspace_id: String,
+    #[serde(default)]
+    pub task_ids: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PresetCreateParams {
+    pub name: String,
+    pub default_role: String,
+    #[serde(default)]
+    pub title_hint: Option<String>,
+    #[serde(default)]
+    pub prompt: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PresetUpdateParams {
+    pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub default_role: Option<String>,
+    #[serde(default)]
+    pub title_hint: Option<String>,
+    #[serde(default)]
+    pub prompt: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PresetDeleteParams {
+    pub id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PresetDeleteOk {
+    pub deleted: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1461,7 +1542,7 @@ mod tests {
         assert_eq!(error_codes::CONFLICT, "conflict");
         assert_eq!(error_codes::NOT_SUPPORTED, "not_supported");
         assert_eq!(error_codes::AUTH_REQUIRED, "auth_required");
-        assert_eq!(TRADABLE_METHODS.len(), 78);
+        assert_eq!(TRADABLE_METHODS.len(), 83);
         assert!(TRADABLE_METHODS.contains(&METHOD_POLICY_GET));
         assert!(TRADABLE_METHODS.contains(&METHOD_POLICY_SET));
         assert!(TRADABLE_METHODS.contains(&METHOD_APPROVAL_RESPOND));
@@ -2268,7 +2349,7 @@ mod tests {
         );
         assert!(TRADABLE_METHODS.contains(&METHOD_AGENT_SWITCH));
         assert!(TRADABLE_METHODS.contains(&METHOD_PREFS_GET));
-        assert_eq!(TRADABLE_METHODS.len(), 78);
+        assert_eq!(TRADABLE_METHODS.len(), 83);
 
         let sw: AgentSwitchParams = serde_json::from_str(
             r#"{"agentId":"a1","provider":"cli.codex","model":"o3","effort":"high","fast":false}"#,
@@ -2375,7 +2456,7 @@ mod tests {
             method_version(METHOD_HOST_PING),
             Some(MethodVersion { major: 1, minor: 0 })
         );
-        assert_eq!(TRADABLE_METHODS.len(), 78);
+        assert_eq!(TRADABLE_METHODS.len(), 83);
         assert!(TRADABLE_METHODS.contains(&METHOD_WORKSPACE_GUIDES_GET));
         assert!(TRADABLE_METHODS.contains(&METHOD_AGENT_UPDATE));
         assert!(!TRADABLE_METHODS
@@ -2419,6 +2500,9 @@ mod tests {
             id: "planning".into(),
             title: "Planning".into(),
             default_role: "planner".into(),
+            name: None,
+            title_hint: None,
+            prompt: None,
         };
         let v = serde_json::to_value(&item).unwrap();
         assert_eq!(v["id"], "planning");
@@ -2510,7 +2594,7 @@ mod tests {
             Some(MethodVersion { major: 1, minor: 0 })
         );
         assert_eq!(host_method_version(), MethodVersion { major: 1, minor: 0 });
-        assert_eq!(TRADABLE_METHODS.len(), 78);
+        assert_eq!(TRADABLE_METHODS.len(), 83);
         assert!(TRADABLE_METHODS.contains(&METHOD_SYNC_EXPORT));
         assert!(TRADABLE_METHODS.contains(&METHOD_SYNC_IMPORT));
         assert_eq!(EXPORT_KIND, "rusttraycer.export");
@@ -2882,5 +2966,151 @@ mod tests {
         let v = serde_json::to_value(&list).unwrap();
         assert_eq!(v["items"][0]["imagePath"], "/tmp/shot.png");
         assert_eq!(v["items"][1]["body"], "plain");
+    }
+
+    #[test]
+    fn sync_push_pull_and_preset_crud_types_camel_case_and_versions() {
+        assert_eq!(METHOD_SYNC_PUSH, "sync.push");
+        assert_eq!(METHOD_SYNC_PULL, "sync.pull");
+        assert_eq!(METHOD_PRESET_CREATE, "preset.create");
+        assert_eq!(METHOD_PRESET_UPDATE, "preset.update");
+        assert_eq!(METHOD_PRESET_DELETE, "preset.delete");
+        assert!(TRADABLE_METHODS.contains(&METHOD_SYNC_PUSH));
+        assert!(TRADABLE_METHODS.contains(&METHOD_SYNC_PULL));
+        assert!(TRADABLE_METHODS.contains(&METHOD_PRESET_CREATE));
+        assert!(TRADABLE_METHODS.contains(&METHOD_PRESET_UPDATE));
+        assert!(TRADABLE_METHODS.contains(&METHOD_PRESET_DELETE));
+        assert_eq!(
+            method_version(METHOD_SYNC_PUSH),
+            Some(MethodVersion { major: 1, minor: 9 })
+        );
+        assert_eq!(
+            method_version(METHOD_SYNC_PULL),
+            Some(MethodVersion { major: 1, minor: 9 })
+        );
+        assert_eq!(
+            method_version(METHOD_PRESET_CREATE),
+            Some(MethodVersion { major: 1, minor: 9 })
+        );
+        assert_eq!(
+            method_version(METHOD_PRESET_UPDATE),
+            Some(MethodVersion { major: 1, minor: 9 })
+        );
+        assert_eq!(
+            method_version(METHOD_PRESET_DELETE),
+            Some(MethodVersion { major: 1, minor: 9 })
+        );
+        assert_eq!(
+            method_version(METHOD_SYNC_EXPORT),
+            Some(MethodVersion { major: 1, minor: 8 })
+        );
+        assert_eq!(
+            method_version(METHOD_SYNC_IMPORT),
+            Some(MethodVersion { major: 1, minor: 8 })
+        );
+        assert_eq!(
+            method_version(METHOD_PRESET_LIST),
+            Some(MethodVersion { major: 1, minor: 7 })
+        );
+        assert_eq!(TRADABLE_METHODS.len(), 83);
+
+        let push: SyncPushParams = serde_json::from_str(
+            r#"{"peerUrl":"http://127.0.0.1:9","taskIds":["t1"],"workspaceId":"w1"}"#,
+        )
+        .unwrap();
+        assert_eq!(push.peer_url, "http://127.0.0.1:9");
+        assert_eq!(push.task_ids.as_deref(), Some(&["t1".to_string()][..]));
+        assert_eq!(push.workspace_id.as_deref(), Some("w1"));
+        let pv = serde_json::to_value(&push).unwrap();
+        assert_eq!(pv["peerUrl"], "http://127.0.0.1:9");
+        assert_eq!(pv["taskIds"][0], "t1");
+        assert_eq!(pv["workspaceId"], "w1");
+        assert!(pv.get("peer_url").is_none());
+
+        let bare: SyncPushParams =
+            serde_json::from_str(r#"{"peerUrl":"http://localhost"}"#).unwrap();
+        assert!(bare.task_ids.is_none());
+        assert!(bare.workspace_id.is_none());
+
+        let pull: SyncPullParams =
+            serde_json::from_str(r#"{"peerUrl":"https://peer.local","workspaceId":"w2"}"#).unwrap();
+        assert_eq!(pull.peer_url, "https://peer.local");
+        assert_eq!(pull.workspace_id, "w2");
+        assert!(pull.task_ids.is_none());
+        let plv = serde_json::to_value(&pull).unwrap();
+        assert_eq!(plv["peerUrl"], "https://peer.local");
+        assert_eq!(plv["workspaceId"], "w2");
+        assert!(plv.get("peer_url").is_none());
+
+        let ok = SyncPushOk {
+            tasks: 1,
+            agents: 1,
+            messages: 0,
+            artifacts: 0,
+            profiles_imported: 0,
+            profiles_skipped: 0,
+        };
+        let ov = serde_json::to_value(&ok).unwrap();
+        assert_eq!(ov["tasks"], 1);
+        assert_eq!(ov["profilesImported"], 0);
+        assert!(ov.get("profiles_imported").is_none());
+
+        let create: PresetCreateParams = serde_json::from_str(
+            r#"{"name":"mine","defaultRole":"coder","titleHint":"hint","prompt":"do it"}"#,
+        )
+        .unwrap();
+        assert_eq!(create.name, "mine");
+        assert_eq!(create.default_role, "coder");
+        assert_eq!(create.title_hint.as_deref(), Some("hint"));
+        assert_eq!(create.prompt.as_deref(), Some("do it"));
+        let cv = serde_json::to_value(&create).unwrap();
+        assert_eq!(cv["defaultRole"], "coder");
+        assert_eq!(cv["titleHint"], "hint");
+        assert!(cv.get("default_role").is_none());
+
+        let upd: PresetUpdateParams =
+            serde_json::from_str(r#"{"id":"p1","name":"renamed"}"#).unwrap();
+        assert_eq!(upd.id, "p1");
+        assert_eq!(upd.name.as_deref(), Some("renamed"));
+        assert!(upd.default_role.is_none());
+        let uv = serde_json::to_value(&upd).unwrap();
+        assert_eq!(uv["id"], "p1");
+        assert!(uv.get("defaultRole").is_none() || uv["defaultRole"].is_null());
+
+        let del: PresetDeleteParams = serde_json::from_str(r#"{"id":"p1"}"#).unwrap();
+        assert_eq!(del.id, "p1");
+        let del_ok = PresetDeleteOk { deleted: true };
+        let dv = serde_json::to_value(&del_ok).unwrap();
+        assert_eq!(dv["deleted"], true);
+
+        let builtin = PresetItem {
+            id: "planning".into(),
+            title: "Planning".into(),
+            default_role: "planner".into(),
+            name: None,
+            title_hint: None,
+            prompt: None,
+        };
+        let bv = serde_json::to_value(&builtin).unwrap();
+        assert_eq!(bv["id"], "planning");
+        assert_eq!(bv["defaultRole"], "planner");
+        assert!(bv.get("name").is_none(), "{bv}");
+        assert!(bv.get("titleHint").is_none(), "{bv}");
+        assert!(bv.get("prompt").is_none(), "{bv}");
+
+        let user = PresetItem {
+            id: "u1".into(),
+            title: "mine".into(),
+            default_role: "coder".into(),
+            name: Some("mine".into()),
+            title_hint: Some("hint".into()),
+            prompt: Some("do it".into()),
+        };
+        let uv = serde_json::to_value(&user).unwrap();
+        assert_eq!(uv["title"], "mine");
+        assert_eq!(uv["name"], "mine");
+        assert_eq!(uv["titleHint"], "hint");
+        assert_eq!(uv["prompt"], "do it");
+        assert!(uv.get("title_hint").is_none());
     }
 }

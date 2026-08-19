@@ -8,10 +8,11 @@ use std::time::Duration;
 use rt_protocol::{
     AccountListOk, AgentSteerOk, AgentSwitchParams, ApprovalDecision, ApprovalRespondOk,
     ApprovalRespondParams, CancelOk, HarnessCaps as HarnessCapsWire, PolicyGetParams, PolicyMode,
-    PolicyScope, PolicySetParams, PolicySource, PolicyView, PrefsGetOk, PrefsItem, PresetListOk,
-    Profile, ProfileCreateParams, ProfileDeleteParams, ProfileGetParams, ProfileListOk,
-    ProfileUpdateParams, ProviderAccount, SearchItem, SearchKind, SearchQueryOk, SearchQueryParams,
-    SettingsGuide, StashDeleteOk, StashItem, StashListOk, WorkspaceGuidesOk,
+    PolicyScope, PolicySetParams, PolicySource, PolicyView, PrefsGetOk, PrefsItem,
+    PresetCreateParams, PresetDeleteOk, PresetItem, PresetListOk, PresetUpdateParams, Profile,
+    ProfileCreateParams, ProfileDeleteParams, ProfileGetParams, ProfileListOk, ProfileUpdateParams,
+    ProviderAccount, SearchItem, SearchKind, SearchQueryOk, SearchQueryParams, SettingsGuide,
+    StashDeleteOk, StashItem, StashListOk, WorkspaceGuidesOk,
 };
 use rt_runtime::{AgentBackend, TurnRequest, WireMessage, WireRole};
 use rt_storage::{
@@ -40,6 +41,27 @@ fn stash_item_from_row(row: rt_storage::PromptStash) -> StashItem {
         image_path: row.image_path,
         created_at: row.created_at,
     }
+}
+
+fn preset_item_from_user(row: rt_storage::UserPreset) -> PresetItem {
+    PresetItem {
+        id: row.id,
+        title: row.name.clone(),
+        default_role: row.default_role,
+        name: Some(row.name),
+        title_hint: row.title_hint,
+        prompt: row.prompt,
+    }
+}
+
+fn is_builtin_preset_id(id: &str) -> bool {
+    guides::PRESETS.iter().any(|p| p.id == id)
+}
+
+fn builtin_preset_conflict(name: &str) -> bool {
+    guides::PRESETS
+        .iter()
+        .any(|p| p.id == name || p.title == name)
 }
 
 #[derive(Clone)]
@@ -868,10 +890,65 @@ rusttraycer_tasks{{status="archived"}} {archived}
         guides::settings_guide_set(&self.data_dir, content)
     }
 
-    pub fn preset_list(&self) -> PresetListOk {
-        PresetListOk {
-            items: guides::preset_items(),
+    pub fn preset_list(&self) -> Result<PresetListOk> {
+        let mut items = guides::preset_items();
+        for row in self.store.user_preset_list()? {
+            items.push(preset_item_from_user(row));
         }
+        Ok(PresetListOk { items })
+    }
+
+    pub fn preset_create(&self, params: &PresetCreateParams) -> Result<PresetItem> {
+        if builtin_preset_conflict(&params.name) {
+            return Err(HostError::InvalidParams(
+                "name must not match a built-in preset id or title".into(),
+            ));
+        }
+        let role = guides::parse_role(&params.default_role)?;
+        let row = self.store.user_preset_create(
+            &params.name,
+            role,
+            params.title_hint.as_deref(),
+            params.prompt.as_deref(),
+        )?;
+        Ok(preset_item_from_user(row))
+    }
+
+    pub fn preset_update(&self, params: &PresetUpdateParams) -> Result<PresetItem> {
+        if is_builtin_preset_id(&params.id) {
+            return Err(HostError::InvalidParams(
+                "cannot update a built-in preset".into(),
+            ));
+        }
+        if let Some(name) = params.name.as_deref() {
+            if builtin_preset_conflict(name) {
+                return Err(HostError::InvalidParams(
+                    "name must not match a built-in preset id or title".into(),
+                ));
+            }
+        }
+        let role = match params.default_role.as_deref() {
+            Some(r) => Some(guides::parse_role(r)?),
+            None => None,
+        };
+        let row = self.store.user_preset_update(
+            &params.id,
+            params.name.as_deref(),
+            role,
+            params.title_hint.as_deref(),
+            params.prompt.as_deref(),
+        )?;
+        Ok(preset_item_from_user(row))
+    }
+
+    pub fn preset_delete(&self, id: &str) -> Result<PresetDeleteOk> {
+        if is_builtin_preset_id(id) {
+            return Err(HostError::InvalidParams(
+                "cannot delete a built-in preset".into(),
+            ));
+        }
+        self.store.user_preset_delete(id)?;
+        Ok(PresetDeleteOk { deleted: true })
     }
 
     pub fn search_query(&self, params: &SearchQueryParams) -> Result<SearchQueryOk> {
