@@ -122,6 +122,6 @@ Sources (live, 2026-08-19):
 | Ф4 | E5 then E6 | C38–C47 (C42 PDF later; C43–C47 must e6-a2a-v2) |
 | Ф5 | E7 + E8 | C48–C50, C52, C54–C56 (C51, C53 later, e7-model-ux-v2) |
 | Ф6 | E9 + E10 | C57, C59–C62 (C58 later, e9-sync-v2) |
-| Ф7 | harden / release | DoD e2e in directive §5 |
+| Ф7 | harden / release | [f7-release-v2](f7-release-v2.md); must shipped/oos; later не блокер тега |
 
 DoD v2.0.0: every row `shipped` or `out-of-scope-by-ADR`. No `partial`/`missing` left.
