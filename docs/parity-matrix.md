@@ -76,7 +76,7 @@ Sources (live, 2026-08-19):
 | C61 | Linux AppImage + .deb | install.md; ADR-0006 | missing | E10 | Ф6 | — |
 | C62 | macOS aarch64 | install.md; ADR-0006 | missing | E10 | Ф6 | — |
 | C63 | Resource monitor / notification hooks / prompt stash / drag-to-tile | changelog; 1.1.10 notes | missing | E1 | Ф1 | — |
-| C64 | Epic PR View (checks, commits, files, local diffs) | 1.1.10 #870 | missing | E3 | Ф2 | 9 |
+| C64 | Epic PR View (checks, commits, files, local diffs) | 1.1.10 #870; [e3-write-v2](e3-write-v2.md) | missing | E3 | later | 9 |
 | C65 | Worktree cleanup / PR context / branch prefix | changelog | partial | E1 | Ф1 | 5 |
 | C66 | Named extra harnesses (Grok, Amp, Hermes, Oh My Pi, …) as **required** ports | coding-agents.md; changelog; ADR-0007 | out-of-scope-by-ADR | — | — | 8 |
 | C67 | Own inference engine | brief №8; ADR-0007 | out-of-scope-by-ADR | — | — | 8 |
@@ -109,15 +109,15 @@ Sources (live, 2026-08-19):
 | 12 | No CRDT unless live collab | **ADR-0003** (never in v2). |
 | 13 | Terminal resume via session id | **needs test in E4** (C35, C36). |
 | 14 | AGENTS.md + selection guide | **needs test in E8**; shape **ADR-0004**. |
-| 15 | Permission ladder every edit/exec turn | **needs test in E2** (C23–C26). |
+| 15 | Permission ladder every edit/exec turn | **needs test in E2** (C23–C25). C26 oos. |
 | 16 | We say Task, not epic | **ADR-0004**; no Epic Mode. |
 
 ## Roadmap (for Chief)
 
 | Wave | Epic | First missing rows |
 |---|---|---|
-| Ф1 | E1 + E2 foundation | C18–C26, C63, C65 |
-| Ф2 | E3 | C27–C31, C64 |
+| Ф1 | E1 + E2 foundation | C18–C25, C63, C65 |
+| Ф2 | E3 | C27–C31 (C64 later, e3-write-v2) |
 | Ф3 | E4 | C32–C37 |
 | Ф4 | E5 then E6 | C38–C47 |
 | Ф5 | E7 + E8 | C48–C56 |
