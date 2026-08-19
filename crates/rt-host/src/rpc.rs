@@ -682,6 +682,16 @@ async fn dispatch_method(
                 svc.agent_update(&p.agent_id, &p.role)?,
             )?)
         }
+        "sync.export" => {
+            let p: rt_protocol::SyncExportParams = serde_json::from_value(params)
+                .map_err(|e| HostError::InvalidParams(e.to_string()))?;
+            Ok(serde_json::to_value(svc.sync_export(&p.task_ids)?)?)
+        }
+        "sync.import" => {
+            let p: rt_protocol::SyncImportParams = serde_json::from_value(params)
+                .map_err(|e| HostError::InvalidParams(e.to_string()))?;
+            Ok(serde_json::to_value(svc.sync_import(p)?)?)
+        }
         other => Err(HostError::UnsupportedMethod(other.to_string())),
     };
     match &result {

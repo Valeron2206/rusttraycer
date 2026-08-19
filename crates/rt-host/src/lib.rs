@@ -9,6 +9,7 @@ pub mod pty;
 pub mod rpc;
 pub mod service;
 pub mod supervisor;
+pub mod sync;
 pub mod worktree;
 
 use std::collections::HashMap;
@@ -70,6 +71,8 @@ pub enum HostError {
     NoInbox,
     #[error("loop exhausted")]
     LoopExhausted,
+    #[error("conflict: {0}")]
+    Conflict(String),
     #[error("{0}")]
     Internal(String),
     #[error("already running (pid {pid})")]
@@ -103,6 +106,7 @@ impl HostError {
             Self::CrossHost => "cross_host",
             Self::NoInbox => "no_inbox",
             Self::LoopExhausted => "loop_exhausted",
+            Self::Conflict(_) => "conflict",
             Self::Internal(_) | Self::Io(_) | Self::Json(_) => "internal",
             Self::AlreadyRunning { .. } => "already_running",
         }
@@ -122,6 +126,7 @@ impl From<rt_storage::StorageError> for HostError {
             rt_storage::StorageError::NotFound => Self::NotFound("not found".into()),
             rt_storage::StorageError::WorkspacePathInvalid(s) => Self::WorkspacePathInvalid(s),
             rt_storage::StorageError::InvalidParams(s) => Self::InvalidParams(s),
+            rt_storage::StorageError::Conflict(s) => Self::Conflict(s),
             rt_storage::StorageError::UnsupportedSchema(s) => {
                 Self::Internal(format!("unsupported schema: {s}"))
             }
@@ -471,6 +476,7 @@ mod tests {
         assert_eq!(HostError::GitAuth("x".into()).code(), "git_auth");
         assert_eq!(HostError::GitConflict("x".into()).code(), "git_conflict");
         assert_eq!(HostError::PatchFailed("x".into()).code(), "patch_failed");
+        assert_eq!(HostError::Conflict("x".into()).code(), "conflict");
         assert_eq!(HostError::NotPty.code(), "not_pty");
         assert_eq!(HostError::PtyDead.code(), "pty_dead");
         assert_eq!(HostError::Internal("x".into()).code(), "internal");
@@ -502,6 +508,10 @@ mod tests {
         assert_eq!(
             HostError::from(rt_storage::StorageError::InvalidParams("p".into())).code(),
             "invalid_params"
+        );
+        assert_eq!(
+            HostError::from(rt_storage::StorageError::Conflict("c".into())).code(),
+            "conflict"
         );
         assert_eq!(
             HostError::from(rt_storage::StorageError::UnsupportedSchema("9".into())).code(),

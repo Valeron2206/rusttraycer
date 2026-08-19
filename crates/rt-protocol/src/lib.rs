@@ -37,6 +37,7 @@ pub mod error_codes {
     pub const CROSS_HOST: &str = "cross_host";
     pub const NO_INBOX: &str = "no_inbox";
     pub const LOOP_EXHAUSTED: &str = "loop_exhausted";
+    pub const CONFLICT: &str = "conflict";
 }
 
 pub const METHOD_HANDSHAKE: &str = "handshake";
@@ -107,6 +108,12 @@ pub const METHOD_SETTINGS_GUIDE_GET: &str = "settings.guide.get";
 pub const METHOD_SETTINGS_GUIDE_SET: &str = "settings.guide.set";
 pub const METHOD_PRESET_LIST: &str = "preset.list";
 pub const METHOD_AGENT_UPDATE: &str = "agent.update";
+pub const METHOD_SYNC_EXPORT: &str = "sync.export";
+pub const METHOD_SYNC_IMPORT: &str = "sync.import";
+
+pub const EXPORT_KIND: &str = "rusttraycer.export";
+pub const EXPORT_VERSION: u32 = 1;
+pub const MAX_EXPORT_TASKS: usize = 32;
 
 /// Tradable methods (handshake itself is not included).
 pub const TRADABLE_METHODS: &[&str] = &[
@@ -177,6 +184,8 @@ pub const TRADABLE_METHODS: &[&str] = &[
     METHOD_SETTINGS_GUIDE_SET,
     METHOD_PRESET_LIST,
     METHOD_AGENT_UPDATE,
+    METHOD_SYNC_EXPORT,
+    METHOD_SYNC_IMPORT,
 ];
 
 pub fn host_method_version() -> MethodVersion {
@@ -190,9 +199,9 @@ pub fn host_method_version() -> MethodVersion {
 /// mutate methods are 1.2; shell/pty methods are 1.3; artifact/comment/
 /// `agent.clear_transcript` methods are 1.4; `agent.create` and A2A/loop
 /// methods are 1.5; model-ux methods (`agent.switch`, `profile.*`, `prefs.get`)
-/// are 1.6; workspace/guides/preset/`agent.update` methods are 1.7; all other
-/// tradable methods stay 1.0 (`HOST_METHOD_MINOR` is not bumped). Unknown
-/// names return `None`.
+/// are 1.6; workspace/guides/preset/`agent.update` methods are 1.7;
+/// `sync.export`/`sync.import` are 1.8; all other tradable methods stay 1.0
+/// (`HOST_METHOD_MINOR` is not bumped). Unknown names return `None`.
 pub fn method_version(name: &str) -> Option<MethodVersion> {
     if !TRADABLE_METHODS.iter().any(|m| *m == name) {
         return None;
@@ -237,6 +246,7 @@ pub fn method_version(name: &str) -> Option<MethodVersion> {
         | METHOD_SETTINGS_GUIDE_SET
         | METHOD_PRESET_LIST
         | METHOD_AGENT_UPDATE => Some(MethodVersion { major: 1, minor: 7 }),
+        METHOD_SYNC_EXPORT | METHOD_SYNC_IMPORT => Some(MethodVersion { major: 1, minor: 8 }),
         _ => Some(host_method_version()),
     }
 }
@@ -994,6 +1004,107 @@ pub struct AgentUpdateParams {
     pub role: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportTask {
+    pub id: String,
+    pub title: String,
+    pub status: String,
+    pub created_at: String,
+    pub updated_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportAgent {
+    pub id: String,
+    pub task_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+    pub interface: String,
+    pub provider: String,
+    pub status: String,
+    pub run_location: String,
+    pub created_at: String,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub effort: Option<String>,
+    #[serde(default)]
+    pub fast: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportCommentThread {
+    pub id: String,
+    pub artifact_id: String,
+    pub anchor_start: i64,
+    pub anchor_end: i64,
+    pub resolved: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportComment {
+    pub id: String,
+    pub thread_id: String,
+    pub body: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportArchive {
+    pub kind: String,
+    pub export_version: u32,
+    pub source_host_id: String,
+    pub exported_at: String,
+    pub tasks: Vec<ExportTask>,
+    pub agents: Vec<ExportAgent>,
+    pub messages: Vec<Message>,
+    pub artifacts: Vec<Artifact>,
+    pub comment_threads: Vec<ExportCommentThread>,
+    pub comments: Vec<ExportComment>,
+    pub model_profiles: Vec<Profile>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncExportParams {
+    pub task_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncExportOk {
+    pub archive: ExportArchive,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncImportParams {
+    pub workspace_id: String,
+    pub archive: ExportArchive,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncImportOk {
+    pub tasks: u32,
+    pub agents: u32,
+    pub messages: u32,
+    pub artifacts: u32,
+    pub profiles_imported: u32,
+    pub profiles_skipped: u32,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1128,7 +1239,8 @@ mod tests {
         assert_eq!(error_codes::CROSS_HOST, "cross_host");
         assert_eq!(error_codes::NO_INBOX, "no_inbox");
         assert_eq!(error_codes::LOOP_EXHAUSTED, "loop_exhausted");
-        assert_eq!(TRADABLE_METHODS.len(), 67);
+        assert_eq!(error_codes::CONFLICT, "conflict");
+        assert_eq!(TRADABLE_METHODS.len(), 69);
         assert!(TRADABLE_METHODS.contains(&METHOD_POLICY_GET));
         assert!(TRADABLE_METHODS.contains(&METHOD_POLICY_SET));
         assert!(TRADABLE_METHODS.contains(&METHOD_APPROVAL_RESPOND));
@@ -1882,7 +1994,7 @@ mod tests {
         );
         assert!(TRADABLE_METHODS.contains(&METHOD_AGENT_SWITCH));
         assert!(TRADABLE_METHODS.contains(&METHOD_PREFS_GET));
-        assert_eq!(TRADABLE_METHODS.len(), 67);
+        assert_eq!(TRADABLE_METHODS.len(), 69);
 
         let sw: AgentSwitchParams = serde_json::from_str(
             r#"{"agentId":"a1","provider":"cli.codex","model":"o3","effort":"high","fast":false}"#,
@@ -1989,7 +2101,7 @@ mod tests {
             method_version(METHOD_HOST_PING),
             Some(MethodVersion { major: 1, minor: 0 })
         );
-        assert_eq!(TRADABLE_METHODS.len(), 67);
+        assert_eq!(TRADABLE_METHODS.len(), 69);
         assert!(TRADABLE_METHODS.contains(&METHOD_WORKSPACE_GUIDES_GET));
         assert!(TRADABLE_METHODS.contains(&METHOD_AGENT_UPDATE));
         assert!(!TRADABLE_METHODS
@@ -2091,5 +2203,155 @@ mod tests {
         let v = serde_json::to_value(&agent).unwrap();
         assert_eq!(v["role"], "planner");
         assert_eq!(v["taskId"], "t1");
+    }
+
+    #[test]
+    fn e9_sync_types_and_versions_camel_case() {
+        assert_eq!(
+            method_version(METHOD_SYNC_EXPORT),
+            Some(MethodVersion { major: 1, minor: 8 })
+        );
+        assert_eq!(
+            method_version(METHOD_SYNC_IMPORT),
+            Some(MethodVersion { major: 1, minor: 8 })
+        );
+        assert_eq!(
+            method_version(METHOD_WORKSPACE_GUIDES_GET),
+            Some(MethodVersion { major: 1, minor: 7 })
+        );
+        assert_eq!(
+            method_version(METHOD_AGENT_SWITCH),
+            Some(MethodVersion { major: 1, minor: 6 })
+        );
+        assert_eq!(
+            method_version(METHOD_AGENT_CREATE),
+            Some(MethodVersion { major: 1, minor: 5 })
+        );
+        assert_eq!(
+            method_version(METHOD_HOST_PING),
+            Some(MethodVersion { major: 1, minor: 0 })
+        );
+        assert_eq!(host_method_version(), MethodVersion { major: 1, minor: 0 });
+        assert_eq!(TRADABLE_METHODS.len(), 69);
+        assert!(TRADABLE_METHODS.contains(&METHOD_SYNC_EXPORT));
+        assert!(TRADABLE_METHODS.contains(&METHOD_SYNC_IMPORT));
+        assert_eq!(EXPORT_KIND, "rusttraycer.export");
+        assert_eq!(EXPORT_VERSION, 1);
+        assert_eq!(MAX_EXPORT_TASKS, 32);
+        assert_eq!(error_codes::CONFLICT, "conflict");
+
+        let archive = ExportArchive {
+            kind: EXPORT_KIND.into(),
+            export_version: EXPORT_VERSION,
+            source_host_id: "h1".into(),
+            exported_at: "2026-08-19T12:00:00Z".into(),
+            tasks: vec![ExportTask {
+                id: "t1".into(),
+                title: "T".into(),
+                status: "open".into(),
+                created_at: "c".into(),
+                updated_at: "u".into(),
+                preset: Some("planning".into()),
+            }],
+            agents: vec![ExportAgent {
+                id: "a1".into(),
+                task_id: "t1".into(),
+                parent_id: None,
+                interface: "chat".into(),
+                provider: "cli.generic".into(),
+                status: "idle".into(),
+                run_location: "local".into(),
+                created_at: "c".into(),
+                model: Some("gpt".into()),
+                effort: Some("low".into()),
+                fast: true,
+                role: Some("coder".into()),
+            }],
+            messages: vec![],
+            artifacts: vec![],
+            comment_threads: vec![],
+            comments: vec![],
+            model_profiles: vec![],
+        };
+        let v = serde_json::to_value(&archive).unwrap();
+        assert_eq!(v["kind"], "rusttraycer.export");
+        assert_eq!(v["exportVersion"], 1);
+        assert_eq!(v["sourceHostId"], "h1");
+        assert_eq!(v["exportedAt"], "2026-08-19T12:00:00Z");
+        assert_eq!(v["tasks"][0]["preset"], "planning");
+        assert_eq!(v["agents"][0]["taskId"], "t1");
+        assert_eq!(v["agents"][0]["runLocation"], "local");
+        assert_eq!(v["modelProfiles"].as_array().unwrap().len(), 0);
+        assert!(v.get("export_version").is_none());
+        assert!(v.get("source_host_id").is_none());
+        assert!(v["agents"][0].get("hostId").is_none());
+        assert!(v["agents"][0].get("providerSessionId").is_none());
+        assert!(v["tasks"][0].get("workspaceIds").is_none());
+        assert!(v.get("host").is_none());
+        assert!(v.get("workspaces").is_none());
+        assert!(v.get("worktrees").is_none());
+
+        let exp: SyncExportParams = serde_json::from_str(r#"{"taskIds":["t1","t2"]}"#).unwrap();
+        assert_eq!(exp.task_ids, vec!["t1", "t2"]);
+        let ev = serde_json::to_value(&exp).unwrap();
+        assert_eq!(ev["taskIds"][0], "t1");
+        assert!(ev.get("task_ids").is_none());
+
+        let ok = SyncExportOk {
+            archive: archive.clone(),
+        };
+        let v = serde_json::to_value(&ok).unwrap();
+        assert_eq!(v["archive"]["kind"], "rusttraycer.export");
+
+        let imp: SyncImportParams = serde_json::from_value(serde_json::json!({
+            "workspaceId": "w1",
+            "archive": archive
+        }))
+        .unwrap();
+        assert_eq!(imp.workspace_id, "w1");
+        let iv = serde_json::to_value(&imp).unwrap();
+        assert_eq!(iv["workspaceId"], "w1");
+        assert!(iv.get("workspace_id").is_none());
+
+        let counts = SyncImportOk {
+            tasks: 1,
+            agents: 2,
+            messages: 10,
+            artifacts: 1,
+            profiles_imported: 0,
+            profiles_skipped: 1,
+        };
+        let v = serde_json::to_value(&counts).unwrap();
+        assert_eq!(v["tasks"], 1);
+        assert_eq!(v["agents"], 2);
+        assert_eq!(v["messages"], 10);
+        assert_eq!(v["artifacts"], 1);
+        assert_eq!(v["profilesImported"], 0);
+        assert_eq!(v["profilesSkipped"], 1);
+        assert!(v.get("profiles_imported").is_none());
+
+        let thread = ExportCommentThread {
+            id: "th1".into(),
+            artifact_id: "art1".into(),
+            anchor_start: 0,
+            anchor_end: 5,
+            resolved: false,
+            created_at: "c".into(),
+            updated_at: "u".into(),
+        };
+        let v = serde_json::to_value(&thread).unwrap();
+        assert_eq!(v["artifactId"], "art1");
+        assert_eq!(v["anchorStart"], 0);
+        assert!(v.get("comments").is_none());
+
+        let c = ExportComment {
+            id: "c1".into(),
+            thread_id: "th1".into(),
+            body: "nit".into(),
+            created_at: "c".into(),
+        };
+        let v = serde_json::to_value(&c).unwrap();
+        assert_eq!(v["threadId"], "th1");
+        assert!(v.get("thread_id").is_none());
     }
 }
