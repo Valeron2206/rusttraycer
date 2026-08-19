@@ -1,4 +1,4 @@
-//! Per-method {major,minor} negotiation. Existing methods stay 1.0; policy.* is 1.1; write/git mutate is 1.2; shell/pty are 1.3; artifacts/comments/clear_transcript are 1.4; a2a/loop are 1.5; agent.switch/profile.*/prefs.get are 1.6; workspace.guides/settings.guide/preset.list/agent.update are 1.7; sync.export/import are 1.8; artifact.export/search.query/worktree.gc/agent.create/shell.create/account.list/account.create/agent.steer/pr.get/stash.list/stash.add/stash.delete are 1.9.
+//! Per-method {major,minor} negotiation. Existing methods stay 1.0; policy.* is 1.1; write/git mutate is 1.2; shell/pty are 1.3; artifacts/comments/clear_transcript are 1.4; a2a/loop are 1.5; agent.switch/profile.*/prefs.get are 1.6; workspace.guides/settings.guide/preset.list/agent.update are 1.7; sync.export/import are 1.8; artifact.export/search.query/worktree.gc/agent.create/shell.create/account.list/account.create/agent.steer/pr.get/stash.list/stash.add/stash.delete/sync.push/sync.pull/preset.create/preset.update/preset.delete are 1.9.
 
 use std::collections::BTreeMap;
 
@@ -621,5 +621,39 @@ mod tests {
         assert!(!acc.contains_key("stash.list"));
         assert!(!acc.contains_key("stash.add"));
         assert!(!acc.contains_key("stash.delete"));
+    }
+
+    #[test]
+    fn sync_push_pull_and_preset_crud_accepted_at_1_9_absent_on_1_8_client() {
+        let mut client = BTreeMap::new();
+        client.insert("sync.push".into(), MethodVersion { major: 1, minor: 9 });
+        client.insert("sync.pull".into(), MethodVersion { major: 1, minor: 9 });
+        client.insert("preset.create".into(), MethodVersion { major: 1, minor: 9 });
+        client.insert("preset.update".into(), MethodVersion { major: 1, minor: 9 });
+        client.insert("preset.delete".into(), MethodVersion { major: 1, minor: 9 });
+        client.insert("sync.export".into(), MethodVersion { major: 1, minor: 8 });
+        client.insert("sync.import".into(), MethodVersion { major: 1, minor: 8 });
+        let (acc, rej) = negotiate(&client);
+        assert!(rej.is_empty(), "{rej:?}");
+        assert_eq!(acc["sync.push"], MethodVersion { major: 1, minor: 9 });
+        assert_eq!(acc["sync.pull"], MethodVersion { major: 1, minor: 9 });
+        assert_eq!(acc["preset.create"], MethodVersion { major: 1, minor: 9 });
+        assert_eq!(acc["preset.update"], MethodVersion { major: 1, minor: 9 });
+        assert_eq!(acc["preset.delete"], MethodVersion { major: 1, minor: 9 });
+        assert_eq!(acc["sync.export"], MethodVersion { major: 1, minor: 8 });
+        assert_eq!(acc["sync.import"], MethodVersion { major: 1, minor: 8 });
+
+        let mut older = BTreeMap::new();
+        older.insert("sync.export".into(), MethodVersion { major: 1, minor: 8 });
+        older.insert("sync.import".into(), MethodVersion { major: 1, minor: 8 });
+        let (acc, rej) = negotiate(&older);
+        assert!(rej.is_empty(), "{rej:?}");
+        assert!(acc.contains_key("sync.export"));
+        assert!(acc.contains_key("sync.import"));
+        assert!(!acc.contains_key("sync.push"));
+        assert!(!acc.contains_key("sync.pull"));
+        assert!(!acc.contains_key("preset.create"));
+        assert!(!acc.contains_key("preset.update"));
+        assert!(!acc.contains_key("preset.delete"));
     }
 }

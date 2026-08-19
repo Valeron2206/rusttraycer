@@ -69,6 +69,9 @@ pub fn preset_items() -> Vec<PresetItem> {
             id: p.id.to_string(),
             title: p.title.to_string(),
             default_role: p.default_role.to_string(),
+            name: None,
+            title_hint: None,
+            prompt: None,
         })
         .collect()
 }

@@ -277,6 +277,22 @@ pub struct PromptStash {
 
 pub const STASH_IMAGE_PATH_PREFIX: &str = "rt-image-path:";
 pub const MAX_STASH_BODY_BYTES: usize = 65536;
+pub const MAX_PRESET_NAME_CHARS: usize = 200;
+
+/// User-defined task preset. Built-ins live in the host guides module, not here.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserPreset {
+    pub id: String,
+    pub name: String,
+    pub default_role: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title_hint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
 
 pub fn encode_stash_body(body: &str, image_path: Option<&str>) -> String {
     match image_path {
@@ -1397,6 +1413,161 @@ impl Store {
         let n = {
             let conn = self.lock()?;
             conn.execute("DELETE FROM prompt_stash WHERE id = ?1", [id])?
+        };
+        if n == 0 {
+            return Err(StorageError::NotFound);
+        }
+        Ok(())
+    }
+
+    pub fn user_preset_create(
+        &self,
+        name: &str,
+        default_role: &str,
+        title_hint: Option<&str>,
+        prompt: Option<&str>,
+    ) -> Result<UserPreset> {
+        validate_preset_name(name)?;
+        if default_role.is_empty() {
+            return Err(StorageError::InvalidParams(
+                "default_role is required".into(),
+            ));
+        }
+        let id = new_id();
+        let now = now_rfc3339();
+        let title_hint = empty_to_none(title_hint);
+        let prompt = empty_to_none(prompt);
+        {
+            let conn = self.lock()?;
+            match conn.execute(
+                "INSERT INTO user_presets                  (id, name, default_role, title_hint, prompt, created_at, updated_at)                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+                params![id, name, default_role, title_hint, prompt, now],
+            ) {
+                Ok(_) => {}
+                Err(e) if unique_violation(&e) => {
+                    return Err(StorageError::InvalidParams(
+                        "preset name already exists".into(),
+                    ));
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Ok(UserPreset {
+            id,
+            name: name.to_string(),
+            default_role: default_role.to_string(),
+            title_hint: title_hint.map(str::to_string),
+            prompt: prompt.map(str::to_string),
+            created_at: now.clone(),
+            updated_at: now,
+        })
+    }
+
+    pub fn user_preset_get(&self, id: &str) -> Result<Option<UserPreset>> {
+        if id.is_empty() {
+            return Err(StorageError::InvalidParams("id is required".into()));
+        }
+        let conn = self.lock()?;
+        conn.query_row(
+            "SELECT id, name, default_role, title_hint, prompt, created_at, updated_at              FROM user_presets WHERE id = ?1",
+            [id],
+            map_user_preset_row,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    pub fn user_preset_list(&self) -> Result<Vec<UserPreset>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, name, default_role, title_hint, prompt, created_at, updated_at              FROM user_presets ORDER BY created_at ASC, id ASC",
+        )?;
+        let rows = stmt.query_map([], map_user_preset_row)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    pub fn user_preset_update(
+        &self,
+        id: &str,
+        name: Option<&str>,
+        default_role: Option<&str>,
+        title_hint: Option<&str>,
+        prompt: Option<&str>,
+    ) -> Result<UserPreset> {
+        if id.is_empty() {
+            return Err(StorageError::InvalidParams("id is required".into()));
+        }
+        let current = self.user_preset_get(id)?.ok_or(StorageError::NotFound)?;
+        let name = match name {
+            Some(n) => {
+                validate_preset_name(n)?;
+                n.to_string()
+            }
+            None => current.name,
+        };
+        let default_role = match default_role {
+            Some("") => {
+                return Err(StorageError::InvalidParams(
+                    "default_role is required".into(),
+                ));
+            }
+            Some(r) => r.to_string(),
+            None => current.default_role,
+        };
+        let title_hint = match title_hint {
+            Some(s) => empty_to_none(Some(s)).map(str::to_string),
+            None => current.title_hint,
+        };
+        let prompt = match prompt {
+            Some(s) => empty_to_none(Some(s)).map(str::to_string),
+            None => current.prompt,
+        };
+        let updated_at = now_rfc3339();
+        {
+            let conn = self.lock()?;
+            match conn.execute(
+                "UPDATE user_presets SET name = ?1, default_role = ?2, title_hint = ?3,                  prompt = ?4, updated_at = ?5 WHERE id = ?6",
+                params![
+                    name,
+                    default_role,
+                    title_hint,
+                    prompt,
+                    updated_at,
+                    id
+                ],
+            ) {
+                Ok(0) => return Err(StorageError::NotFound),
+                Ok(_) => {}
+                Err(e) if unique_violation(&e) => {
+                    return Err(StorageError::InvalidParams(
+                        "preset name already exists".into(),
+                    ));
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Ok(UserPreset {
+            id: id.to_string(),
+            name,
+            default_role,
+            title_hint,
+            prompt,
+            created_at: current.created_at,
+            updated_at,
+        })
+    }
+
+    pub fn user_preset_delete(&self, id: &str) -> Result<()> {
+        if id.is_empty() {
+            return Err(StorageError::InvalidParams("id is required".into()));
+        }
+        let n = {
+            let conn = self.lock()?;
+            conn.execute("DELETE FROM user_presets WHERE id = ?1", [id])?
         };
         if n == 0 {
             return Err(StorageError::NotFound);
@@ -3106,6 +3277,32 @@ fn map_stash_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<PromptStash> {
         body,
         image_path,
         created_at: r.get(2)?,
+    })
+}
+
+fn validate_preset_name(name: &str) -> Result<()> {
+    let n = name.chars().count();
+    if !(1..=MAX_PRESET_NAME_CHARS).contains(&n) {
+        return Err(StorageError::InvalidParams(format!(
+            "preset name must be 1..={MAX_PRESET_NAME_CHARS} characters"
+        )));
+    }
+    Ok(())
+}
+
+fn empty_to_none(s: Option<&str>) -> Option<&str> {
+    s.and_then(|v| if v.is_empty() { None } else { Some(v) })
+}
+
+fn map_user_preset_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<UserPreset> {
+    Ok(UserPreset {
+        id: r.get(0)?,
+        name: r.get(1)?,
+        default_role: r.get(2)?,
+        title_hint: r.get(3)?,
+        prompt: r.get(4)?,
+        created_at: r.get(5)?,
+        updated_at: r.get(6)?,
     })
 }
 
@@ -5110,5 +5307,89 @@ mod tests {
         assert!(store.stash_list().unwrap().is_empty());
         let missing = store.stash_delete("no-such").unwrap_err();
         assert_eq!(missing.code(), "not_found");
+    }
+
+    #[test]
+    fn user_preset_crud_unique_name_and_no_secret_columns() {
+        let dir = tempdir().unwrap();
+        let db = dir.path().join("host.db");
+        let id = {
+            let store = Store::open(&db).unwrap();
+            let empty = store
+                .user_preset_create("", "coder", None, None)
+                .unwrap_err();
+            assert_eq!(empty.code(), "invalid_params");
+            let long = "x".repeat(201);
+            let too_long = store
+                .user_preset_create(&long, "coder", None, None)
+                .unwrap_err();
+            assert_eq!(too_long.code(), "invalid_params");
+            let a = store
+                .user_preset_create("mine", "coder", Some("hint"), Some("do it"))
+                .unwrap();
+            assert_eq!(a.name, "mine");
+            assert_eq!(a.default_role, "coder");
+            assert_eq!(a.title_hint.as_deref(), Some("hint"));
+            assert_eq!(a.prompt.as_deref(), Some("do it"));
+            let listed = store.user_preset_list().unwrap();
+            assert_eq!(listed.len(), 1);
+            assert_eq!(listed[0].id, a.id);
+            let dup = store
+                .user_preset_create("mine", "planner", None, None)
+                .unwrap_err();
+            assert_eq!(dup.code(), "invalid_params");
+            let updated = store
+                .user_preset_update(&a.id, Some("renamed"), Some("planner"), None, None)
+                .unwrap();
+            assert_eq!(updated.name, "renamed");
+            assert_eq!(updated.default_role, "planner");
+            assert_eq!(updated.title_hint.as_deref(), Some("hint"));
+            let got = store.user_preset_get(&a.id).unwrap().unwrap();
+            assert_eq!(got.name, "renamed");
+            store.user_preset_delete(&a.id).unwrap();
+            assert!(store.user_preset_list().unwrap().is_empty());
+            let missing = store.user_preset_delete(&a.id).unwrap_err();
+            assert_eq!(missing.code(), "not_found");
+            let missing_upd = store
+                .user_preset_update("no-such", Some("x"), None, None, None)
+                .unwrap_err();
+            assert_eq!(missing_upd.code(), "not_found");
+            a.id
+        };
+        let store = Store::open(&db).unwrap();
+        assert!(store.user_preset_get(&id).unwrap().is_none());
+        let again = store
+            .user_preset_create("survives", "reviewer", None, None)
+            .unwrap();
+        drop(store);
+        let store = Store::open(&db).unwrap();
+        let got = store.user_preset_get(&again.id).unwrap().unwrap();
+        assert_eq!(got.name, "survives");
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        let mut info = conn.prepare("PRAGMA table_info('user_presets')").unwrap();
+        let cols: Vec<String> = info
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(
+            cols,
+            [
+                "id",
+                "name",
+                "default_role",
+                "title_hint",
+                "prompt",
+                "created_at",
+                "updated_at"
+            ]
+        );
+        for c in &cols {
+            let low = c.to_ascii_lowercase();
+            assert!(
+                low != "token" && low != "pat" && !low.contains("secret"),
+                "secret-like column {c}"
+            );
+        }
     }
 }
