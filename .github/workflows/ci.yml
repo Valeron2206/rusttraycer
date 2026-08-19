@@ -74,6 +74,20 @@ jobs:
       - name: cargo audit
         run: cargo audit
 
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.85"
+
+      - name: Master e2e (host-API + CLI)
+        run: scripts/ci-e2e.sh
+
   macos:
     runs-on: macos-latest
     steps:
@@ -87,4 +101,3 @@ jobs:
 
       - name: build workspace (aarch64 host)
         run: cargo build --workspace
-
