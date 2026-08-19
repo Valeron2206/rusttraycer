@@ -296,8 +296,8 @@ fn assert_no_secret_columns(db: &Path) {
         )
         .unwrap();
     assert_eq!(
-        schema, "7",
-        "0007 is current; no secret tables, schema={schema}"
+        schema, "8",
+        "0008 is current; no secret tables, schema={schema}"
     );
     let mut stmt = conn
         .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")

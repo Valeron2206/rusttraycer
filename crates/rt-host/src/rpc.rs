@@ -151,7 +151,18 @@ async fn dispatch_method(
                 .get("workspaceId")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| HostError::InvalidParams("workspaceId is required".into()))?;
-            Ok(serde_json::to_value(svc.task_create(title, workspace_id)?)?)
+            let preset = match params.get("preset") {
+                None | Some(Value::Null) => None,
+                Some(Value::String(s)) => Some(s.as_str()),
+                Some(_) => {
+                    return Err(HostError::InvalidParams("preset must be a string".into()));
+                }
+            };
+            Ok(serde_json::to_value(svc.task_create_ex(
+                title,
+                workspace_id,
+                preset,
+            )?)?)
         }
         "task.get" => {
             let id = require_id(&params)?;
@@ -230,6 +241,13 @@ async fn dispatch_method(
                     return Err(HostError::InvalidParams("fast must be a boolean".into()));
                 }
             };
+            let role = match params.get("role") {
+                None | Some(Value::Null) => None,
+                Some(Value::String(s)) => Some(s.clone()),
+                Some(_) => {
+                    return Err(HostError::InvalidParams("role must be a string".into()));
+                }
+            };
             Ok(serde_json::to_value(svc.agent_create_ex(
                 crate::service::AgentCreateArgs {
                     task_id,
@@ -240,6 +258,7 @@ async fn dispatch_method(
                     model,
                     effort,
                     fast,
+                    role: role.as_deref(),
                 },
             )?)?)
         }
@@ -642,6 +661,27 @@ async fn dispatch_method(
             Ok(serde_json::json!({ "deleted": true }))
         }
         "prefs.get" => Ok(serde_json::to_value(svc.prefs_get()?)?),
+        "workspace.guides.get" => {
+            let p: rt_protocol::WorkspaceGuidesGetParams = serde_json::from_value(params)
+                .map_err(|e| HostError::InvalidParams(e.to_string()))?;
+            Ok(serde_json::to_value(
+                svc.workspace_guides_get(&p.workspace_id)?,
+            )?)
+        }
+        "settings.guide.get" => Ok(serde_json::to_value(svc.settings_guide_get())?),
+        "settings.guide.set" => {
+            let p: rt_protocol::SettingsGuideSetParams = serde_json::from_value(params)
+                .map_err(|e| HostError::InvalidParams(e.to_string()))?;
+            Ok(serde_json::to_value(svc.settings_guide_set(&p.content)?)?)
+        }
+        "preset.list" => Ok(serde_json::to_value(svc.preset_list())?),
+        "agent.update" => {
+            let p: rt_protocol::AgentUpdateParams = serde_json::from_value(params)
+                .map_err(|e| HostError::InvalidParams(e.to_string()))?;
+            Ok(serde_json::to_value(
+                svc.agent_update(&p.agent_id, &p.role)?,
+            )?)
+        }
         other => Err(HostError::UnsupportedMethod(other.to_string())),
     };
     match &result {

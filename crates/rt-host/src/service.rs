@@ -8,8 +8,9 @@ use std::time::Duration;
 use rt_protocol::{
     ApprovalDecision, ApprovalRespondOk, ApprovalRespondParams, CancelOk,
     HarnessCaps as HarnessCapsWire, PolicyGetParams, PolicyMode, PolicyScope, PolicySetParams,
-    PolicySource, PolicyView, PrefsGetOk, PrefsItem, Profile, ProfileCreateParams,
-    ProfileDeleteParams, ProfileGetParams, ProfileListOk, ProfileUpdateParams,
+    PolicySource, PolicyView, PrefsGetOk, PrefsItem, PresetListOk, Profile, ProfileCreateParams,
+    ProfileDeleteParams, ProfileGetParams, ProfileListOk, ProfileUpdateParams, SettingsGuide,
+    WorkspaceGuidesOk,
 };
 use rt_runtime::{AgentBackend, TurnRequest, WireMessage, WireRole};
 use rt_storage::{
@@ -20,6 +21,7 @@ use serde::Serialize;
 
 use crate::bind;
 use crate::files;
+use crate::guides;
 use crate::handshake::{self, HandshakeParams, HandshakeResult};
 use crate::mux::{Mux, MuxIoError, PtyKind};
 use crate::pty::{self, SpawnSpec};
@@ -145,6 +147,7 @@ pub struct AgentCreateArgs<'a> {
     pub model: Option<String>,
     pub effort: Option<String>,
     pub fast: Option<bool>,
+    pub role: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -165,6 +168,7 @@ pub struct AgentView {
     pub model: Option<String>,
     pub effort: Option<String>,
     pub fast: bool,
+    pub role: String,
 }
 
 impl From<Agent> for AgentView {
@@ -185,6 +189,7 @@ impl From<Agent> for AgentView {
             model: a.model,
             effort: a.effort,
             fast: a.fast,
+            role: a.role,
         }
     }
 }
@@ -444,11 +449,24 @@ impl HostService {
     }
 
     pub fn task_create(&self, title: &str, workspace_id: &str) -> Result<Task> {
+        self.task_create_ex(title, workspace_id, None)
+    }
+
+    pub fn task_create_ex(
+        &self,
+        title: &str,
+        workspace_id: &str,
+        preset: Option<&str>,
+    ) -> Result<Task> {
         check_title(title)?;
         if workspace_id.is_empty() {
             return Err(HostError::InvalidParams("workspaceId is required".into()));
         }
-        let task = self.store.task_create(title, workspace_id)?;
+        let preset = match preset {
+            None => None,
+            Some(p) => Some(guides::parse_preset(p)?.id),
+        };
+        let task = self.store.task_create_ex(title, workspace_id, preset)?;
         let _ = self.events.send(WsEvent::task_updated(&task.id));
         Ok(task)
     }
@@ -492,6 +510,7 @@ impl HostService {
             model: None,
             effort: None,
             fast: None,
+            role: None,
         })
     }
 
@@ -505,6 +524,7 @@ impl HostService {
             model,
             effort,
             fast,
+            role,
         } = args;
         let provider = provider.unwrap_or("cli.generic");
         reject_provider(provider)?;
@@ -525,9 +545,11 @@ impl HostService {
                 "launchArgs must have at most 32 strings".into(),
             ));
         }
-        if self.store.task_get(task_id)?.is_none() {
-            return Err(HostError::NotFound(format!("task {task_id}")));
-        }
+        let task = self
+            .store
+            .task_get(task_id)?
+            .ok_or_else(|| HostError::NotFound(format!("task {task_id}")))?;
+        let role = self.resolve_role(&task, role)?;
         if interface == "terminal" {
             let pty = self
                 .backends
@@ -539,7 +561,8 @@ impl HostService {
             }
         }
         // available=false does not block create
-        let spec = self.resolve_model_spec(provider, model, effort, fast)?;
+        let mut spec = self.resolve_model_spec(provider, model, effort, fast)?;
+        spec.role = role;
         let agent = self.store.agent_create_model(
             task_id,
             &self.host_id,
@@ -564,6 +587,54 @@ impl HostService {
         Ok(agent)
     }
 
+    fn resolve_role(&self, task: &Task, role: Option<&str>) -> Result<String> {
+        if let Some(r) = role {
+            return Ok(guides::parse_role(r)?.to_string());
+        }
+        if let Some(preset) = task.preset.as_deref() {
+            if let Ok(def) = guides::parse_preset(preset) {
+                return Ok(def.default_role.to_string());
+            }
+        }
+        Ok("coder".into())
+    }
+
+    pub fn agent_update(&self, agent_id: &str, role: &str) -> Result<AgentView> {
+        let role = guides::parse_role(role)?;
+        if self.store.agent_get(agent_id)?.is_none() {
+            return Err(HostError::NotFound(format!("agent {agent_id}")));
+        }
+        self.store.agent_set_role(agent_id, role)?;
+        self.agent_get(agent_id)
+    }
+
+    pub fn workspace_guides_get(&self, workspace_id: &str) -> Result<WorkspaceGuidesOk> {
+        let ws = self
+            .store
+            .workspace_get(workspace_id)?
+            .ok_or_else(|| HostError::NotFound(format!("workspace {workspace_id}")))?;
+        let root = Path::new(&ws.path);
+        Ok(WorkspaceGuidesOk {
+            agents_md: guides::read_guide_file(&guides::agents_md_path(root)),
+            workspace_guide: guides::read_guide_file(&guides::workspace_guide_path(root)),
+            global_guide: guides::read_guide_file(&guides::global_guide_path(&self.data_dir)),
+        })
+    }
+
+    pub fn settings_guide_get(&self) -> SettingsGuide {
+        guides::settings_guide_get(&self.data_dir)
+    }
+
+    pub fn settings_guide_set(&self, content: &str) -> Result<SettingsGuide> {
+        guides::settings_guide_set(&self.data_dir, content)
+    }
+
+    pub fn preset_list(&self) -> PresetListOk {
+        PresetListOk {
+            items: guides::preset_items(),
+        }
+    }
+
     fn resolve_model_spec(
         &self,
         provider: &str,
@@ -576,6 +647,7 @@ impl HostService {
             model: model.or_else(|| prefs.as_ref().and_then(|p| p.model.clone())),
             effort: effort.or_else(|| prefs.as_ref().and_then(|p| p.effort.clone())),
             fast: fast.unwrap_or_else(|| prefs.as_ref().map(|p| p.fast).unwrap_or(false)),
+            role: "coder".into(),
         })
     }
 
@@ -606,6 +678,7 @@ impl HostService {
                 model: model.or(profile.model),
                 effort: effort.or(profile.effort),
                 fast: fast.unwrap_or(profile.fast),
+                role: agent.role.clone(),
             };
             (provider, spec)
         } else {
@@ -1494,7 +1567,7 @@ impl HostService {
         }
         let _ = self.events.send(WsEvent::task_updated(task_id));
 
-        let messages = self
+        let transcript = self
             .store
             .message_list(agent_id)?
             .into_iter()
@@ -1508,6 +1581,11 @@ impl HostService {
                 content: m.content,
             })
             .collect();
+        let role = match self.store.agent_get(agent_id)? {
+            Some(a) => a.role,
+            None => "coder".to_string(),
+        };
+        let messages = guides::inject_preamble(&self.data_dir, &workspace_path, &role, transcript);
 
         let req = TurnRequest {
             agent_id: agent_id.to_string(),
