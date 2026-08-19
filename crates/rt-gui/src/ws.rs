@@ -67,6 +67,20 @@ pub enum WsEvent {
         #[serde(default)]
         code: i32,
     },
+    #[serde(rename = "artifact.updated")]
+    ArtifactUpdated {
+        #[serde(rename = "artifactId")]
+        artifact_id: String,
+        #[serde(rename = "taskId")]
+        task_id: String,
+    },
+    #[serde(rename = "artifact.deleted")]
+    ArtifactDeleted {
+        #[serde(rename = "artifactId")]
+        artifact_id: String,
+        #[serde(rename = "taskId")]
+        task_id: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,6 +93,7 @@ pub enum ApplyOutcome {
     Approval,
     PtyData,
     PtyExit,
+    ArtifactChanged,
     Ignored,
 }
 
@@ -187,6 +202,13 @@ pub fn apply_event(
         }
         WsEvent::PtyData { .. } => ApplyOutcome::PtyData,
         WsEvent::PtyExit { .. } => ApplyOutcome::PtyExit,
+        WsEvent::ArtifactUpdated { task_id, .. } | WsEvent::ArtifactDeleted { task_id, .. } => {
+            if task_id.is_empty() {
+                ApplyOutcome::Ignored
+            } else {
+                ApplyOutcome::ArtifactChanged
+            }
+        }
     }
 }
 
@@ -540,6 +562,26 @@ mod tests {
         assert_eq!(
             apply_event(&mut messages, &exit, None, None),
             ApplyOutcome::PtyExit
+        );
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn artifact_ws_events_do_not_touch_chat() {
+        let mut messages = Vec::new();
+        let updated =
+            parse_event(r#"{"type":"artifact.updated","artifactId":"art-1","taskId":"task-1"}"#)
+                .unwrap();
+        assert_eq!(
+            apply_event(&mut messages, &updated, Some("task-1"), Some("ag-1")),
+            ApplyOutcome::ArtifactChanged
+        );
+        let deleted =
+            parse_event(r#"{"event":"artifact.deleted","artifactId":"art-1","taskId":"task-1"}"#)
+                .unwrap();
+        assert_eq!(
+            apply_event(&mut messages, &deleted, None, None),
+            ApplyOutcome::ArtifactChanged
         );
         assert!(messages.is_empty());
     }
