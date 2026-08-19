@@ -34,6 +34,9 @@ pub mod error_codes {
     pub const PATCH_FAILED: &str = "patch_failed";
     pub const NOT_PTY: &str = "not_pty";
     pub const PTY_DEAD: &str = "pty_dead";
+    pub const CROSS_HOST: &str = "cross_host";
+    pub const NO_INBOX: &str = "no_inbox";
+    pub const LOOP_EXHAUSTED: &str = "loop_exhausted";
 }
 
 pub const METHOD_HANDSHAKE: &str = "handshake";
@@ -87,6 +90,11 @@ pub const METHOD_COMMENT_CREATE: &str = "comment.create";
 pub const METHOD_COMMENT_LIST: &str = "comment.list";
 pub const METHOD_COMMENT_RESOLVE: &str = "comment.resolve";
 pub const METHOD_AGENT_CLEAR_TRANSCRIPT: &str = "agent.clear_transcript";
+pub const METHOD_A2A_TRANSCRIPT: &str = "a2a.transcript";
+pub const METHOD_A2A_DELIVER: &str = "a2a.deliver";
+pub const METHOD_LOOP_START: &str = "loop.start";
+pub const METHOD_LOOP_GET: &str = "loop.get";
+pub const METHOD_LOOP_STOP: &str = "loop.stop";
 
 /// Tradable methods (handshake itself is not included).
 pub const TRADABLE_METHODS: &[&str] = &[
@@ -140,6 +148,11 @@ pub const TRADABLE_METHODS: &[&str] = &[
     METHOD_COMMENT_LIST,
     METHOD_COMMENT_RESOLVE,
     METHOD_AGENT_CLEAR_TRANSCRIPT,
+    METHOD_A2A_TRANSCRIPT,
+    METHOD_A2A_DELIVER,
+    METHOD_LOOP_START,
+    METHOD_LOOP_GET,
+    METHOD_LOOP_STOP,
 ];
 
 pub fn host_method_version() -> MethodVersion {
@@ -150,10 +163,10 @@ pub fn host_method_version() -> MethodVersion {
 }
 
 /// Per-method negotiated version. Policy/approval methods are 1.1; write/git
-/// mutate methods are 1.2; `agent.create` and shell/pty methods are 1.3;
-/// artifact/comment/`agent.clear_transcript` methods are 1.4; all other
-/// tradable methods stay 1.0 (`HOST_METHOD_MINOR` is not bumped).
-/// Unknown names return `None`.
+/// mutate methods are 1.2; shell/pty methods are 1.3; artifact/comment/
+/// `agent.clear_transcript` methods are 1.4; `agent.create` and A2A/loop
+/// methods are 1.5; all other tradable methods stay 1.0 (`HOST_METHOD_MINOR`
+/// is not bumped). Unknown names return `None`.
 pub fn method_version(name: &str) -> Option<MethodVersion> {
     if !TRADABLE_METHODS.iter().any(|m| *m == name) {
         return None;
@@ -166,8 +179,8 @@ pub fn method_version(name: &str) -> Option<MethodVersion> {
         | METHOD_GIT_UNSTAGE | METHOD_GIT_RESTORE | METHOD_GIT_COMMIT | METHOD_GIT_PUSH => {
             Some(MethodVersion { major: 1, minor: 2 })
         }
-        METHOD_AGENT_CREATE | METHOD_SHELL_CREATE | METHOD_SHELL_LIST | METHOD_SHELL_CLOSE
-        | METHOD_PTY_OPEN | METHOD_PTY_WRITE | METHOD_PTY_RESIZE | METHOD_PTY_CLOSE => {
+        METHOD_SHELL_CREATE | METHOD_SHELL_LIST | METHOD_SHELL_CLOSE | METHOD_PTY_OPEN
+        | METHOD_PTY_WRITE | METHOD_PTY_RESIZE | METHOD_PTY_CLOSE => {
             Some(MethodVersion { major: 1, minor: 3 })
         }
         METHOD_ARTIFACT_CREATE
@@ -180,6 +193,12 @@ pub fn method_version(name: &str) -> Option<MethodVersion> {
         | METHOD_COMMENT_LIST
         | METHOD_COMMENT_RESOLVE
         | METHOD_AGENT_CLEAR_TRANSCRIPT => Some(MethodVersion { major: 1, minor: 4 }),
+        METHOD_AGENT_CREATE
+        | METHOD_A2A_TRANSCRIPT
+        | METHOD_A2A_DELIVER
+        | METHOD_LOOP_START
+        | METHOD_LOOP_GET
+        | METHOD_LOOP_STOP => Some(MethodVersion { major: 1, minor: 5 }),
         _ => Some(host_method_version()),
     }
 }
@@ -698,6 +717,81 @@ pub struct ClearTranscriptParams {
     pub agent_id: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct A2aTranscriptParams {
+    pub agent_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct A2aTranscriptOk {
+    pub agent_id: String,
+    pub interface: String,
+    pub messages: Vec<Message>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct A2aDeliverParams {
+    pub from_agent_id: String,
+    pub to_agent_id: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct A2aDeliverOk {
+    pub message_id: String,
+    pub to_agent_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LoopStartParams {
+    pub task_id: String,
+    pub agent_ids: Vec<String>,
+    pub max_iterations: u32,
+    #[serde(default)]
+    pub budget_turns: Option<u32>,
+    pub prompt: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LoopStartOk {
+    pub loop_id: String,
+    pub iteration: u32,
+    pub turns: u32,
+    pub max_iterations: u32,
+    pub budget_turns: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LoopView {
+    pub loop_id: String,
+    pub iteration: u32,
+    pub turns: u32,
+    pub max_iterations: u32,
+    pub budget_turns: u32,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LoopGetParams {
+    pub loop_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LoopStopParams {
+    pub loop_id: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -829,7 +923,10 @@ mod tests {
         assert_eq!(error_codes::PATCH_FAILED, "patch_failed");
         assert_eq!(error_codes::NOT_PTY, "not_pty");
         assert_eq!(error_codes::PTY_DEAD, "pty_dead");
-        assert_eq!(TRADABLE_METHODS.len(), 50);
+        assert_eq!(error_codes::CROSS_HOST, "cross_host");
+        assert_eq!(error_codes::NO_INBOX, "no_inbox");
+        assert_eq!(error_codes::LOOP_EXHAUSTED, "loop_exhausted");
+        assert_eq!(TRADABLE_METHODS.len(), 55);
         assert!(TRADABLE_METHODS.contains(&METHOD_POLICY_GET));
         assert!(TRADABLE_METHODS.contains(&METHOD_POLICY_SET));
         assert!(TRADABLE_METHODS.contains(&METHOD_APPROVAL_RESPOND));
@@ -904,7 +1001,7 @@ mod tests {
         );
         assert_eq!(
             method_version(METHOD_AGENT_CREATE),
-            Some(MethodVersion { major: 1, minor: 3 })
+            Some(MethodVersion { major: 1, minor: 5 })
         );
         assert_eq!(
             method_version(METHOD_SHELL_CREATE),
@@ -1322,7 +1419,7 @@ mod tests {
         assert_eq!(error_codes::PTY_DEAD, "pty_dead");
         assert_eq!(
             method_version(METHOD_AGENT_CREATE),
-            Some(MethodVersion { major: 1, minor: 3 })
+            Some(MethodVersion { major: 1, minor: 5 })
         );
         assert_eq!(
             method_version(METHOD_HOST_PING),
@@ -1438,5 +1535,91 @@ mod tests {
         assert_eq!(create.kind, "ticket");
         assert!(create.body.is_empty());
         assert!(create.parent_id.is_none());
+    }
+
+    #[test]
+    fn e6_a2a_loop_types_camel_case() {
+        assert_eq!(
+            method_version(METHOD_AGENT_CREATE),
+            Some(MethodVersion { major: 1, minor: 5 })
+        );
+        assert_eq!(
+            method_version(METHOD_A2A_TRANSCRIPT),
+            Some(MethodVersion { major: 1, minor: 5 })
+        );
+        assert_eq!(
+            method_version(METHOD_A2A_DELIVER),
+            Some(MethodVersion { major: 1, minor: 5 })
+        );
+        assert_eq!(
+            method_version(METHOD_LOOP_START),
+            Some(MethodVersion { major: 1, minor: 5 })
+        );
+        assert_eq!(
+            method_version(METHOD_LOOP_GET),
+            Some(MethodVersion { major: 1, minor: 5 })
+        );
+        assert_eq!(
+            method_version(METHOD_LOOP_STOP),
+            Some(MethodVersion { major: 1, minor: 5 })
+        );
+        assert_eq!(
+            method_version(METHOD_FILES_WRITE),
+            Some(MethodVersion { major: 1, minor: 2 })
+        );
+        assert!(TRADABLE_METHODS.contains(&METHOD_A2A_DELIVER));
+        assert!(TRADABLE_METHODS.contains(&METHOD_LOOP_START));
+
+        let tr = A2aTranscriptOk {
+            agent_id: "a1".into(),
+            interface: "chat".into(),
+            messages: vec![],
+        };
+        let v = serde_json::to_value(&tr).unwrap();
+        assert_eq!(v["agentId"], "a1");
+        assert!(v.get("agent_id").is_none());
+
+        let del = A2aDeliverOk {
+            message_id: "m1".into(),
+            to_agent_id: "a2".into(),
+        };
+        let v = serde_json::to_value(&del).unwrap();
+        assert_eq!(v["messageId"], "m1");
+        assert_eq!(v["toAgentId"], "a2");
+
+        let start: LoopStartParams = serde_json::from_str(
+            r#"{"taskId":"t1","agentIds":["a","b"],"maxIterations":2,"prompt":"hi"}"#,
+        )
+        .unwrap();
+        assert_eq!(start.task_id, "t1");
+        assert_eq!(start.agent_ids, ["a", "b"]);
+        assert_eq!(start.max_iterations, 2);
+        assert!(start.budget_turns.is_none());
+
+        let ok = LoopStartOk {
+            loop_id: "l1".into(),
+            iteration: 0,
+            turns: 0,
+            max_iterations: 2,
+            budget_turns: 4,
+        };
+        let v = serde_json::to_value(&ok).unwrap();
+        assert_eq!(v["loopId"], "l1");
+        assert_eq!(v["maxIterations"], 2);
+        assert_eq!(v["budgetTurns"], 4);
+
+        let view = LoopView {
+            loop_id: "l1".into(),
+            iteration: 1,
+            turns: 2,
+            max_iterations: 2,
+            budget_turns: 4,
+            status: "stopped".into(),
+            reason: Some("max_iterations".into()),
+        };
+        let v = serde_json::to_value(&view).unwrap();
+        assert_eq!(v["status"], "stopped");
+        assert_eq!(v["reason"], "max_iterations");
+        assert!(v.get("loop_id").is_none());
     }
 }

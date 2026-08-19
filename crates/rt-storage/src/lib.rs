@@ -12,6 +12,7 @@ const MIGRATION_0002: &str = include_str!("../migrations/0002_worktrees.sql");
 const MIGRATION_0003: &str = include_str!("../migrations/0003_policies.sql");
 const MIGRATION_0004: &str = include_str!("../migrations/0004_terminal.sql");
 const MIGRATION_0005: &str = include_str!("../migrations/0005_artifacts.sql");
+const MIGRATION_0006: &str = include_str!("../migrations/0006_loops.sql");
 
 /// RFC3339 UTC timestamp (millis, Z suffix).
 pub fn now_rfc3339() -> String {
@@ -324,6 +325,24 @@ pub struct ArtifactCreateInput<'a> {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct LoopRow {
+    pub id: String,
+    pub task_id: String,
+    pub agent_a: String,
+    pub agent_b: String,
+    pub max_iterations: i64,
+    pub budget_turns: i64,
+    pub iteration: i64,
+    pub turns: i64,
+    pub status: String,
+    pub reason: Option<String>,
+    pub prompt: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CommentThread {
     pub id: String,
     pub artifact_id: String,
@@ -416,24 +435,32 @@ impl Store {
                 conn.execute_batch(MIGRATION_0003)?;
                 conn.execute_batch(MIGRATION_0004)?;
                 conn.execute_batch(MIGRATION_0005)?;
+                conn.execute_batch(MIGRATION_0006)?;
                 Ok(())
             }
             Some("2") => {
                 conn.execute_batch(MIGRATION_0003)?;
                 conn.execute_batch(MIGRATION_0004)?;
                 conn.execute_batch(MIGRATION_0005)?;
+                conn.execute_batch(MIGRATION_0006)?;
                 Ok(())
             }
             Some("3") => {
                 conn.execute_batch(MIGRATION_0004)?;
                 conn.execute_batch(MIGRATION_0005)?;
+                conn.execute_batch(MIGRATION_0006)?;
                 Ok(())
             }
             Some("4") => {
                 conn.execute_batch(MIGRATION_0005)?;
+                conn.execute_batch(MIGRATION_0006)?;
                 Ok(())
             }
-            Some("5") => Ok(()),
+            Some("5") => {
+                conn.execute_batch(MIGRATION_0006)?;
+                Ok(())
+            }
+            Some("6") => Ok(()),
             Some(other) => Err(StorageError::UnsupportedSchema(other.to_string())),
             None => {
                 conn.execute_batch(MIGRATION_0001)?;
@@ -441,6 +468,7 @@ impl Store {
                 conn.execute_batch(MIGRATION_0003)?;
                 conn.execute_batch(MIGRATION_0004)?;
                 conn.execute_batch(MIGRATION_0005)?;
+                conn.execute_batch(MIGRATION_0006)?;
                 Ok(())
             }
         }
@@ -448,7 +476,9 @@ impl Store {
 
     /// After migrate, before listen: running agents become error.
     pub fn recover(&self) -> Result<usize> {
-        self.set_running_agents_to_error()
+        let n = self.set_running_agents_to_error()?;
+        self.recover_running_loops_to_stopped()?;
+        Ok(n)
     }
 
     pub fn recover_running(&self) -> Result<usize> {
@@ -694,7 +724,7 @@ impl Store {
         host_id: &str,
         provider: impl Into<HarnessId>,
     ) -> Result<Agent> {
-        self.agent_create_interface(task_id, host_id, provider, "chat")
+        self.agent_create_interface(task_id, host_id, provider, "chat", None)
     }
 
     pub fn agent_create_interface(
@@ -703,6 +733,7 @@ impl Store {
         host_id: &str,
         provider: impl Into<HarnessId>,
         interface: &str,
+        parent_id: Option<&str>,
     ) -> Result<Agent> {
         let provider = provider.into();
         if interface != "chat" && interface != "terminal" {
@@ -714,20 +745,31 @@ impl Store {
             return Err(StorageError::NotFound);
         }
         let id = new_id();
+        if let Some(pid) = parent_id {
+            self.assert_agent_parent_ok(task_id, host_id, Some(id.as_str()), pid)?;
+        }
         let created_at = now_rfc3339();
         {
             let conn = self.lock()?;
             conn.execute(
                 "INSERT INTO agents (id, task_id, host_id, parent_id, interface, provider, status, run_location, created_at, provider_session_id) \
-                 VALUES (?1, ?2, ?3, NULL, ?4, ?5, 'idle', 'local', ?6, NULL)",
-                params![id, task_id, host_id, interface, provider.as_str(), created_at],
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'idle', 'local', ?7, NULL)",
+                params![
+                    id,
+                    task_id,
+                    host_id,
+                    parent_id,
+                    interface,
+                    provider.as_str(),
+                    created_at
+                ],
             )?;
         }
         Ok(Agent {
             id,
             task_id: task_id.to_string(),
             host_id: host_id.to_string(),
-            parent_id: None,
+            parent_id: parent_id.map(str::to_string),
             interface: interface.to_string(),
             provider,
             status: AgentStatus::Idle,
@@ -1454,6 +1496,176 @@ impl Store {
         Ok(n)
     }
 
+    fn assert_agent_parent_ok(
+        &self,
+        task_id: &str,
+        host_id: &str,
+        self_id: Option<&str>,
+        parent_id: &str,
+    ) -> Result<()> {
+        if parent_id.is_empty() {
+            return Err(StorageError::InvalidParams("parentId is empty".into()));
+        }
+        if self_id == Some(parent_id) {
+            return Err(StorageError::InvalidParams(
+                "parentId cannot be the agent itself".into(),
+            ));
+        }
+        let parent = self
+            .agent_get(parent_id)?
+            .ok_or_else(|| StorageError::InvalidParams("parentId not found".into()))?;
+        if parent.task_id != task_id {
+            return Err(StorageError::InvalidParams(
+                "parentId must belong to the same task".into(),
+            ));
+        }
+        if parent.host_id != host_id {
+            return Err(StorageError::InvalidParams(
+                "parentId must belong to the same host".into(),
+            ));
+        }
+        if let Some(sid) = self_id {
+            let mut walk = parent.parent_id.clone();
+            let mut guard = 0usize;
+            while let Some(cur) = walk {
+                if cur == sid {
+                    return Err(StorageError::InvalidParams(
+                        "parentId would create a cycle".into(),
+                    ));
+                }
+                guard += 1;
+                if guard > 10_000 {
+                    return Err(StorageError::InvalidParams(
+                        "parentId ancestor walk exceeded limit".into(),
+                    ));
+                }
+                walk = self.agent_get(&cur)?.and_then(|a| a.parent_id);
+            }
+        }
+        Ok(())
+    }
+
+    /// Lift children when a parent agent is detached/deleted: SET parent_id NULL.
+    pub fn agent_lift_children(&self, parent_id: &str) -> Result<usize> {
+        let conn = self.lock()?;
+        let n = conn.execute(
+            "UPDATE agents SET parent_id = NULL WHERE parent_id = ?1",
+            [parent_id],
+        )?;
+        Ok(n)
+    }
+
+    pub fn agent_set_parent(&self, agent_id: &str, parent_id: Option<&str>) -> Result<()> {
+        let agent = self.agent_get(agent_id)?.ok_or(StorageError::NotFound)?;
+        if let Some(pid) = parent_id {
+            self.assert_agent_parent_ok(&agent.task_id, &agent.host_id, Some(agent_id), pid)?;
+        }
+        let conn = self.lock()?;
+        let n = conn.execute(
+            "UPDATE agents SET parent_id = ?1 WHERE id = ?2",
+            params![parent_id, agent_id],
+        )?;
+        if n == 0 {
+            return Err(StorageError::NotFound);
+        }
+        Ok(())
+    }
+
+    pub fn loop_insert(
+        &self,
+        task_id: &str,
+        agent_a: &str,
+        agent_b: &str,
+        max_iterations: i64,
+        budget_turns: i64,
+        prompt: &str,
+    ) -> Result<LoopRow> {
+        if !(1..=32).contains(&max_iterations) {
+            return Err(StorageError::InvalidParams(
+                "maxIterations must be 1..32".into(),
+            ));
+        }
+        if !(1..=64).contains(&budget_turns) {
+            return Err(StorageError::InvalidParams(
+                "budgetTurns must be 1..64".into(),
+            ));
+        }
+        if self.task_get(task_id)?.is_none() {
+            return Err(StorageError::NotFound);
+        }
+        let id = new_id();
+        let now = now_rfc3339();
+        {
+            let conn = self.lock()?;
+            conn.execute(
+                "INSERT INTO loops (id, task_id, agent_a, agent_b, max_iterations, budget_turns, iteration, turns, status, reason, prompt, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, 0, 'running', NULL, ?7, ?8, ?8)",
+                params![
+                    id,
+                    task_id,
+                    agent_a,
+                    agent_b,
+                    max_iterations,
+                    budget_turns,
+                    prompt,
+                    now
+                ],
+            )?;
+        }
+        self.loop_get(&id)?.ok_or(StorageError::NotFound)
+    }
+
+    pub fn loop_get(&self, id: &str) -> Result<Option<LoopRow>> {
+        let conn = self.lock()?;
+        conn.query_row(
+            "SELECT id, task_id, agent_a, agent_b, max_iterations, budget_turns, iteration, turns, status, reason, prompt, created_at, updated_at
+             FROM loops WHERE id = ?1",
+            [id],
+            map_loop_row,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    pub fn loop_update_progress(&self, id: &str, iteration: i64, turns: i64) -> Result<()> {
+        let conn = self.lock()?;
+        let n = conn.execute(
+            "UPDATE loops SET iteration = ?1, turns = ?2, updated_at = ?3 WHERE id = ?4",
+            params![iteration, turns, now_rfc3339(), id],
+        )?;
+        if n == 0 {
+            return Err(StorageError::NotFound);
+        }
+        Ok(())
+    }
+
+    pub fn loop_stop(&self, id: &str, reason: &str) -> Result<LoopRow> {
+        let current = self.loop_get(id)?.ok_or(StorageError::NotFound)?;
+        if current.status == "stopped" {
+            return Ok(current);
+        }
+        {
+            let conn = self.lock()?;
+            let n = conn.execute(
+                "UPDATE loops SET status = 'stopped', reason = ?1, updated_at = ?2 WHERE id = ?3 AND status = 'running'",
+                params![reason, now_rfc3339(), id],
+            )?;
+            if n == 0 {
+                // raced to stopped
+            }
+        }
+        self.loop_get(id)?.ok_or(StorageError::NotFound)
+    }
+
+    pub fn recover_running_loops_to_stopped(&self) -> Result<usize> {
+        let conn = self.lock()?;
+        let n = conn.execute(
+            "UPDATE loops SET status = 'stopped', reason = 'error', updated_at = ?1 WHERE status = 'running'",
+            params![now_rfc3339()],
+        )?;
+        Ok(n)
+    }
+
     fn collect_artifact_descendants(&self, root: &str, out: &mut Vec<String>) -> Result<()> {
         out.push(root.to_string());
         let children: Vec<String> = {
@@ -1638,6 +1850,24 @@ type AgentTuple = (
     Option<String>,
 );
 
+fn map_loop_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<LoopRow> {
+    Ok(LoopRow {
+        id: r.get(0)?,
+        task_id: r.get(1)?,
+        agent_a: r.get(2)?,
+        agent_b: r.get(3)?,
+        max_iterations: r.get(4)?,
+        budget_turns: r.get(5)?,
+        iteration: r.get(6)?,
+        turns: r.get(7)?,
+        status: r.get(8)?,
+        reason: r.get(9)?,
+        prompt: r.get(10)?,
+        created_at: r.get(11)?,
+        updated_at: r.get(12)?,
+    })
+}
+
 fn map_agent_tuple(r: &rusqlite::Row<'_>) -> rusqlite::Result<AgentTuple> {
     Ok((
         r.get(0)?,
@@ -1821,7 +2051,7 @@ mod tests {
         {
             let conn = store.lock().unwrap();
             conn.execute(
-                "UPDATE schema_meta SET value = '6' WHERE key = 'schema'",
+                "UPDATE schema_meta SET value = '7' WHERE key = 'schema'",
                 [],
             )
             .unwrap();
@@ -1830,7 +2060,7 @@ mod tests {
         let err = Store::open(&db).unwrap_err();
         assert_eq!(err.code(), "internal");
         match &err {
-            StorageError::UnsupportedSchema(v) => assert_eq!(v, "6"),
+            StorageError::UnsupportedSchema(v) => assert_eq!(v, "7"),
             other => panic!("expected UnsupportedSchema, got {other:?}"),
         }
     }
@@ -1899,7 +2129,7 @@ mod tests {
     }
 
     #[test]
-    fn fresh_db_is_schema_five() {
+    fn fresh_db_is_schema_six() {
         let (_tmp, store) = open_store();
         let conn = rusqlite::Connection::open(store.path()).unwrap();
         let schema: String = conn
@@ -1909,10 +2139,18 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(schema, "5");
+        assert_eq!(schema, "6");
         let n: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'artifacts'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1);
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'loops'",
                 [],
                 |r| r.get(0),
             )
@@ -1969,7 +2207,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(schema, "5");
+        assert_eq!(schema, "6");
         let n: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'worktrees'",
@@ -2301,7 +2539,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(schema, "5");
+        assert_eq!(schema, "6");
         let n: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'policies'",
@@ -2513,7 +2751,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(schema, "5");
+        assert_eq!(schema, "6");
         let n: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('shells', 'pty_sessions')",
@@ -2545,7 +2783,7 @@ mod tests {
         );
 
         let term = store
-            .agent_create_interface(&task.id, &host_id, "cli.claude", "terminal")
+            .agent_create_interface(&task.id, &host_id, "cli.claude", "terminal", None)
             .unwrap();
         assert_eq!(term.interface, "terminal");
         assert!(term.provider_session_id.is_none());
@@ -2616,7 +2854,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(schema, "5");
+        assert_eq!(schema, "6");
         let n: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'artifacts'",
@@ -2814,5 +3052,154 @@ mod tests {
                 .code(),
             "invalid_params"
         );
+    }
+
+    #[test]
+    fn migration_0006_matches_contract() {
+        assert!(MIGRATION_0006.contains("CREATE TABLE loops"));
+        assert!(MIGRATION_0006.contains("CHECK (max_iterations BETWEEN 1 AND 32)"));
+        assert!(MIGRATION_0006.contains("CHECK (budget_turns BETWEEN 1 AND 64)"));
+        assert!(MIGRATION_0006.contains("CHECK (status IN ('running', 'stopped'))"));
+        assert!(!MIGRATION_0006.contains("ON DELETE CASCADE"));
+        assert!(!MIGRATION_0006.contains("CREATE TABLE artifacts"));
+        assert!(MIGRATION_0006
+            .contains("INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('schema', '6')"));
+        assert!(!MIGRATION_0001.contains("CREATE TABLE loops"));
+        assert!(!MIGRATION_0005.contains("CREATE TABLE loops"));
+    }
+
+    #[test]
+    fn migrate_from_five_applies_0006() {
+        let dir = tempdir().unwrap();
+        let db = dir.path().join("host.db");
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute_batch(MIGRATION_0001).unwrap();
+            conn.execute_batch(MIGRATION_0002).unwrap();
+            conn.execute_batch(MIGRATION_0003).unwrap();
+            conn.execute_batch(MIGRATION_0004).unwrap();
+            conn.execute_batch(MIGRATION_0005).unwrap();
+            let schema: String = conn
+                .query_row(
+                    "SELECT value FROM schema_meta WHERE key = 'schema'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(schema, "5");
+        }
+        let store = Store::open(&db).unwrap();
+        let conn = rusqlite::Connection::open(store.path()).unwrap();
+        let schema: String = conn
+            .query_row(
+                "SELECT value FROM schema_meta WHERE key = 'schema'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(schema, "6");
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'loops'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn loop_checks_and_recover_running() {
+        let (_tmp, store) = open_store();
+        let host_id = new_id();
+        store.host_insert_if_absent(&host_id, "h").unwrap();
+        let ws = store.workspace_add("/p", "p").unwrap();
+        let task = store.task_create("t", &ws.id).unwrap();
+        let a = store
+            .agent_create(&task.id, &host_id, "cli.generic")
+            .unwrap();
+        let b = store
+            .agent_create(&task.id, &host_id, "cli.generic")
+            .unwrap();
+        let err = store
+            .loop_insert(&task.id, &a.id, &b.id, 0, 2, "hi")
+            .unwrap_err();
+        assert_eq!(err.code(), "invalid_params");
+        let err = store
+            .loop_insert(&task.id, &a.id, &b.id, 33, 2, "hi")
+            .unwrap_err();
+        assert_eq!(err.code(), "invalid_params");
+        let err = store
+            .loop_insert(&task.id, &a.id, &b.id, 2, 0, "hi")
+            .unwrap_err();
+        assert_eq!(err.code(), "invalid_params");
+        let err = store
+            .loop_insert(&task.id, &a.id, &b.id, 2, 65, "hi")
+            .unwrap_err();
+        assert_eq!(err.code(), "invalid_params");
+        let row = store
+            .loop_insert(&task.id, &a.id, &b.id, 2, 4, "go")
+            .unwrap();
+        assert_eq!(row.status, "running");
+        assert_eq!(row.iteration, 0);
+        assert_eq!(row.turns, 0);
+        store.loop_update_progress(&row.id, 1, 2).unwrap();
+        let got = store.loop_get(&row.id).unwrap().unwrap();
+        assert_eq!(got.iteration, 1);
+        assert_eq!(got.turns, 2);
+        let n = store.recover_running_loops_to_stopped().unwrap();
+        assert_eq!(n, 1);
+        let got = store.loop_get(&row.id).unwrap().unwrap();
+        assert_eq!(got.status, "stopped");
+        assert_eq!(got.reason.as_deref(), Some("error"));
+        let again = store.loop_stop(&row.id, "stop").unwrap();
+        assert_eq!(again.reason.as_deref(), Some("error"));
+
+        let conn = rusqlite::Connection::open(store.path()).unwrap();
+        conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+        let err = conn.execute(
+            "INSERT INTO loops (id, task_id, agent_a, agent_b, max_iterations, budget_turns, iteration, turns, status, reason, prompt, created_at, updated_at)
+             VALUES ('l-bad', ?1, ?2, ?3, 0, 2, 0, 0, 'running', NULL, 'x', 't', 't')",
+            [&task.id, &a.id, &b.id],
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.to_lowercase().contains("check") || msg.contains("CONSTRAINT"),
+            "expected CHECK error, got {msg}"
+        );
+    }
+
+    #[test]
+    fn agent_parent_same_task_and_cycle() {
+        let (_tmp, store) = open_store();
+        let host_id = new_id();
+        store.host_insert_if_absent(&host_id, "h").unwrap();
+        let ws = store.workspace_add("/p", "p").unwrap();
+        let task = store.task_create("t", &ws.id).unwrap();
+        let other = store.task_create("o", &ws.id).unwrap();
+        let a = store
+            .agent_create(&task.id, &host_id, "cli.generic")
+            .unwrap();
+        let b = store
+            .agent_create_interface(&task.id, &host_id, "cli.generic", "chat", Some(&a.id))
+            .unwrap();
+        assert_eq!(b.parent_id.as_deref(), Some(a.id.as_str()));
+        let err = store
+            .agent_create_interface(&other.id, &host_id, "cli.generic", "chat", Some(&a.id))
+            .unwrap_err();
+        assert_eq!(err.code(), "invalid_params");
+        let err = store.agent_set_parent(&a.id, Some(&a.id)).unwrap_err();
+        assert_eq!(err.code(), "invalid_params");
+        let err = store.agent_set_parent(&a.id, Some(&b.id)).unwrap_err();
+        assert_eq!(err.code(), "invalid_params");
+        store.agent_set_parent(&b.id, None).unwrap();
+        assert!(store.agent_get(&b.id).unwrap().unwrap().parent_id.is_none());
+        let c = store
+            .agent_create_interface(&task.id, &host_id, "cli.generic", "chat", Some(&a.id))
+            .unwrap();
+        let n = store.agent_lift_children(&a.id).unwrap();
+        assert_eq!(n, 1);
+        assert!(store.agent_get(&c.id).unwrap().unwrap().parent_id.is_none());
     }
 }
