@@ -9,8 +9,8 @@ use rt_protocol::{
     ApprovalDecision, ApprovalRespondOk, ApprovalRespondParams, CancelOk,
     HarnessCaps as HarnessCapsWire, PolicyGetParams, PolicyMode, PolicyScope, PolicySetParams,
     PolicySource, PolicyView, PrefsGetOk, PrefsItem, PresetListOk, Profile, ProfileCreateParams,
-    ProfileDeleteParams, ProfileGetParams, ProfileListOk, ProfileUpdateParams, SettingsGuide,
-    WorkspaceGuidesOk,
+    ProfileDeleteParams, ProfileGetParams, ProfileListOk, ProfileUpdateParams, SearchItem,
+    SearchKind, SearchQueryOk, SearchQueryParams, SettingsGuide, WorkspaceGuidesOk,
 };
 use rt_runtime::{AgentBackend, TurnRequest, WireMessage, WireRole};
 use rt_storage::{
@@ -677,6 +677,41 @@ rusttraycer_tasks{{status="archived"}} {archived}
         PresetListOk {
             items: guides::preset_items(),
         }
+    }
+
+    pub fn search_query(&self, params: &SearchQueryParams) -> Result<SearchQueryOk> {
+        if params.q.is_empty() {
+            return Ok(SearchQueryOk { items: Vec::new() });
+        }
+        let kinds: Vec<&str> = match params.kinds.as_deref() {
+            None | Some([]) => vec!["task", "workspace", "artifact"],
+            Some(ks) => ks
+                .iter()
+                .map(|k| match k {
+                    SearchKind::Task => "task",
+                    SearchKind::Workspace => "workspace",
+                    SearchKind::Artifact => "artifact",
+                })
+                .collect(),
+        };
+        let hits = self.store.search_query(&params.q, &kinds)?;
+        let items = hits
+            .into_iter()
+            .map(|h| {
+                let kind = match h.kind.as_str() {
+                    "workspace" => SearchKind::Workspace,
+                    "artifact" => SearchKind::Artifact,
+                    _ => SearchKind::Task,
+                };
+                SearchItem {
+                    kind,
+                    id: h.id,
+                    title: h.title,
+                    hint: h.hint,
+                }
+            })
+            .collect();
+        Ok(SearchQueryOk { items })
     }
 
     fn resolve_model_spec(

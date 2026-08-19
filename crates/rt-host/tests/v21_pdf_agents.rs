@@ -501,7 +501,7 @@ fn migrations_0001_to_0008_byte_identical_vs_0b8bb7c() {
     }
     let nine = root.join("crates/rt-storage/migrations/0009_v21.sql");
     assert!(
-        !nine.exists(),
-        "0009 must not be opened in this slice: {nine:?}"
+        nine.exists(),
+        "0009 is opened by the V2 host slice: {nine:?}"
     );
 }

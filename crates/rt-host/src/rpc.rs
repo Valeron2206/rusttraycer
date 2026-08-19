@@ -720,6 +720,16 @@ async fn dispatch_method(
                 .map_err(|e| HostError::InvalidParams(e.to_string()))?;
             Ok(serde_json::to_value(svc.sync_import(p)?)?)
         }
+        "search.query" => {
+            let p: rt_protocol::SearchQueryParams = serde_json::from_value(params)
+                .map_err(|e| HostError::InvalidParams(e.to_string()))?;
+            Ok(serde_json::to_value(svc.search_query(&p)?)?)
+        }
+        "worktree.gc" => {
+            let p: rt_protocol::WorktreeGcParams = serde_json::from_value(params)
+                .map_err(|e| HostError::InvalidParams(e.to_string()))?;
+            Ok(serde_json::to_value(svc.worktree_gc(p.dry_run)?)?)
+        }
         other => Err(HostError::UnsupportedMethod(other.to_string())),
     };
     match &result {

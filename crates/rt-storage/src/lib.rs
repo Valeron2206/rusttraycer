@@ -15,6 +15,7 @@ const MIGRATION_0005: &str = include_str!("../migrations/0005_artifacts.sql");
 const MIGRATION_0006: &str = include_str!("../migrations/0006_loops.sql");
 const MIGRATION_0007: &str = include_str!("../migrations/0007_model_ux.sql");
 const MIGRATION_0008: &str = include_str!("../migrations/0008_workspace.sql");
+const MIGRATION_0009: &str = include_str!("../migrations/0009_v21.sql");
 
 /// RFC3339 UTC timestamp (millis, Z suffix).
 pub fn now_rfc3339() -> String {
@@ -323,6 +324,22 @@ pub struct Worktree {
     pub created_at: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorktreeSettings {
+    pub workspace_id: String,
+    pub branch_prefix: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchHit {
+    pub kind: String,
+    pub id: String,
+    pub title: String,
+    pub hint: String,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Counts {
     pub workspace_count: i64,
@@ -581,6 +598,7 @@ impl Store {
                 conn.execute_batch(MIGRATION_0006)?;
                 conn.execute_batch(MIGRATION_0007)?;
                 conn.execute_batch(MIGRATION_0008)?;
+                conn.execute_batch(MIGRATION_0009)?;
                 Ok(())
             }
             Some("2") => {
@@ -590,6 +608,7 @@ impl Store {
                 conn.execute_batch(MIGRATION_0006)?;
                 conn.execute_batch(MIGRATION_0007)?;
                 conn.execute_batch(MIGRATION_0008)?;
+                conn.execute_batch(MIGRATION_0009)?;
                 Ok(())
             }
             Some("3") => {
@@ -598,6 +617,7 @@ impl Store {
                 conn.execute_batch(MIGRATION_0006)?;
                 conn.execute_batch(MIGRATION_0007)?;
                 conn.execute_batch(MIGRATION_0008)?;
+                conn.execute_batch(MIGRATION_0009)?;
                 Ok(())
             }
             Some("4") => {
@@ -605,24 +625,32 @@ impl Store {
                 conn.execute_batch(MIGRATION_0006)?;
                 conn.execute_batch(MIGRATION_0007)?;
                 conn.execute_batch(MIGRATION_0008)?;
+                conn.execute_batch(MIGRATION_0009)?;
                 Ok(())
             }
             Some("5") => {
                 conn.execute_batch(MIGRATION_0006)?;
                 conn.execute_batch(MIGRATION_0007)?;
                 conn.execute_batch(MIGRATION_0008)?;
+                conn.execute_batch(MIGRATION_0009)?;
                 Ok(())
             }
             Some("6") => {
                 conn.execute_batch(MIGRATION_0007)?;
                 conn.execute_batch(MIGRATION_0008)?;
+                conn.execute_batch(MIGRATION_0009)?;
                 Ok(())
             }
             Some("7") => {
                 conn.execute_batch(MIGRATION_0008)?;
+                conn.execute_batch(MIGRATION_0009)?;
                 Ok(())
             }
-            Some("8") => Ok(()),
+            Some("8") => {
+                conn.execute_batch(MIGRATION_0009)?;
+                Ok(())
+            }
+            Some("9") => Ok(()),
             Some(other) => Err(StorageError::UnsupportedSchema(other.to_string())),
             None => {
                 conn.execute_batch(MIGRATION_0001)?;
@@ -633,6 +661,7 @@ impl Store {
                 conn.execute_batch(MIGRATION_0006)?;
                 conn.execute_batch(MIGRATION_0007)?;
                 conn.execute_batch(MIGRATION_0008)?;
+                conn.execute_batch(MIGRATION_0009)?;
                 Ok(())
             }
         }
@@ -1539,6 +1568,136 @@ impl Store {
             branch: branch.to_string(),
             created_at,
         })
+    }
+
+    pub fn worktree_list_all(&self) -> Result<Vec<Worktree>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, workspace_id, agent_id, path, branch, created_at FROM worktrees ORDER BY created_at ASC, id ASC",
+        )?;
+        let rows = stmt.query_map([], map_worktree)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    pub fn worktree_delete(&self, id: &str) -> Result<()> {
+        let conn = self.lock()?;
+        let n = conn.execute("DELETE FROM worktrees WHERE id = ?1", [id])?;
+        if n == 0 {
+            return Err(StorageError::NotFound);
+        }
+        Ok(())
+    }
+
+    pub fn worktree_settings_get(&self, workspace_id: &str) -> Result<Option<WorktreeSettings>> {
+        let conn = self.lock()?;
+        conn.query_row(
+            "SELECT workspace_id, branch_prefix FROM worktree_settings WHERE workspace_id = ?1",
+            [workspace_id],
+            |r| {
+                Ok(WorktreeSettings {
+                    workspace_id: r.get(0)?,
+                    branch_prefix: r.get(1)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    pub fn worktree_settings_upsert(
+        &self,
+        workspace_id: &str,
+        branch_prefix: &str,
+    ) -> Result<WorktreeSettings> {
+        if branch_prefix.is_empty() {
+            return Err(StorageError::InvalidParams(
+                "branch_prefix must be nonempty".into(),
+            ));
+        }
+        if self.workspace_get(workspace_id)?.is_none() {
+            return Err(StorageError::NotFound);
+        }
+        {
+            let conn = self.lock()?;
+            conn.execute(
+                "INSERT INTO worktree_settings (workspace_id, branch_prefix) VALUES (?1, ?2)
+                 ON CONFLICT(workspace_id) DO UPDATE SET branch_prefix = excluded.branch_prefix",
+                params![workspace_id, branch_prefix],
+            )?;
+        }
+        Ok(WorktreeSettings {
+            workspace_id: workspace_id.to_string(),
+            branch_prefix: branch_prefix.to_string(),
+        })
+    }
+
+    pub fn worktree_branch_prefix(&self, workspace_id: &str) -> Result<String> {
+        match self.worktree_settings_get(workspace_id)? {
+            Some(s) if !s.branch_prefix.is_empty() => Ok(s.branch_prefix),
+            _ => Ok("rt/".to_string()),
+        }
+    }
+
+    pub fn search_query(&self, q: &str, kinds: &[&str]) -> Result<Vec<SearchHit>> {
+        if q.is_empty() {
+            return Ok(Vec::new());
+        }
+        let pat = like_pattern(q);
+        let conn = self.lock()?;
+        let mut out = Vec::new();
+        if kinds.iter().any(|k| *k == "task") {
+            let mut stmt = conn.prepare(
+                "SELECT id, title, status FROM tasks WHERE title LIKE ?1 ESCAPE '\\' \
+                 ORDER BY updated_at DESC, id DESC LIMIT 100",
+            )?;
+            let rows = stmt.query_map(params![&pat], |r| {
+                Ok(SearchHit {
+                    kind: "task".into(),
+                    id: r.get(0)?,
+                    title: r.get(1)?,
+                    hint: r.get(2)?,
+                })
+            })?;
+            for row in rows {
+                out.push(row?);
+            }
+        }
+        if kinds.iter().any(|k| *k == "workspace") {
+            let mut stmt = conn.prepare(
+                "SELECT id, name, path FROM workspaces WHERE name LIKE ?1 ESCAPE '\\' OR path LIKE ?1 ESCAPE '\\' \
+                 ORDER BY created_at DESC, id DESC LIMIT 100",
+            )?;
+            let rows = stmt.query_map(params![&pat], |r| {
+                Ok(SearchHit {
+                    kind: "workspace".into(),
+                    id: r.get(0)?,
+                    title: r.get(1)?,
+                    hint: r.get(2)?,
+                })
+            })?;
+            for row in rows {
+                out.push(row?);
+            }
+        }
+        if kinds.iter().any(|k| *k == "artifact") {
+            let mut stmt = conn.prepare(
+                "SELECT id, title, kind FROM artifacts WHERE title LIKE ?1 ESCAPE '\\' OR body LIKE ?1 ESCAPE '\\' \
+                 ORDER BY updated_at DESC, id DESC LIMIT 100",
+            )?;
+            let rows = stmt.query_map(params![&pat], |r| {
+                Ok(SearchHit {
+                    kind: "artifact".into(),
+                    id: r.get(0)?,
+                    title: r.get(1)?,
+                    hint: r.get(2)?,
+                })
+            })?;
+            for row in rows {
+                out.push(row?);
+            }
+        }
+        Ok(out)
     }
 
     pub fn agent_set_run_location(&self, id: &str, run_location: &str) -> Result<()> {
@@ -2615,6 +2774,21 @@ fn import_bundle_tx(tx: &rusqlite::Transaction<'_>, bundle: &ImportBundle) -> Re
     })
 }
 
+fn like_pattern(q: &str) -> String {
+    let mut out = String::from("%");
+    for c in q.chars() {
+        match c {
+            '%' | '_' | '\\' => {
+                out.push('\\');
+                out.push(c);
+            }
+            _ => out.push(c),
+        }
+    }
+    out.push('%');
+    out
+}
+
 fn unique_violation(err: &rusqlite::Error) -> bool {
     matches!(
         err,
@@ -2842,7 +3016,7 @@ mod tests {
         {
             let conn = store.lock().unwrap();
             conn.execute(
-                "UPDATE schema_meta SET value = '9' WHERE key = 'schema'",
+                "UPDATE schema_meta SET value = '10' WHERE key = 'schema'",
                 [],
             )
             .unwrap();
@@ -2851,7 +3025,7 @@ mod tests {
         let err = Store::open(&db).unwrap_err();
         assert_eq!(err.code(), "internal");
         match &err {
-            StorageError::UnsupportedSchema(v) => assert_eq!(v, "9"),
+            StorageError::UnsupportedSchema(v) => assert_eq!(v, "10"),
             other => panic!("expected UnsupportedSchema, got {other:?}"),
         }
     }
@@ -2920,7 +3094,7 @@ mod tests {
     }
 
     #[test]
-    fn fresh_db_is_schema_eight() {
+    fn fresh_db_is_schema_nine() {
         let (_tmp, store) = open_store();
         let conn = rusqlite::Connection::open(store.path()).unwrap();
         let schema: String = conn
@@ -2930,7 +3104,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(schema, "8");
+        assert_eq!(schema, "9");
         let n: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'artifacts'",
@@ -2979,6 +3153,29 @@ mod tests {
             )
             .unwrap();
         assert_eq!(n, 1);
+        for name in [
+            "provider_accounts",
+            "user_presets",
+            "prompt_stash",
+            "worktree_settings",
+        ] {
+            let n: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                    [name],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 1, "missing table {name}");
+        }
+        let account_col: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('agents') WHERE name = 'account_id'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(account_col, 1);
     }
 
     #[test]
@@ -3014,7 +3211,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(schema, "8");
+        assert_eq!(schema, "9");
         let n: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'worktrees'",
@@ -3346,7 +3543,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(schema, "8");
+        assert_eq!(schema, "9");
         let n: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'policies'",
@@ -3558,7 +3755,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(schema, "8");
+        assert_eq!(schema, "9");
         let n: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('shells', 'pty_sessions')",
@@ -3661,7 +3858,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(schema, "8");
+        assert_eq!(schema, "9");
         let n: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'artifacts'",
@@ -3904,7 +4101,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(schema, "8");
+        assert_eq!(schema, "9");
         let n: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'loops'",
@@ -4058,7 +4255,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(schema, "8");
+        assert_eq!(schema, "9");
         let n: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'model_profiles'",
@@ -4220,7 +4417,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(schema, "8");
+        assert_eq!(schema, "9");
         let role_col: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM pragma_table_info('agents') WHERE name = 'role'",
@@ -4303,5 +4500,124 @@ mod tests {
                 assert!(!low.contains("guide"), "guide column {c} on {t}");
             }
         }
+    }
+
+    #[test]
+    fn migration_0009_matches_contract() {
+        assert!(MIGRATION_0009.contains("CREATE TABLE provider_accounts"));
+        assert!(MIGRATION_0009.contains("CREATE TABLE user_presets"));
+        assert!(MIGRATION_0009.contains("CREATE TABLE prompt_stash"));
+        assert!(MIGRATION_0009.contains("CREATE TABLE worktree_settings"));
+        assert!(MIGRATION_0009.contains("ALTER TABLE agents ADD COLUMN account_id TEXT"));
+        assert!(MIGRATION_0009
+            .contains("INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('schema', '9')"));
+        let low = MIGRATION_0009.to_ascii_lowercase();
+        assert!(!low.contains("token"));
+        assert!(!low.contains("pat"));
+        assert!(!low.contains("secret"));
+        assert!(!low.contains("api_key"));
+        assert!(!MIGRATION_0008.contains("provider_accounts"));
+        assert!(!MIGRATION_0008.contains("account_id"));
+    }
+
+    #[test]
+    fn migrate_from_eight_applies_0009() {
+        let dir = tempdir().unwrap();
+        let db = dir.path().join("host.db");
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute_batch(MIGRATION_0001).unwrap();
+            conn.execute_batch(MIGRATION_0002).unwrap();
+            conn.execute_batch(MIGRATION_0003).unwrap();
+            conn.execute_batch(MIGRATION_0004).unwrap();
+            conn.execute_batch(MIGRATION_0005).unwrap();
+            conn.execute_batch(MIGRATION_0006).unwrap();
+            conn.execute_batch(MIGRATION_0007).unwrap();
+            conn.execute_batch(MIGRATION_0008).unwrap();
+            let schema: String = conn
+                .query_row(
+                    "SELECT value FROM schema_meta WHERE key = 'schema'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(schema, "8");
+        }
+        let store = Store::open(&db).unwrap();
+        let conn = rusqlite::Connection::open(store.path()).unwrap();
+        let schema: String = conn
+            .query_row(
+                "SELECT value FROM schema_meta WHERE key = 'schema'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(schema, "9");
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'worktree_settings'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1);
+        let account_col: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('agents') WHERE name = 'account_id'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(account_col, 1);
+    }
+
+    #[test]
+    fn worktree_settings_and_search_query() {
+        let (_tmp, store) = open_store();
+        let host_id = new_id();
+        store.host_insert_if_absent(&host_id, "h").unwrap();
+        let ws = store.workspace_add("/needle-ws", "needle-ws").unwrap();
+        assert_eq!(store.worktree_branch_prefix(&ws.id).unwrap(), "rt/");
+        let set = store.worktree_settings_upsert(&ws.id, "feat/").unwrap();
+        assert_eq!(set.branch_prefix, "feat/");
+        assert_eq!(store.worktree_branch_prefix(&ws.id).unwrap(), "feat/");
+        let task = store.task_create("needle-task", &ws.id).unwrap();
+        let art = store
+            .artifact_create(ArtifactCreateInput {
+                task_id: &task.id,
+                parent_id: None,
+                kind: "spec",
+                title: "needle-art",
+                body: "unique-body-token",
+                assignee: None,
+                source_message_id: None,
+            })
+            .unwrap();
+        let hits = store
+            .search_query("needle", &["task", "workspace", "artifact"])
+            .unwrap();
+        let kinds: Vec<&str> = hits.iter().map(|h| h.kind.as_str()).collect();
+        assert!(kinds.contains(&"task"), "{hits:?}");
+        assert!(
+            kinds.contains(&"workspace") || hits.iter().any(|h| h.id == ws.id),
+            "{hits:?}"
+        );
+        assert!(hits.iter().any(|h| h.id == art.id), "{hits:?}");
+        let only_task = store.search_query("needle", &["task"]).unwrap();
+        assert!(only_task.iter().all(|h| h.kind == "task"), "{only_task:?}");
+        assert!(only_task.iter().any(|h| h.id == task.id));
+        let by_body = store
+            .search_query("unique-body-token", &["artifact"])
+            .unwrap();
+        assert!(by_body.iter().any(|h| h.id == art.id), "{by_body:?}");
+        assert!(store.search_query("", &["task"]).unwrap().is_empty());
+        let agent = store
+            .agent_create(&task.id, &host_id, "cli.generic")
+            .unwrap();
+        let wt = store
+            .worktree_insert(&ws.id, &agent.id, "/wt/missing", "rt/abc")
+            .unwrap();
+        store.worktree_delete(&wt.id).unwrap();
+        assert!(store.worktree_get(&wt.id).unwrap().is_none());
     }
 }
