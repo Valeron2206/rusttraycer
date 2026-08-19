@@ -54,6 +54,19 @@ pub enum WsEvent {
         kind: String,
         summary: String,
     },
+    #[serde(rename = "pty.data")]
+    PtyData {
+        #[serde(rename = "ptyId")]
+        pty_id: String,
+        data: String,
+    },
+    #[serde(rename = "pty.exit")]
+    PtyExit {
+        #[serde(rename = "ptyId")]
+        pty_id: String,
+        #[serde(default)]
+        code: i32,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,6 +77,8 @@ pub enum ApplyOutcome {
     GoingAway,
     TaskUpdated,
     Approval,
+    PtyData,
+    PtyExit,
     Ignored,
 }
 
@@ -170,6 +185,8 @@ pub fn apply_event(
             }
             ApplyOutcome::Approval
         }
+        WsEvent::PtyData { .. } => ApplyOutcome::PtyData,
+        WsEvent::PtyExit { .. } => ApplyOutcome::PtyExit,
     }
 }
 
@@ -499,6 +516,30 @@ mod tests {
         assert_eq!(
             apply_event(&mut messages, &ev, Some("task-1"), Some("ag-1")),
             ApplyOutcome::Approval
+        );
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn pty_events_do_not_touch_chat_messages() {
+        let mut messages = Vec::new();
+        let data = parse_event(r#"{"type":"pty.data","ptyId":"pty-9","data":"aGVsbG8="}"#).unwrap();
+        match &data {
+            WsEvent::PtyData { pty_id, data } => {
+                assert_eq!(pty_id, "pty-9");
+                assert_eq!(data, "aGVsbG8=");
+            }
+            other => panic!("expected pty.data, got {other:?}"),
+        }
+        assert_eq!(
+            apply_event(&mut messages, &data, Some("task-1"), Some("ag-1")),
+            ApplyOutcome::PtyData
+        );
+        assert!(messages.is_empty());
+        let exit = parse_event(r#"{"event":"pty.exit","ptyId":"pty-9","code":1}"#).unwrap();
+        assert_eq!(
+            apply_event(&mut messages, &exit, None, None),
+            ApplyOutcome::PtyExit
         );
         assert!(messages.is_empty());
     }

@@ -36,6 +36,24 @@ pub const WRITE_METHODS: &[&str] = &[
     METHOD_GIT_PUSH,
 ];
 
+pub const METHOD_SHELL_CREATE: &str = "shell.create";
+pub const METHOD_SHELL_LIST: &str = "shell.list";
+pub const METHOD_SHELL_CLOSE: &str = "shell.close";
+pub const METHOD_PTY_OPEN: &str = "pty.open";
+pub const METHOD_PTY_WRITE: &str = "pty.write";
+pub const METHOD_PTY_RESIZE: &str = "pty.resize";
+pub const METHOD_PTY_CLOSE: &str = "pty.close";
+
+pub const PTY_METHODS: &[&str] = &[
+    METHOD_SHELL_CREATE,
+    METHOD_SHELL_LIST,
+    METHOD_SHELL_CLOSE,
+    METHOD_PTY_OPEN,
+    METHOD_PTY_WRITE,
+    METHOD_PTY_RESIZE,
+    METHOD_PTY_CLOSE,
+];
+
 #[derive(Debug, Clone)]
 pub struct Session {
     pub host_id: String,
@@ -89,6 +107,18 @@ impl ConnectError {
 
     pub fn is_write_unsupported(&self) -> bool {
         self.is_unsupported_method() || self.is_version_mismatch()
+    }
+
+    pub fn is_pty_unsupported(&self) -> bool {
+        self.is_unsupported_method() || self.is_version_mismatch()
+    }
+
+    pub fn is_pty_dead(&self) -> bool {
+        matches!(self, Self::Rpc { code, .. } if code == "pty_dead")
+    }
+
+    pub fn is_not_pty(&self) -> bool {
+        matches!(self, Self::Rpc { code, .. } if code == "not_pty")
     }
 
     pub fn as_label(&self) -> String {
@@ -183,6 +213,9 @@ fn hello_methods() -> Value {
     }
     for name in WRITE_METHODS {
         map.insert(name.to_string(), json!({ "major": 1, "minor": 2 }));
+    }
+    for name in PTY_METHODS {
+        map.insert(name.to_string(), json!({ "major": 1, "minor": 3 }));
     }
     Value::Object(map)
 }
@@ -714,6 +747,108 @@ impl Session {
         }
         parse_ok(self.call_write(METHOD_GIT_PUSH, params)?)
     }
+
+    pub fn terminal_accepted(&self) -> bool {
+        fn ok(map: &BTreeMap<String, rt_protocol::MethodVersion>, name: &str) -> bool {
+            map.get(name)
+                .map(|v| v.major == 1 && v.minor >= 3)
+                .unwrap_or(false)
+        }
+        PTY_METHODS.iter().all(|name| ok(&self.accepted, name))
+    }
+
+    pub fn terminal_rejected(&self) -> bool {
+        PTY_METHODS
+            .iter()
+            .any(|name| self.rejected.contains_key(*name))
+    }
+
+    pub fn agent_create_with_interface(
+        &self,
+        task_id: &str,
+        provider: &str,
+        interface: &str,
+    ) -> Result<rt_protocol::Agent, ConnectError> {
+        parse_ok(self.call(
+            rt_protocol::METHOD_AGENT_CREATE,
+            json!({
+                "taskId": task_id,
+                "provider": provider,
+                "interface": interface,
+            }),
+        )?)
+    }
+
+    pub fn shell_create(
+        &self,
+        task_id: &str,
+        workspace_id: &str,
+        worktree_id: Option<&str>,
+        cols: u16,
+        rows: u16,
+    ) -> Result<ShellCreateOk, ConnectError> {
+        parse_ok(self.call(
+            METHOD_SHELL_CREATE,
+            json!({
+                "taskId": task_id,
+                "workspaceId": workspace_id,
+                "worktreeId": worktree_id,
+                "cols": cols,
+                "rows": rows,
+            }),
+        )?)
+    }
+
+    pub fn shell_list(&self, task_id: &str) -> Result<Vec<ShellInfo>, ConnectError> {
+        parse_items(self.call(METHOD_SHELL_LIST, json!({ "taskId": task_id }))?)
+    }
+
+    pub fn shell_close(&self, shell_id: &str) -> Result<Value, ConnectError> {
+        self.call(METHOD_SHELL_CLOSE, json!({ "shellId": shell_id }))
+    }
+
+    pub fn pty_open_agent(
+        &self,
+        agent_id: &str,
+        cols: u16,
+        rows: u16,
+    ) -> Result<PtyOpenOk, ConnectError> {
+        parse_ok(self.call(
+            METHOD_PTY_OPEN,
+            json!({ "agentId": agent_id, "cols": cols, "rows": rows }),
+        )?)
+    }
+
+    pub fn pty_open_shell(
+        &self,
+        shell_id: &str,
+        cols: u16,
+        rows: u16,
+    ) -> Result<PtyOpenOk, ConnectError> {
+        parse_ok(self.call(
+            METHOD_PTY_OPEN,
+            json!({ "shellId": shell_id, "cols": cols, "rows": rows }),
+        )?)
+    }
+
+    pub fn pty_write(&self, pty_id: &str, data: &[u8]) -> Result<Value, ConnectError> {
+        let encoded = crate::terminal::encode_b64(crate::terminal::clamp_write(data));
+        self.call(
+            METHOD_PTY_WRITE,
+            json!({ "ptyId": pty_id, "data": encoded }),
+        )
+    }
+
+    pub fn pty_resize(&self, pty_id: &str, cols: u16, rows: u16) -> Result<Value, ConnectError> {
+        self.call(
+            METHOD_PTY_RESIZE,
+            json!({ "ptyId": pty_id, "cols": cols, "rows": rows }),
+        )
+    }
+
+    pub fn pty_close(&self, pty_id: &str) -> Result<Value, ConnectError> {
+        self.call(METHOD_PTY_CLOSE, json!({ "ptyId": pty_id }))
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -869,6 +1004,33 @@ pub struct GitPushOk {
     #[serde(rename = "ref")]
     pub git_ref: String,
     pub ok: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShellCreateOk {
+    pub shell_id: String,
+    pub pty_id: String,
+    #[serde(default)]
+    pub cwd: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShellInfo {
+    pub shell_id: String,
+    #[serde(default)]
+    pub pty_id: Option<String>,
+    #[serde(default)]
+    pub cwd: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PtyOpenOk {
+    pub pty_id: String,
+    #[serde(default)]
+    pub resumed: bool,
 }
 
 pub fn keepalive(session: &Session) -> Result<(), ConnectError> {
@@ -2135,6 +2297,7 @@ mod tests {
             task_id: "task-1".into(),
             provider: "cli.generic".into(),
             status: AgentStatus::Idle,
+            interface: "chat".into(),
         });
         state.isolate_selected_agent();
         assert_eq!(state.worktree.as_ref().map(|w| w.id.as_str()), Some("wt-1"));
@@ -2582,5 +2745,237 @@ mod tests {
         let err = session.files_open("ws-1", None, "src/lib.rs").unwrap_err();
         assert!(err.is_unsupported_method());
         let _ = mock;
+    }
+
+    fn pty_accepted_map() -> Value {
+        let mut accepted = serde_json::Map::new();
+        for name in PTY_METHODS {
+            accepted.insert(name.to_string(), json!({"major": 1, "minor": 3}));
+        }
+        Value::Object(accepted)
+    }
+
+    fn start_pty_mock(mode: &'static str) -> CatalogMock {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(Mutex::new(Vec::new()));
+        let hits_t = hits.clone();
+        thread::spawn(move || {
+            for stream in listener.incoming().take(40) {
+                let Ok(mut stream) = stream else { break };
+                let (headers, body) = read_http_request(&mut stream);
+                let has_session = headers.to_ascii_lowercase().contains("x-rt-session:");
+                let (method, params) = if headers.starts_with("GET /health") {
+                    ("GET /health".to_string(), json!({}))
+                } else {
+                    let parsed: Value = serde_json::from_slice(&body).unwrap_or(json!({}));
+                    (
+                        parsed
+                            .get("method")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("other")
+                            .to_string(),
+                        parsed.get("params").cloned().unwrap_or(json!({})),
+                    )
+                };
+                hits_t.lock().unwrap().push(RpcHit {
+                    method: method.clone(),
+                    params: params.clone(),
+                    has_session,
+                });
+                let body = match (mode, method.as_str()) {
+                    (_, "GET /health") => json!({"ok": true, "hostId": "host-a"}).to_string(),
+                    ("ok", "handshake") => json!({
+                        "id": "echo",
+                        "ok": {
+                            "hostId": "host-a",
+                            "hostVersion": "0.1.0",
+                            "sessionToken": "tok-1",
+                            "accepted": pty_accepted_map(),
+                            "rejected": {}
+                        }
+                    })
+                    .to_string(),
+                    ("old", "handshake") => json!({
+                        "id": "echo",
+                        "ok": {
+                            "hostId": "host-a",
+                            "hostVersion": "0.1.0",
+                            "sessionToken": "tok-1",
+                            "accepted": {},
+                            "rejected": {
+                                "shell.create": {"reason": "unsupported"},
+                                "shell.list": {"reason": "unsupported"},
+                                "shell.close": {"reason": "unsupported"},
+                                "pty.open": {"reason": "unsupported"},
+                                "pty.write": {"reason": "unsupported"},
+                                "pty.resize": {"reason": "unsupported"},
+                                "pty.close": {"reason": "unsupported"}
+                            }
+                        }
+                    })
+                    .to_string(),
+                    (_, "host.ping") => json!({
+                        "id": "echo",
+                        "ok": { "hostId": "host-a", "now": "2026-08-17T12:00:00Z" }
+                    })
+                    .to_string(),
+                    ("ok", "shell.create") => json!({
+                        "id": "echo",
+                        "ok": {
+                            "shellId": "sh-1",
+                            "ptyId": "pty-shell-1",
+                            "cwd": "/tmp/proj"
+                        }
+                    })
+                    .to_string(),
+                    ("ok", "shell.list") => json!({
+                        "id": "echo",
+                        "ok": {
+                            "items": [{
+                                "shellId": "sh-1",
+                                "ptyId": "pty-shell-1",
+                                "cwd": "/tmp/proj"
+                            }]
+                        }
+                    })
+                    .to_string(),
+                    ("ok", "shell.close") => json!({ "id": "echo", "ok": {} }).to_string(),
+                    ("ok", "pty.open") => json!({
+                        "id": "echo",
+                        "ok": { "ptyId": "pty-ag-1", "resumed": false }
+                    })
+                    .to_string(),
+                    ("ok", "pty.write" | "pty.resize" | "pty.close") => {
+                        json!({ "id": "echo", "ok": {} }).to_string()
+                    }
+                    ("ok", "agent.create") => {
+                        let task_id = params.get("taskId").and_then(|v| v.as_str()).unwrap_or("");
+                        let interface = params
+                            .get("interface")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("chat");
+                        json!({
+                            "id": "echo",
+                            "ok": {
+                                "id": "ag-term",
+                                "taskId": task_id,
+                                "hostId": "host-a",
+                                "parentId": null,
+                                "interface": interface,
+                                "provider": params.get("provider").and_then(|v| v.as_str()).unwrap_or("cli.claude"),
+                                "status": "idle",
+                                "runLocation": "local",
+                                "createdAt": "2026-08-17T12:00:00Z"
+                            }
+                        })
+                        .to_string()
+                    }
+                    _ => json!({
+                        "id": "echo",
+                        "error": { "code": "unsupported_method", "message": "no 1.3" }
+                    })
+                    .to_string(),
+                };
+                write_http_json(&mut stream, &body);
+            }
+        });
+        CatalogMock {
+            origin: format!("http://{addr}"),
+            hits,
+        }
+    }
+
+    #[test]
+    fn handshake_advertises_pty_methods_1_3() {
+        let mock = start_catalog_mock("host-a", "tok-1");
+        let _session = connect(&pid("host-a", &mock.origin)).expect("online");
+        let hs = mock
+            .hits
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|h| h.method == "handshake")
+            .cloned()
+            .expect("handshake");
+        for name in PTY_METHODS {
+            assert_eq!(hs.params["methods"][name]["major"], 1, "{name}");
+            assert_eq!(hs.params["methods"][name]["minor"], 3, "{name}");
+        }
+    }
+
+    #[test]
+    fn pty_write_resize_send_correct_method_and_params() {
+        let mock = start_pty_mock("ok");
+        let session = connect(&pid("host-a", &mock.origin)).expect("online");
+        assert!(session.terminal_accepted());
+        session.pty_write("pty-1", b"ls\n").expect("write");
+        session.pty_resize("pty-1", 100, 30).expect("resize");
+        let created = session
+            .shell_create("task-1", "ws-1", None, 80, 24)
+            .expect("shell");
+        assert_eq!(created.shell_id, "sh-1");
+        assert_eq!(created.pty_id, "pty-shell-1");
+        let listed = session.shell_list("task-1").expect("list");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].shell_id, "sh-1");
+        session.pty_open_agent("ag-1", 80, 24).expect("open");
+
+        let hits = mock.hits.lock().unwrap().clone();
+        let write = hits.iter().find(|h| h.method == "pty.write").unwrap();
+        assert_eq!(write.params["ptyId"], "pty-1");
+        assert_eq!(write.params["data"], crate::terminal::encode_b64(b"ls\n"));
+        assert!(write.has_session);
+        let resize = hits.iter().find(|h| h.method == "pty.resize").unwrap();
+        assert_eq!(resize.params["ptyId"], "pty-1");
+        assert_eq!(resize.params["cols"], 100);
+        assert_eq!(resize.params["rows"], 30);
+        let create = hits.iter().find(|h| h.method == "shell.create").unwrap();
+        assert_eq!(create.params["taskId"], "task-1");
+        assert_eq!(create.params["workspaceId"], "ws-1");
+        assert_eq!(create.params["cols"], 80);
+        assert_eq!(create.params["rows"], 24);
+        let open = hits.iter().find(|h| h.method == "pty.open").unwrap();
+        assert_eq!(open.params["agentId"], "ag-1");
+        assert!(open.params.get("shellId").is_none());
+    }
+
+    #[test]
+    fn old_host_pty_methods_error_not_panic() {
+        let mock = start_pty_mock("old");
+        let session = connect(&pid("host-a", &mock.origin)).expect("online");
+        assert!(!session.terminal_accepted());
+        assert!(session.terminal_rejected());
+        let err = session.pty_write("pty-1", b"x").unwrap_err();
+        assert!(err.is_pty_unsupported(), "{err:?}");
+        let label = err.as_label();
+        assert!(label.contains("unsupported_method"), "{label}");
+        let err = session
+            .shell_create("task-1", "ws-1", None, 80, 24)
+            .unwrap_err();
+        assert!(err.is_unsupported_method());
+        let _ = mock;
+    }
+
+    #[test]
+    fn agent_create_with_interface_sends_terminal() {
+        let mock = start_pty_mock("ok");
+        let session = connect(&pid("host-a", &mock.origin)).expect("online");
+        let agent = session
+            .agent_create_with_interface("task-1", "cli.claude", "terminal")
+            .expect("create");
+        assert_eq!(agent.interface, "terminal");
+        assert_eq!(agent.id, "ag-term");
+        let hit = mock
+            .hits
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|h| h.method == "agent.create")
+            .cloned()
+            .expect("agent.create");
+        assert_eq!(hit.params["interface"], "terminal");
+        assert_eq!(hit.params["taskId"], "task-1");
+        assert_eq!(hit.params["provider"], "cli.claude");
     }
 }
