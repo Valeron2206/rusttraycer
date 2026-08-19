@@ -558,7 +558,20 @@ mod tests {
         assert_eq!(backend.caps(), HarnessCaps::CLI_CODEX);
         assert!(backend.caps().pty);
         assert!(backend.caps().session_resume);
+        assert!(!backend.caps().a2a_inbox);
         assert_eq!(backend.id(), "cli.codex");
+    }
+
+    #[test]
+    fn vendor_transcript_is_unsupported() {
+        let backend = CliCodex::new("/bin/true");
+        let err = backend
+            .read_vendor_transcript(crate::VendorTranscriptRequest {
+                session_id: "sess".into(),
+                workspace_path: std::env::temp_dir(),
+            })
+            .expect_err("codex has no inbox/history");
+        assert!(err.message.contains("cli.codex"), "{}", err.message);
     }
 
     #[tokio::test]

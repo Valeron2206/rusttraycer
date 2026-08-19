@@ -11,7 +11,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 
 use crate::{
-    AgentBackend, Availability, CancelErr, HarnessCaps, TurnEvent, TurnRequest, WireMessage,
+    AgentBackend, Availability, CancelErr, HarnessCaps, TurnEvent, TurnRequest,
+    VendorTranscriptErr, VendorTranscriptRequest, WireMessage, WireRole,
 };
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
@@ -193,6 +194,130 @@ fn parse_stream_json_line(line: &str) -> LineEffect {
     }
 }
 
+fn encode_claude_project_dir(workspace: &Path) -> String {
+    let abs = workspace
+        .canonicalize()
+        .unwrap_or_else(|_| workspace.to_path_buf());
+    abs.to_string_lossy()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect()
+}
+
+fn claude_config_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR") {
+        let p = PathBuf::from(dir);
+        if !p.as_os_str().is_empty() {
+            return p;
+        }
+    }
+    match std::env::var_os("HOME") {
+        Some(home) => PathBuf::from(home).join(".claude"),
+        None => PathBuf::from(".claude"),
+    }
+}
+
+fn session_id_ok(id: &str) -> bool {
+    !id.is_empty()
+        && !id.contains('/')
+        && !id.contains('\\')
+        && !id.contains("..")
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+fn extract_history_text(v: &serde_json::Value) -> Option<String> {
+    let content = v.pointer("/message/content").or_else(|| v.get("content"))?;
+    if let Some(s) = content.as_str() {
+        if s.is_empty() {
+            return None;
+        }
+        return Some(s.to_string());
+    }
+    let arr = content.as_array()?;
+    let mut parts = Vec::new();
+    for block in arr {
+        let btype = block.get("type").and_then(|t| t.as_str()).unwrap_or("text");
+        if btype == "text" {
+            if let Some(t) = block.get("text").and_then(|t| t.as_str()) {
+                if !t.is_empty() {
+                    parts.push(t.to_string());
+                }
+            }
+        }
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(""))
+    }
+}
+
+fn parse_vendor_history_line(line: &str) -> Option<WireMessage> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_str(trimmed).ok()?;
+    let typ = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+    let role = match typ {
+        "user" | "human" => WireRole::User,
+        "assistant" => WireRole::Assistant,
+        _ => return None,
+    };
+    let content = extract_history_text(&v)?;
+    Some(WireMessage { role, content })
+}
+
+fn vendor_session_path(workspace: &Path, session_id: &str) -> Result<PathBuf, VendorTranscriptErr> {
+    let encoded = encode_claude_project_dir(workspace);
+    let root = claude_config_dir().join("projects").join(encoded);
+    let flat = root.join(format!("{session_id}.jsonl"));
+    if flat.is_file() {
+        return Ok(flat);
+    }
+    let nested = root.join("sessions").join(format!("{session_id}.jsonl"));
+    if nested.is_file() {
+        return Ok(nested);
+    }
+    Err(VendorTranscriptErr {
+        message: "no vendor session".into(),
+    })
+}
+
+fn read_claude_vendor_transcript(
+    req: &VendorTranscriptRequest,
+) -> Result<Vec<WireMessage>, VendorTranscriptErr> {
+    let sid = req.session_id.trim();
+    if sid.is_empty() {
+        return Err(VendorTranscriptErr {
+            message: "session id is empty".into(),
+        });
+    }
+    if !session_id_ok(sid) {
+        return Err(VendorTranscriptErr {
+            message: "session id is invalid".into(),
+        });
+    }
+    let path = vendor_session_path(&req.workspace_path, sid)?;
+    let raw = std::fs::read_to_string(&path).map_err(|e| VendorTranscriptErr {
+        message: format!("vendor session read: {e}"),
+    })?;
+    let mut messages = Vec::new();
+    for line in raw.lines() {
+        if let Some(m) = parse_vendor_history_line(line) {
+            messages.push(m);
+        }
+    }
+    if messages.is_empty() {
+        return Err(VendorTranscriptErr {
+            message: "provider silent".into(),
+        });
+    }
+    Ok(messages)
+}
+
 impl AgentBackend for CliClaude {
     fn id(&self) -> &'static str {
         "cli.claude"
@@ -253,6 +378,13 @@ impl AgentBackend for CliClaude {
             kill_pid_group(pid);
         }
         Ok(())
+    }
+
+    fn read_vendor_transcript(
+        &self,
+        req: VendorTranscriptRequest,
+    ) -> Result<Vec<WireMessage>, VendorTranscriptErr> {
+        read_claude_vendor_transcript(&req)
     }
 }
 
@@ -569,6 +701,7 @@ mod tests {
         assert_eq!(backend.caps(), HarnessCaps::CLI_CLAUDE);
         assert!(backend.caps().pty);
         assert!(backend.caps().session_resume);
+        assert!(backend.caps().a2a_inbox);
         assert_eq!(backend.id(), "cli.claude");
     }
 
@@ -977,5 +1110,135 @@ print(json.dumps({"type":"assistant","message":{"content":[{"type":"text","text"
             !tokens.contains("--resume"),
             "empty session must not resume, tokens={tokens:?}"
         );
+    }
+
+    fn write_vendor_jsonl(
+        config: &Path,
+        workspace: &Path,
+        session_id: &str,
+        body: &str,
+    ) -> PathBuf {
+        let encoded = encode_claude_project_dir(workspace);
+        let dir = config.join("projects").join(encoded);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("{session_id}.jsonl"));
+        std::fs::write(&path, body).unwrap();
+        path
+    }
+
+    #[test]
+    fn parse_vendor_history_user_and_assistant() {
+        let user = parse_vendor_history_line(
+            r#"{"type":"user","message":{"role":"user","content":"hello"}}"#,
+        )
+        .expect("user");
+        assert_eq!(user.role, WireRole::User);
+        assert_eq!(user.content, "hello");
+        let asst = parse_vendor_history_line(
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}"#,
+        )
+        .expect("assistant");
+        assert_eq!(asst.role, WireRole::Assistant);
+        assert_eq!(asst.content, "hi");
+        assert!(parse_vendor_history_line(r#"{"type":"system"}"#).is_none());
+        assert!(parse_vendor_history_line("not-json").is_none());
+    }
+
+    #[test]
+    fn vendor_transcript_reads_session_not_scrollback() {
+        let _g = crate::TEST_ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("ws");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let config = dir.path().join("claude");
+        let _cfg = EnvRestore::set("CLAUDE_CONFIG_DIR", &config.to_string_lossy());
+        write_vendor_jsonl(
+            &config,
+            &workspace,
+            "sess-1",
+            concat!(
+                r#"{"type":"user","message":{"content":"from vendor"}}"#,
+                "
+",
+                r#"{"type":"assistant","message":{"content":[{"type":"text","text":"ok"}]}}"#,
+                "
+",
+            ),
+        );
+        let encoded = encode_claude_project_dir(&workspace);
+        std::fs::write(
+            config.join("projects").join(encoded).join("scrollback"),
+            "PTY BYTES MUST NOT BE READ",
+        )
+        .unwrap();
+        let backend = CliClaude::new("/bin/true");
+        let messages = backend
+            .read_vendor_transcript(VendorTranscriptRequest {
+                session_id: "sess-1".into(),
+                workspace_path: workspace,
+            })
+            .expect("vendor history");
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].content, "from vendor");
+        assert_eq!(messages[1].content, "ok");
+        assert!(messages.iter().all(|m| !m.content.contains("PTY")));
+    }
+
+    #[test]
+    fn vendor_transcript_missing_session_is_error() {
+        let _g = crate::TEST_ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("ws");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let config = dir.path().join("claude");
+        std::fs::create_dir_all(&config).unwrap();
+        let _cfg = EnvRestore::set("CLAUDE_CONFIG_DIR", &config.to_string_lossy());
+        let backend = CliClaude::new("/bin/true");
+        let err = backend
+            .read_vendor_transcript(VendorTranscriptRequest {
+                session_id: "missing".into(),
+                workspace_path: workspace,
+            })
+            .expect_err("missing");
+        assert!(err.message.contains("no vendor session"), "{}", err.message);
+    }
+
+    #[test]
+    fn vendor_transcript_silent_provider_is_error() {
+        let _g = crate::TEST_ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("ws");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let config = dir.path().join("claude");
+        let _cfg = EnvRestore::set("CLAUDE_CONFIG_DIR", &config.to_string_lossy());
+        write_vendor_jsonl(&config, &workspace, "quiet", r#"{"type":"system"}"#);
+        let backend = CliClaude::new("/bin/true");
+        let err = backend
+            .read_vendor_transcript(VendorTranscriptRequest {
+                session_id: "quiet".into(),
+                workspace_path: workspace,
+            })
+            .expect_err("silent");
+        assert!(err.message.contains("provider silent"), "{}", err.message);
+    }
+
+    #[test]
+    fn vendor_transcript_rejects_empty_and_path_session_id() {
+        let backend = CliClaude::new("/bin/true");
+        let ws = std::env::temp_dir();
+        let empty = backend
+            .read_vendor_transcript(VendorTranscriptRequest {
+                session_id: "  ".into(),
+                workspace_path: ws.clone(),
+            })
+            .expect_err("empty");
+        assert!(empty.message.contains("empty"), "{}", empty.message);
+        let slash = backend
+            .read_vendor_transcript(VendorTranscriptRequest {
+                session_id: "../etc".into(),
+                workspace_path: ws,
+            })
+            .expect_err("slash");
+        assert!(slash.message.contains("invalid"), "{}", slash.message);
     }
 }

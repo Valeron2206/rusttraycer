@@ -107,7 +107,7 @@ impl HarnessCaps {
         stream_tokens: true,
         tools: false,
         session_resume: true,
-        a2a_inbox: false,
+        a2a_inbox: true,
         pty: true,
         needs_api_key: false,
         api_key_env: None,
@@ -151,6 +151,28 @@ pub trait AgentBackend: Send + Sync {
     fn cancel_turn(&self, _agent_id: &str) -> Result<(), CancelErr> {
         Ok(())
     }
+    /// Terminal A2A transcript: vendor session on this host, never PTY scrollback.
+    /// Missing or silent provider session → Err, not an empty list.
+    fn read_vendor_transcript(
+        &self,
+        _req: VendorTranscriptRequest,
+    ) -> Result<Vec<WireMessage>, VendorTranscriptErr> {
+        Err(VendorTranscriptErr {
+            message: format!("{} has no vendor transcript", self.id()),
+        })
+    }
+}
+
+/// Host passes stored `providerSessionId` + workspace. Integration reads the vendor file.
+#[derive(Debug, Clone)]
+pub struct VendorTranscriptRequest {
+    pub session_id: String,
+    pub workspace_path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VendorTranscriptErr {
+    pub message: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -246,13 +268,18 @@ mod cancel_tests {
         assert_eq!(WireRole::Tool.as_str(), "tool");
     }
 
-    fn assert_one_shot_cli_caps(caps: HarnessCaps, pty: bool, session_resume: bool) {
+    fn assert_one_shot_cli_caps(
+        caps: HarnessCaps,
+        pty: bool,
+        session_resume: bool,
+        a2a_inbox: bool,
+    ) {
         assert!(caps.one_shot);
         assert!(!caps.long_lived);
         assert!(caps.stream_tokens);
         assert!(!caps.tools);
         assert_eq!(caps.session_resume, session_resume);
-        assert!(!caps.a2a_inbox);
+        assert_eq!(caps.a2a_inbox, a2a_inbox);
         assert_eq!(caps.pty, pty);
         assert!(!caps.needs_api_key);
         assert!(caps.api_key_env.is_none());
@@ -260,20 +287,44 @@ mod cancel_tests {
 
     #[test]
     fn harness_caps_cli_generic_fields() {
-        assert_one_shot_cli_caps(HarnessCaps::CLI_GENERIC, false, false);
+        assert_one_shot_cli_caps(HarnessCaps::CLI_GENERIC, false, false, false);
     }
 
     #[test]
     fn harness_caps_cli_claude_fields() {
-        assert_one_shot_cli_caps(HarnessCaps::CLI_CLAUDE, true, true);
+        assert_one_shot_cli_caps(HarnessCaps::CLI_CLAUDE, true, true, true);
         assert_ne!(HarnessCaps::CLI_CLAUDE, HarnessCaps::CLI_GENERIC);
     }
 
     #[test]
     fn harness_caps_cli_codex_fields() {
-        assert_one_shot_cli_caps(HarnessCaps::CLI_CODEX, true, true);
-        assert_eq!(HarnessCaps::CLI_CODEX, HarnessCaps::CLI_CLAUDE);
+        assert_one_shot_cli_caps(HarnessCaps::CLI_CODEX, true, true, false);
+        assert_ne!(HarnessCaps::CLI_CODEX, HarnessCaps::CLI_CLAUDE);
         assert_ne!(HarnessCaps::CLI_CODEX, HarnessCaps::CLI_GENERIC);
+    }
+
+    #[test]
+    fn default_backend_has_no_vendor_transcript() {
+        let err = NoChild
+            .read_vendor_transcript(VendorTranscriptRequest {
+                session_id: "sess".into(),
+                workspace_path: PathBuf::from("/tmp"),
+            })
+            .expect_err("default is no vendor history");
+        assert!(err.message.contains("test.noop"), "{}", err.message);
+    }
+
+    #[test]
+    fn generic_has_no_inbox_or_vendor_transcript() {
+        let backend = CliGeneric::new("/bin/true");
+        assert!(!backend.caps().a2a_inbox);
+        let err = backend
+            .read_vendor_transcript(VendorTranscriptRequest {
+                session_id: "sess".into(),
+                workspace_path: PathBuf::from("/tmp"),
+            })
+            .expect_err("generic has no A2A");
+        assert!(err.message.contains("cli.generic"), "{}", err.message);
     }
 
     #[test]
