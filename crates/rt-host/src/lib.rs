@@ -59,6 +59,10 @@ pub enum HostError {
     GitConflict(String),
     #[error("patch failed: {0}")]
     PatchFailed(String),
+    #[error("not a pty harness")]
+    NotPty,
+    #[error("pty is dead")]
+    PtyDead,
     #[error("{0}")]
     Internal(String),
     #[error("already running (pid {pid})")]
@@ -87,6 +91,8 @@ impl HostError {
             Self::GitAuth(_) => "git_auth",
             Self::GitConflict(_) => "git_conflict",
             Self::PatchFailed(_) => "patch_failed",
+            Self::NotPty => "not_pty",
+            Self::PtyDead => "pty_dead",
             Self::Internal(_) | Self::Io(_) | Self::Json(_) => "internal",
             Self::AlreadyRunning { .. } => "already_running",
         }
@@ -452,6 +458,8 @@ mod tests {
         assert_eq!(HostError::GitAuth("x".into()).code(), "git_auth");
         assert_eq!(HostError::GitConflict("x".into()).code(), "git_conflict");
         assert_eq!(HostError::PatchFailed("x".into()).code(), "patch_failed");
+        assert_eq!(HostError::NotPty.code(), "not_pty");
+        assert_eq!(HostError::PtyDead.code(), "pty_dead");
         assert_eq!(HostError::Internal("x".into()).code(), "internal");
         assert_eq!(
             HostError::AlreadyRunning {

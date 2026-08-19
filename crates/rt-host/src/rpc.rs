@@ -183,7 +183,31 @@ async fn dispatch_method(
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| HostError::InvalidParams("taskId is required".into()))?;
             let provider = params.get("provider").and_then(|v| v.as_str());
-            Ok(serde_json::to_value(svc.agent_create(task_id, provider)?)?)
+            let interface = params.get("interface").and_then(|v| v.as_str());
+            let launch_args = match params.get("launchArgs") {
+                None | Some(Value::Null) => None,
+                Some(Value::Array(arr)) => {
+                    let mut out = Vec::new();
+                    for v in arr {
+                        let s = v.as_str().ok_or_else(|| {
+                            HostError::InvalidParams("launchArgs must be strings".into())
+                        })?;
+                        out.push(s.to_string());
+                    }
+                    Some(out)
+                }
+                Some(_) => {
+                    return Err(HostError::InvalidParams(
+                        "launchArgs must be an array of strings".into(),
+                    ));
+                }
+            };
+            Ok(serde_json::to_value(svc.agent_create_ex(
+                task_id,
+                provider,
+                interface,
+                launch_args,
+            )?)?)
         }
         "agent.get" => {
             let id = require_id(&params)?;
@@ -328,6 +352,105 @@ async fn dispatch_method(
         "git.restore" => Ok(serde_json::to_value(svc.git_restore(&params)?)?),
         "git.commit" => Ok(serde_json::to_value(svc.git_commit(&params)?)?),
         "git.push" => Ok(serde_json::to_value(svc.git_push(&params).await?)?),
+        "pty.open" => {
+            let ladder = match session_token {
+                Some(t) => svc.session_accepts(t, rt_protocol::METHOD_POLICY_GET)? == Some(true),
+                None => false,
+            };
+            let agent_id = params.get("agentId").and_then(|v| v.as_str());
+            let shell_id = params.get("shellId").and_then(|v| v.as_str());
+            let cols = params
+                .get("cols")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| HostError::InvalidParams("cols is required".into()))?;
+            let rows = params
+                .get("rows")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| HostError::InvalidParams("rows is required".into()))?;
+            if cols > u16::MAX as u64 || rows > u16::MAX as u64 {
+                return Err(HostError::InvalidParams(
+                    "cols and rows must be in 1..=500".into(),
+                ));
+            }
+            svc.pty_open(agent_id, shell_id, cols as u16, rows as u16, ladder)
+        }
+        "pty.write" => {
+            let pty_id = params
+                .get("ptyId")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| HostError::InvalidParams("ptyId is required".into()))?;
+            let data = params
+                .get("data")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| HostError::InvalidParams("data is required".into()))?;
+            svc.pty_write(pty_id, data)
+        }
+        "pty.resize" => {
+            let pty_id = params
+                .get("ptyId")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| HostError::InvalidParams("ptyId is required".into()))?;
+            let cols = params
+                .get("cols")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| HostError::InvalidParams("cols is required".into()))?;
+            let rows = params
+                .get("rows")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| HostError::InvalidParams("rows is required".into()))?;
+            if cols > u16::MAX as u64 || rows > u16::MAX as u64 {
+                return Err(HostError::InvalidParams(
+                    "cols and rows must be in 1..=500".into(),
+                ));
+            }
+            svc.pty_resize(pty_id, cols as u16, rows as u16)
+        }
+        "pty.close" => {
+            let pty_id = params
+                .get("ptyId")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| HostError::InvalidParams("ptyId is required".into()))?;
+            svc.pty_close(pty_id)
+        }
+        "shell.create" => {
+            let task_id = params
+                .get("taskId")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| HostError::InvalidParams("taskId is required".into()))?;
+            let workspace_id = params
+                .get("workspaceId")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| HostError::InvalidParams("workspaceId is required".into()))?;
+            let worktree_id = params.get("worktreeId").and_then(|v| v.as_str());
+            let cols = params
+                .get("cols")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| HostError::InvalidParams("cols is required".into()))?;
+            let rows = params
+                .get("rows")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| HostError::InvalidParams("rows is required".into()))?;
+            if cols > u16::MAX as u64 || rows > u16::MAX as u64 {
+                return Err(HostError::InvalidParams(
+                    "cols and rows must be in 1..=500".into(),
+                ));
+            }
+            svc.shell_create(task_id, workspace_id, worktree_id, cols as u16, rows as u16)
+        }
+        "shell.list" => {
+            let task_id = params
+                .get("taskId")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| HostError::InvalidParams("taskId is required".into()))?;
+            svc.shell_list(task_id)
+        }
+        "shell.close" => {
+            let shell_id = params
+                .get("shellId")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| HostError::InvalidParams("shellId is required".into()))?;
+            svc.shell_close(shell_id)
+        }
         other => Err(HostError::UnsupportedMethod(other.to_string())),
     };
     match &result {
@@ -384,6 +507,22 @@ pub enum WsEvent {
         kind: String,
         summary: String,
     },
+    #[serde(rename = "pty.data")]
+    PtyData {
+        #[serde(rename = "taskId")]
+        task_id: String,
+        #[serde(rename = "ptyId")]
+        pty_id: String,
+        data: String,
+    },
+    #[serde(rename = "pty.exit")]
+    PtyExit {
+        #[serde(rename = "taskId")]
+        task_id: String,
+        #[serde(rename = "ptyId")]
+        pty_id: String,
+        code: i32,
+    },
 }
 
 impl WsEvent {
@@ -431,12 +570,31 @@ impl WsEvent {
         }
     }
 
+    pub fn pty_data(task_id: &str, pty_id: &str, bytes: &[u8]) -> Self {
+        use base64::Engine;
+        Self::PtyData {
+            task_id: task_id.to_string(),
+            pty_id: pty_id.to_string(),
+            data: base64::engine::general_purpose::STANDARD.encode(bytes),
+        }
+    }
+
+    pub fn pty_exit(task_id: &str, pty_id: &str, code: i32) -> Self {
+        Self::PtyExit {
+            task_id: task_id.to_string(),
+            pty_id: pty_id.to_string(),
+            code,
+        }
+    }
+
     pub fn task_id(&self) -> Option<&str> {
         match self {
             Self::AgentMessage { task_id, .. }
             | Self::AgentStatus { task_id, .. }
             | Self::TaskUpdated { task_id }
-            | Self::AgentApproval { task_id, .. } => Some(task_id.as_str()),
+            | Self::AgentApproval { task_id, .. }
+            | Self::PtyData { task_id, .. }
+            | Self::PtyExit { task_id, .. } => Some(task_id.as_str()),
             Self::HostGoingAway { .. } => None,
         }
     }

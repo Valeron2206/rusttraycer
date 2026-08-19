@@ -20,6 +20,8 @@ use serde::Serialize;
 use crate::bind;
 use crate::files;
 use crate::handshake::{self, HandshakeParams, HandshakeResult};
+use crate::mux::{Mux, MuxIoError, PtyKind};
+use crate::pty::{self, SpawnSpec};
 use crate::rpc::WsEvent;
 use crate::supervisor::{self, Inflight};
 use crate::{HostError, Result};
@@ -51,6 +53,10 @@ enum PendingKind {
         workspace_id: String,
         worktree_id: Option<String>,
         patch: String,
+    },
+    PtyOpen {
+        cols: u16,
+        rows: u16,
     },
 }
 
@@ -92,6 +98,8 @@ pub struct HostService {
     rpc_url: String,
     pid: u32,
     turn_timeout: Duration,
+    mux: std::sync::Arc<Mux>,
+    launch_args: Arc<Mutex<HashMap<String, Vec<String>>>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -141,6 +149,7 @@ pub struct AgentView {
     pub created_at: String,
     pub last_message_at: Option<String>,
     pub yolo: bool,
+    pub provider_session_id: Option<String>,
 }
 
 impl From<Agent> for AgentView {
@@ -157,6 +166,7 @@ impl From<Agent> for AgentView {
             created_at: a.created_at,
             last_message_at: None,
             yolo: false,
+            provider_session_id: a.provider_session_id,
         }
     }
 }
@@ -227,6 +237,8 @@ impl HostService {
             rpc_url,
             pid,
             turn_timeout: supervisor::TURN_TIMEOUT,
+            mux: std::sync::Arc::new(Mux::new()),
+            launch_args: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -415,17 +427,64 @@ impl HostService {
     }
 
     pub fn agent_create(&self, task_id: &str, provider: Option<&str>) -> Result<Agent> {
+        self.agent_create_ex(task_id, provider, None, None)
+    }
+
+    pub fn agent_create_ex(
+        &self,
+        task_id: &str,
+        provider: Option<&str>,
+        interface: Option<&str>,
+        launch_args: Option<Vec<String>>,
+    ) -> Result<Agent> {
         let provider = provider.unwrap_or("cli.generic");
         if !matches!(provider, "cli.generic" | "cli.claude" | "cli.codex") {
             return Err(HostError::InvalidParams(format!(
                 "provider must be cli.generic|cli.claude|cli.codex, got {provider}"
             )));
         }
+        let interface = interface.unwrap_or("chat");
+        if interface != "chat" && interface != "terminal" {
+            return Err(HostError::InvalidParams(format!(
+                "interface must be chat|terminal, got {interface}"
+            )));
+        }
+        let launch_args = launch_args.unwrap_or_default();
+        if !launch_args.is_empty() && interface != "terminal" {
+            return Err(HostError::InvalidParams(
+                "launchArgs is only valid when interface=terminal".into(),
+            ));
+        }
+        if launch_args.len() > 32 {
+            return Err(HostError::InvalidParams(
+                "launchArgs must have at most 32 strings".into(),
+            ));
+        }
         if self.store.task_get(task_id)?.is_none() {
             return Err(HostError::NotFound(format!("task {task_id}")));
         }
+        if interface == "terminal" {
+            let pty = self
+                .backends
+                .get(provider)
+                .map(|b| b.caps().pty)
+                .unwrap_or(false);
+            if !pty {
+                return Err(HostError::NotPty);
+            }
+        }
         // available=false does not block create
-        Ok(self.store.agent_create(task_id, &self.host_id, provider)?)
+        let agent =
+            self.store
+                .agent_create_interface(task_id, &self.host_id, provider, interface)?;
+        if interface == "terminal" && !launch_args.is_empty() {
+            let mut g = self
+                .launch_args
+                .lock()
+                .map_err(|_| HostError::Internal("launch_args lock poisoned".into()))?;
+            g.insert(agent.id.clone(), launch_args);
+        }
+        Ok(agent)
     }
 
     pub fn agent_get(&self, id: &str) -> Result<AgentView> {
@@ -505,6 +564,12 @@ impl HostService {
             .store
             .agent_get(agent_id)?
             .ok_or_else(|| HostError::NotFound(format!("agent {agent_id}")))?;
+
+        if agent.interface == "terminal" {
+            return Err(HostError::InvalidParams(
+                "agent.send is not valid on interface=terminal; use pty.write".into(),
+            ));
+        }
 
         if agent.status == AgentStatus::Running
             || self.inflight.contains(agent_id)?
@@ -601,6 +666,17 @@ impl HostService {
             .agent_get(agent_id)?
             .ok_or_else(|| HostError::NotFound(format!("agent {agent_id}")))?;
 
+        let closed_pty = match self.mux.kill_entity(PtyKind::Agent, agent_id) {
+            Ok(Some(_)) => {
+                if let Err(e) = self.store.agent_set_status(agent_id, AgentStatus::Idle) {
+                    tracing::warn!(agent_id, error = %e, "pty close status");
+                }
+                true
+            }
+            Ok(None) => false,
+            Err(e) => return Err(HostError::Internal(e)),
+        };
+
         if self.clear_pending_for_agent(agent_id)? {
             tracing::info!(agent_id, "cancel pending approval");
             return Ok(CancelOk {
@@ -610,7 +686,7 @@ impl HostService {
         }
 
         let has_inflight = self.inflight.contains(agent_id)?;
-        if !has_inflight && agent.status != AgentStatus::Running {
+        if !has_inflight && agent.status != AgentStatus::Running && !closed_pty {
             return Ok(CancelOk {
                 agent_id: agent_id.to_string(),
                 cancelled: false,
@@ -934,6 +1010,10 @@ impl HostService {
                 self.apply_patch_at(workspace_id, worktree_id.as_deref(), patch)?;
                 Ok(())
             }
+            PendingKind::PtyOpen { cols, rows } => {
+                self.spawn_agent_pty(&pending.agent_id, *cols, *rows)?;
+                Ok(())
+            }
         }
     }
 
@@ -1110,6 +1190,7 @@ impl HostService {
                 patch,
             } => self.apply_patch_at(&workspace_id, worktree_id.as_deref(), &patch),
             PendingKind::Exec => Err(HostError::Internal("edit payload missing".into())),
+            PendingKind::PtyOpen { .. } => Err(HostError::Internal("edit payload missing".into())),
         }
     }
 
@@ -1221,6 +1302,419 @@ impl HostService {
         self.inflight.attach(agent_id, gen, handle);
         Ok(())
     }
+
+    pub fn pty_open(
+        &self,
+        agent_id: Option<&str>,
+        shell_id: Option<&str>,
+        cols: u16,
+        rows: u16,
+        ladder: bool,
+    ) -> Result<serde_json::Value> {
+        Self::check_pty_size(cols, rows)?;
+        match (agent_id, shell_id) {
+            (Some(aid), None) => self.pty_open_agent(aid, cols, rows, ladder),
+            (None, Some(sid)) => self.pty_open_shell(sid, cols, rows),
+            _ => Err(HostError::InvalidParams(
+                "exactly one of agentId or shellId is required".into(),
+            )),
+        }
+    }
+
+    fn check_pty_size(cols: u16, rows: u16) -> Result<()> {
+        if !(1..=500).contains(&cols) || !(1..=500).contains(&rows) {
+            return Err(HostError::InvalidParams(
+                "cols and rows must be in 1..=500".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn launch_args_for(&self, agent_id: &str) -> Result<Vec<String>> {
+        let g = self
+            .launch_args
+            .lock()
+            .map_err(|_| HostError::Internal("launch_args lock poisoned".into()))?;
+        Ok(g.get(agent_id).cloned().unwrap_or_default())
+    }
+
+    fn agent_cwd(&self, agent: &Agent) -> Result<std::path::PathBuf> {
+        if let Some(wt) = self.store.worktree_get_by_agent(&agent.id)? {
+            return Ok(std::path::PathBuf::from(wt.path));
+        }
+        let task = self.task_get(&agent.task_id)?;
+        let ws_id = task
+            .workspace_ids
+            .first()
+            .ok_or_else(|| HostError::Internal("task has no workspace".into()))?;
+        let ws = self
+            .store
+            .workspace_get(ws_id)?
+            .ok_or_else(|| HostError::NotFound(format!("workspace {ws_id}")))?;
+        Ok(std::path::PathBuf::from(ws.path))
+    }
+
+    fn shell_cwd(
+        &self,
+        task_id: &str,
+        workspace_id: &str,
+        worktree_id: Option<&str>,
+    ) -> Result<std::path::PathBuf> {
+        let task = self.task_get(task_id)?;
+        if !task.workspace_ids.iter().any(|id| id == workspace_id) {
+            return Err(HostError::InvalidParams(
+                "workspaceId is not attached to this task".into(),
+            ));
+        }
+        if let Some(wt_id) = worktree_id {
+            let wt = self
+                .store
+                .worktree_get(wt_id)?
+                .ok_or_else(|| HostError::NotFound(format!("worktree {wt_id}")))?;
+            if wt.workspace_id != workspace_id {
+                return Err(HostError::InvalidParams(
+                    "worktreeId does not belong to workspace".into(),
+                ));
+            }
+            return Ok(std::path::PathBuf::from(wt.path));
+        }
+        let ws = self
+            .store
+            .workspace_get(workspace_id)?
+            .ok_or_else(|| HostError::NotFound(format!("workspace {workspace_id}")))?;
+        Ok(std::path::PathBuf::from(ws.path))
+    }
+
+    fn pty_open_ok(session: &crate::mux::PtySession, resumed: bool) -> Result<serde_json::Value> {
+        Ok(serde_json::to_value(rt_protocol::PtyOpenOk {
+            pty_id: session.pty_id.clone(),
+            resumed,
+        })?)
+    }
+
+    fn pty_open_shell(&self, shell_id: &str, _cols: u16, _rows: u16) -> Result<serde_json::Value> {
+        match self.mux.live_for_entity(PtyKind::Shell, shell_id) {
+            Ok(Some(s)) => Self::pty_open_ok(&s, false),
+            Ok(None) => Err(HostError::NotFound(format!("shell {shell_id}"))),
+            Err(e) => Err(HostError::Internal(e)),
+        }
+    }
+
+    fn pty_open_agent(
+        &self,
+        agent_id: &str,
+        cols: u16,
+        rows: u16,
+        ladder: bool,
+    ) -> Result<serde_json::Value> {
+        let _gate = self
+            .turn_gate
+            .lock()
+            .map_err(|_| HostError::Internal("turn_gate poisoned".into()))?;
+        let agent = self
+            .store
+            .agent_get(agent_id)?
+            .ok_or_else(|| HostError::NotFound(format!("agent {agent_id}")))?;
+        if agent.interface != "terminal" {
+            return Err(HostError::InvalidParams(
+                "pty.open agentId requires interface=terminal".into(),
+            ));
+        }
+        if let Some(live) = self
+            .mux
+            .live_for_entity(PtyKind::Agent, agent_id)
+            .map_err(HostError::Internal)?
+        {
+            return Self::pty_open_ok(&live, false);
+        }
+        if self.has_pending_locked(agent_id)? {
+            return Err(HostError::AgentBusy);
+        }
+        if ladder {
+            let view = self.resolve_policy_for_agent(agent_id)?;
+            if !view.yolo && view.mode == PolicyMode::Deny {
+                return Err(HostError::Denied);
+            }
+            if !view.yolo && view.mode == PolicyMode::Ask {
+                let approval_id = rt_storage::new_id();
+                let summary = format!("spawn pty {}", agent.provider);
+                self.store_pending(PendingApproval {
+                    approval_id: approval_id.clone(),
+                    agent_id: agent_id.to_string(),
+                    task_id: agent.task_id.clone(),
+                    kind: "exec".into(),
+                    summary: summary.clone(),
+                    payload: PendingKind::PtyOpen { cols, rows },
+                })?;
+                let _ = self.events.send(WsEvent::agent_approval(
+                    &approval_id,
+                    agent_id,
+                    &agent.task_id,
+                    "exec",
+                    &summary,
+                ));
+                return Ok(serde_json::json!({ "approvalId": approval_id }));
+            }
+        }
+        let session = self.spawn_agent_pty(agent_id, cols, rows)?;
+        Self::pty_open_ok(&session, session_resumed_flag(&agent, &self.backends))
+    }
+
+    fn spawn_agent_pty(
+        &self,
+        agent_id: &str,
+        cols: u16,
+        rows: u16,
+    ) -> Result<crate::mux::PtySession> {
+        if let Some(live) = self
+            .mux
+            .live_for_entity(PtyKind::Agent, agent_id)
+            .map_err(HostError::Internal)?
+        {
+            return Ok(live);
+        }
+        let agent = self
+            .store
+            .agent_get(agent_id)?
+            .ok_or_else(|| HostError::NotFound(format!("agent {agent_id}")))?;
+        if agent.interface != "terminal" {
+            return Err(HostError::InvalidParams(
+                "pty.open agentId requires interface=terminal".into(),
+            ));
+        }
+        let backend = self.backends.get(agent.provider.as_str());
+        let caps = backend.map(|b| b.caps());
+        if !caps.as_ref().map(|c| c.pty).unwrap_or(false) {
+            return Err(HostError::NotPty);
+        }
+        let cwd = self.agent_cwd(&agent)?;
+        let launch_args = self.launch_args_for(agent_id)?;
+        let (program, args) = pty::agent_pty_command(&launch_args);
+        let mut env = Vec::new();
+        let resumed = agent.provider_session_id.is_some()
+            && caps.as_ref().map(|c| c.session_resume).unwrap_or(false);
+        if resumed {
+            if let Some(sid) = &agent.provider_session_id {
+                env.push(("RUSTTRAYCER_PROVIDER_SESSION_ID".into(), sid.clone()));
+            }
+        }
+        let session = self.spawn_into_mux(&SpawnInto {
+            kind: PtyKind::Agent,
+            entity_id: agent_id,
+            task_id: &agent.task_id,
+            cwd: cwd.to_string_lossy().as_ref(),
+            program,
+            args,
+            cols,
+            rows,
+            env,
+        })?;
+        if let Err(e) = self.store.agent_set_status(agent_id, AgentStatus::Running) {
+            tracing::warn!(agent_id, error = %e, "pty spawn status");
+        }
+        let _ = self.events.send(WsEvent::agent_status(
+            &agent.task_id,
+            agent_id,
+            AgentStatus::Running,
+        ));
+        if agent.provider_session_id.is_none() {
+            let sid = rt_storage::new_id();
+            self.store.agent_set_provider_session_id(agent_id, &sid)?;
+        }
+        Ok(session)
+    }
+
+    fn spawn_into_mux(&self, req: &SpawnInto<'_>) -> Result<crate::mux::PtySession> {
+        let pty_id = rt_storage::new_id();
+        let events = self.events.clone();
+        let events_exit = self.events.clone();
+        let mux = std::sync::Arc::clone(&self.mux);
+        let store = self.store.clone();
+        let task_id_data = req.task_id.to_string();
+        let task_id_exit = req.task_id.to_string();
+        let entity_s = req.entity_id.to_string();
+        let kind_copy = req.kind;
+        let pty_id_data = pty_id.clone();
+        let pty_id_exit = pty_id.clone();
+        let spec = SpawnSpec {
+            program: req.program.clone(),
+            args: req.args.clone(),
+            cwd: std::path::PathBuf::from(req.cwd),
+            cols: req.cols,
+            rows: req.rows,
+            env: req.env.clone(),
+        };
+        let handle = pty::spawn(
+            &spec,
+            move |bytes| {
+                let _ = events.send(WsEvent::pty_data(&task_id_data, &pty_id_data, &bytes));
+            },
+            move |code| {
+                if let Err(e) = mux.remove_if_present(&pty_id_exit) {
+                    tracing::warn!(error = %e, "mux remove on exit");
+                }
+                if kind_copy == PtyKind::Agent {
+                    if let Err(e) = store.agent_set_status(&entity_s, AgentStatus::Idle) {
+                        tracing::warn!(error = %e, "agent idle on pty.exit");
+                    }
+                    let _ = events_exit.send(WsEvent::agent_status(
+                        &task_id_exit,
+                        &entity_s,
+                        AgentStatus::Idle,
+                    ));
+                }
+                let _ =
+                    events_exit.send(WsEvent::pty_exit(&task_id_exit, &pty_id_exit, code as i32));
+            },
+        )
+        .map_err(HostError::Internal)?;
+        let session = crate::mux::PtySession {
+            pty_id,
+            kind: req.kind,
+            entity_id: req.entity_id.to_string(),
+            pid: handle.pid,
+            cols: req.cols,
+            rows: req.rows,
+            task_id: req.task_id.to_string(),
+            cwd: req.cwd.to_string(),
+        };
+        self.mux
+            .insert(session, handle)
+            .map_err(HostError::Internal)
+    }
+
+    pub fn pty_write(&self, pty_id: &str, data_b64: &str) -> Result<serde_json::Value> {
+        use base64::Engine;
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(data_b64)
+            .map_err(|e| HostError::InvalidParams(format!("data must be base64: {e}")))?;
+        if decoded.len() > 64 * 1024 {
+            return Err(HostError::InvalidParams(
+                "pty.write data exceeds 64 KiB decoded".into(),
+            ));
+        }
+        match self.mux.write(pty_id, &decoded) {
+            Ok(()) => Ok(serde_json::json!({})),
+            Err(MuxIoError::Dead) => Err(HostError::PtyDead),
+            Err(MuxIoError::Internal(e)) => Err(HostError::Internal(e)),
+        }
+    }
+
+    pub fn pty_resize(&self, pty_id: &str, cols: u16, rows: u16) -> Result<serde_json::Value> {
+        Self::check_pty_size(cols, rows)?;
+        match self.mux.resize(pty_id, cols, rows) {
+            Ok(()) => Ok(serde_json::json!({})),
+            Err(MuxIoError::Dead) => Err(HostError::PtyDead),
+            Err(MuxIoError::Internal(e)) => Err(HostError::Internal(e)),
+        }
+    }
+
+    pub fn pty_close(&self, pty_id: &str) -> Result<serde_json::Value> {
+        let session = self.mux.kill(pty_id).map_err(HostError::Internal)?;
+        let Some(session) = session else {
+            return Err(HostError::PtyDead);
+        };
+        if session.kind == PtyKind::Agent {
+            if let Err(e) = self
+                .store
+                .agent_set_status(&session.entity_id, AgentStatus::Idle)
+            {
+                tracing::warn!(error = %e, "pty.close status");
+            }
+            let _ = self.events.send(WsEvent::agent_status(
+                &session.task_id,
+                &session.entity_id,
+                AgentStatus::Idle,
+            ));
+        }
+        Ok(serde_json::json!({}))
+    }
+
+    pub fn shell_create(
+        &self,
+        task_id: &str,
+        workspace_id: &str,
+        worktree_id: Option<&str>,
+        cols: u16,
+        rows: u16,
+    ) -> Result<serde_json::Value> {
+        if task_id.is_empty() {
+            return Err(HostError::InvalidParams("taskId is required".into()));
+        }
+        if workspace_id.is_empty() {
+            return Err(HostError::InvalidParams("workspaceId is required".into()));
+        }
+        Self::check_pty_size(cols, rows)?;
+        let cwd = self.shell_cwd(task_id, workspace_id, worktree_id)?;
+        let (program, args) = pty::shell_pty_command();
+        let shell_id = rt_storage::new_id();
+        let session = self.spawn_into_mux(&SpawnInto {
+            kind: PtyKind::Shell,
+            entity_id: &shell_id,
+            task_id,
+            cwd: cwd.to_string_lossy().as_ref(),
+            program,
+            args,
+            cols,
+            rows,
+            env: Vec::new(),
+        })?;
+        Ok(serde_json::to_value(rt_protocol::ShellCreateOk {
+            shell_id,
+            pty_id: session.pty_id,
+            cwd: session.cwd,
+        })?)
+    }
+
+    pub fn shell_list(&self, task_id: &str) -> Result<serde_json::Value> {
+        if task_id.is_empty() {
+            return Err(HostError::InvalidParams("taskId is required".into()));
+        }
+        if self.store.task_get(task_id)?.is_none() {
+            return Err(HostError::NotFound(format!("task {task_id}")));
+        }
+        let items = self.mux.list_shells(task_id).map_err(HostError::Internal)?;
+        let items: Vec<rt_protocol::ShellListItem> = items
+            .into_iter()
+            .map(|s| rt_protocol::ShellListItem {
+                shell_id: s.entity_id,
+                pty_id: s.pty_id,
+                cwd: s.cwd,
+            })
+            .collect();
+        Ok(serde_json::json!({ "items": items }))
+    }
+
+    pub fn shell_close(&self, shell_id: &str) -> Result<serde_json::Value> {
+        let session = self
+            .mux
+            .kill_entity(PtyKind::Shell, shell_id)
+            .map_err(HostError::Internal)?;
+        if session.is_none() {
+            return Err(HostError::NotFound(format!("shell {shell_id}")));
+        }
+        Ok(serde_json::json!({}))
+    }
+}
+
+fn session_resumed_flag(agent: &Agent, backends: &HashMap<String, Arc<dyn AgentBackend>>) -> bool {
+    agent.provider_session_id.is_some()
+        && backends
+            .get(agent.provider.as_str())
+            .map(|b| b.caps().session_resume)
+            .unwrap_or(false)
+}
+
+struct SpawnInto<'a> {
+    kind: PtyKind,
+    entity_id: &'a str,
+    task_id: &'a str,
+    cwd: &'a str,
+    program: String,
+    args: Vec<String>,
+    cols: u16,
+    rows: u16,
+    env: Vec<(String, String)>,
 }
 
 #[cfg(test)]
