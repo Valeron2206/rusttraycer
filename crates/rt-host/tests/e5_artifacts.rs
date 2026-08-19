@@ -183,6 +183,22 @@ async fn handshake(client: &reqwest::Client, base: &str, methods: Value) -> (Str
     (token, hs)
 }
 
+fn pdf_bytes(ok: &Value) -> Vec<u8> {
+    for key in ["bytes", "content", "body", "markdown"] {
+        if let Some(s) = ok.get(key).and_then(|v| v.as_str()) {
+            if s.starts_with("%PDF") {
+                return s.as_bytes().to_vec();
+            }
+            if let Ok(d) = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, s) {
+                if d.starts_with(b"%PDF") {
+                    return d;
+                }
+            }
+        }
+    }
+    Vec::new()
+}
+
 fn rpc_id(resp: &Value, field: &str) -> String {
     resp["ok"][field]
         .as_str()
@@ -649,7 +665,7 @@ async fn clear_transcript_unlinks_source_message_artifact_survives() {
 }
 
 #[tokio::test]
-async fn export_md_ok_pdf_invalid_params() {
+async fn export_md_ok_pdf_ok() {
     let dir = tempfile::tempdir().unwrap();
     let (addr, tx, join, _) = rt_host::spawn_test_host(dir.path(), Some(backends()))
         .await
@@ -705,8 +721,15 @@ async fn export_md_ok_pdf_invalid_params() {
         .unwrap();
     assert_eq!(pdf.status().as_u16(), 200);
     let pdf: Value = pdf.json().await.unwrap();
-    assert_eq!(pdf["error"]["code"], "invalid_params", "{pdf}");
-    assert!(pdf.get("ok").is_none());
+    assert!(pdf.get("error").is_none(), "{pdf}");
+    assert_eq!(pdf["ok"]["format"], "pdf");
+    let raw = pdf_bytes(&pdf["ok"]);
+    assert!(
+        raw.starts_with(b"%PDF"),
+        "pdf bytes must start with %PDF: {:?}",
+        raw.get(..8)
+    );
+    assert_eq!(pdf["ok"]["filename"], format!("{art_id}.pdf"));
 
     let _ = tx.send(());
     let _ = join.await;

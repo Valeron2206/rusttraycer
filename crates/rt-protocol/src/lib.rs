@@ -200,8 +200,9 @@ pub fn host_method_version() -> MethodVersion {
 /// `agent.clear_transcript` methods are 1.4; `agent.create` and A2A/loop
 /// methods are 1.5; model-ux methods (`agent.switch`, `profile.*`, `prefs.get`)
 /// are 1.6; workspace/guides/preset/`agent.update` methods are 1.7;
-/// `sync.export`/`sync.import` are 1.8; all other tradable methods stay 1.0
-/// (`HOST_METHOD_MINOR` is not bumped). Unknown names return `None`.
+/// `sync.export`/`sync.import` are 1.8; `artifact.export` is 1.9 (PDF);
+/// all other tradable methods stay 1.0 (`HOST_METHOD_MINOR` is not bumped).
+/// Unknown names return `None`.
 pub fn method_version(name: &str) -> Option<MethodVersion> {
     if !TRADABLE_METHODS.iter().any(|m| *m == name) {
         return None;
@@ -223,11 +224,11 @@ pub fn method_version(name: &str) -> Option<MethodVersion> {
         | METHOD_ARTIFACT_LIST
         | METHOD_ARTIFACT_UPDATE
         | METHOD_ARTIFACT_DELETE
-        | METHOD_ARTIFACT_EXPORT
         | METHOD_COMMENT_CREATE
         | METHOD_COMMENT_LIST
         | METHOD_COMMENT_RESOLVE
         | METHOD_AGENT_CLEAR_TRANSCRIPT => Some(MethodVersion { major: 1, minor: 4 }),
+        METHOD_ARTIFACT_EXPORT => Some(MethodVersion { major: 1, minor: 9 }),
         METHOD_AGENT_CREATE
         | METHOD_A2A_TRANSCRIPT
         | METHOD_A2A_DELIVER
@@ -664,7 +665,11 @@ pub struct ArtifactDeleteOk {
 #[serde(rename_all = "camelCase")]
 pub struct ArtifactExportOk {
     pub format: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub markdown: String,
+    /// PDF payload (raw bytes as a string when ASCII; starts with `%PDF`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub bytes: String,
     pub filename: String,
 }
 
@@ -1267,7 +1272,7 @@ mod tests {
         );
         assert_eq!(
             method_version(METHOD_ARTIFACT_EXPORT),
-            Some(MethodVersion { major: 1, minor: 4 })
+            Some(MethodVersion { major: 1, minor: 9 })
         );
         assert_eq!(
             method_version(METHOD_COMMENT_LIST),
@@ -1814,6 +1819,7 @@ mod tests {
         let exp = ArtifactExportOk {
             format: "md".into(),
             markdown: "Auth\n\n# Auth\n".into(),
+            bytes: String::new(),
             filename: "a1.md".into(),
         };
         let v = serde_json::to_value(&exp).unwrap();
@@ -2207,6 +2213,10 @@ mod tests {
 
     #[test]
     fn e9_sync_types_and_versions_camel_case() {
+        assert_eq!(
+            method_version(METHOD_ARTIFACT_EXPORT),
+            Some(MethodVersion { major: 1, minor: 9 })
+        );
         assert_eq!(
             method_version(METHOD_SYNC_EXPORT),
             Some(MethodVersion { major: 1, minor: 8 })

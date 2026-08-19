@@ -295,11 +295,19 @@ async fn dispatch_method(
                 .get("content")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| HostError::InvalidParams("content is required".into()))?;
+            let attached = params
+                .get("path")
+                .or_else(|| params.get("attachedPath"))
+                .or_else(|| params.get("cwd"))
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(std::path::PathBuf::from);
             let ladder = match session_token {
                 Some(t) => svc.session_accepts(t, rt_protocol::METHOD_POLICY_GET)? == Some(true),
                 None => false,
             };
-            let sent = svc.send_gated(agent_id, content, ladder)?;
+            let sent = svc.send_gated(agent_id, content, ladder, attached.as_deref())?;
             let mut ok = json!({ "userMessage": sent.user });
             if let Some(id) = sent.approval_id {
                 ok["approvalId"] = json!(id);
