@@ -60,11 +60,16 @@ jobs:
           tar -C "${RUNNER_TEMP}" -czf "dist/${name}.tar.gz" "${name}"
           (cd dist && sha256sum "${name}.tar.gz" > SHA256SUMS)
 
+      - name: Pack AppImage and .deb
+        run: scripts/pack-linux.sh "${GITHUB_REF_NAME}" dist target/release
+
       - name: GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
             dist/rusttraycer-${{ github.ref_name }}-linux-x86_64.tar.gz
+            dist/rusttraycer-${{ github.ref_name }}-linux-x86_64.AppImage
+            dist/*.deb
             dist/SHA256SUMS
           fail_on_unmatched_files: true
         env:

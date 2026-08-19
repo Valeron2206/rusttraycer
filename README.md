@@ -4,13 +4,13 @@ Pure-Rust desktop analog of [Traycer](https://traycer.ai): a local **host** daem
 
 Loop: start host → add a folder → create a Task → create an agent → chat → transcript survives GUI (and host) restart.
 
-**v1.0.0 supports Linux x86_64 only** ([ADR-001](docs/adr/0001-target-platforms.md)). macOS and Windows are post-v1.
+**v2.0.0 supported package:** Linux x86_64 (AppImage + `.deb` + tarball). **macOS aarch64** is build-from-source (CI compile). Windows is not in v2.0.
 
 Out of scope (stubs only, no impl): PTY, terminal mux, agent-to-agent, cloud sync.
 
 ## Install from GitHub Release
 
-Release assets are a Linux x86_64 `tar.gz` plus `SHA256SUMS` (tag `v1.0.0` → filename with `v`). After the tag is published:
+Release assets are a Linux x86_64 `tar.gz`, AppImage, `.deb`, plus `SHA256SUMS` (tag `v1.0.0` → filename with `v`). After the tag is published:
 
 ```bash
 # download rusttraycer-v1.0.0-linux-x86_64.tar.gz and SHA256SUMS from the GitHub Release, then:
@@ -50,7 +50,7 @@ rt-cli doctor         # JSON: paths, pid alive, host.doctor if reachable
 rt-cli stop           # SIGTERM, idempotent
 ```
 
-`rt-cli` commands in this tree: **start**, **stop**, **doctor** only.
+`rt-cli` commands: **start**, **stop**, **doctor**, **status**, **logs**, **reset-db** (`reset-db` needs `--yes`; refuses if the host is running).
 
 ### Generic agent mock (README cycle)
 
@@ -75,7 +75,7 @@ Then in the GUI: add a folder → Task → pick a harness from `host.doctor` (ge
 | `rt-host` | Daemon: HTTP/WS on `127.0.0.1`, supervisor, git/worktree |
 | `rt-storage` | `host.db` (rusqlite, migrations) |
 | `rt-runtime` | Adapters: `cli.generic`, `cli.claude`, `cli.codex` |
-| `rt-cli` | `start` / `stop` / `doctor` |
+| `rt-cli` | `start` / `stop` / `doctor` / `status` / `logs` / `reset-db` |
 | `rt-gui` | eframe + egui: tasks, harness picker, N agents, ask-default ladder, git panel, Stop |
 
 ## Specs

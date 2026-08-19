@@ -30,6 +30,10 @@ pub enum CliError {
     StopTimeout { pid: u32 },
     #[error("invalid pid.json: {0}")]
     InvalidPidFile(String),
+    #[error("reset-db requires --yes")]
+    ResetNeedsYes,
+    #[error("host is running; stop first")]
+    HostRunning,
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]
@@ -44,6 +48,8 @@ impl CliError {
             Self::ExecFailed { .. } => "exec_failed",
             Self::StopTimeout { .. } => "stop_timeout",
             Self::InvalidPidFile(_) => "invalid_pid_file",
+            Self::ResetNeedsYes => "reset_needs_yes",
+            Self::HostRunning => "host_running",
             Self::Io(_) | Self::Json(_) => "internal",
         }
     }
@@ -355,6 +361,70 @@ pub fn doctor() -> Result<DoctorReport, CliError> {
         harnesses,
         host,
     })
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct StatusReport {
+    pub alive: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rpc_url: Option<String>,
+    pub data_dir: String,
+}
+
+/// pid.json only. Does not call `/rpc`. Dead host → `alive: false`, exit 0.
+pub fn status() -> Result<StatusReport, CliError> {
+    let data_dir = resolve_data_dir();
+    let live = live_pid_file(&data_dir)?;
+    Ok(StatusReport {
+        alive: live.is_some(),
+        pid: live.as_ref().map(|i| i.pid),
+        rpc_url: live.as_ref().map(|i| i.rpc_url.clone()),
+        data_dir: data_dir.to_string_lossy().into_owned(),
+    })
+}
+
+fn last_n_lines(text: &str, n: usize) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let start = lines.len().saturating_sub(n);
+    let mut out = lines[start..].join("\n");
+    if text.ends_with('\n') && !out.is_empty() {
+        out.push('\n');
+    }
+    out
+}
+
+/// Tail `host.log`. Missing file → empty string. `lines` clamped to 1..=10000.
+pub fn logs(lines: u32) -> Result<String, CliError> {
+    let n = lines.clamp(1, 10_000) as usize;
+    let path = log_path(&resolve_data_dir());
+    if !path.exists() {
+        return Ok(String::new());
+    }
+    let text = fs::read_to_string(&path)?;
+    Ok(last_n_lines(&text, n))
+}
+
+/// Unlink `host.db` + wal/shm. Requires `--yes`. Refuses if the host pid is alive.
+pub fn reset_db(yes: bool) -> Result<(), CliError> {
+    if !yes {
+        return Err(CliError::ResetNeedsYes);
+    }
+    let data_dir = resolve_data_dir();
+    if live_pid_file(&data_dir)?.is_some() {
+        return Err(CliError::HostRunning);
+    }
+    for name in ["host.db", "host.db-wal", "host.db-shm"] {
+        let p = data_dir.join(name);
+        match fs::remove_file(&p) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(())
 }
 
 /// Parse the TCP port from a pid.json `rpcUrl` (`http://127.0.0.1:47800` → 47800).
@@ -691,5 +761,88 @@ done
         assert!(!is_loopback_rpc("http://10.0.0.1:1234"));
         assert!(!is_loopback_rpc("https://127.0.0.1:1234"));
         assert!(!is_loopback_rpc(""));
+    }
+
+    #[test]
+    fn status_dead_host_is_alive_false() {
+        let _lock = lock_env();
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = EnvGuard::set("RUSTTRAYCER_HOME", tmp.path());
+        let report = status().unwrap();
+        assert!(!report.alive);
+        assert!(report.pid.is_none());
+        assert!(report.rpc_url.is_none());
+        assert_eq!(report.data_dir, tmp.path().join("host").to_string_lossy());
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["alive"], false);
+    }
+
+    #[test]
+    fn status_live_pid_does_not_need_rpc() {
+        let _lock = lock_env();
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = EnvGuard::set("RUSTTRAYCER_HOME", tmp.path());
+        write_pid(&tmp.path().join("host"), std::process::id());
+        let report = status().unwrap();
+        assert!(report.alive);
+        assert_eq!(report.pid, Some(std::process::id()));
+        assert_eq!(report.rpc_url.as_deref(), Some("http://127.0.0.1:9"));
+    }
+
+    #[test]
+    fn logs_missing_file_is_empty() {
+        let _lock = lock_env();
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = EnvGuard::set("RUSTTRAYCER_HOME", tmp.path());
+        assert_eq!(logs(10).unwrap(), "");
+    }
+
+    #[test]
+    fn logs_tails_last_lines() {
+        let _lock = lock_env();
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = EnvGuard::set("RUSTTRAYCER_HOME", tmp.path());
+        let host = tmp.path().join("host");
+        fs::create_dir_all(&host).unwrap();
+        fs::write(log_path(&host), "a\nb\nc\nd\n").unwrap();
+        assert_eq!(logs(2).unwrap(), "c\nd\n");
+        assert_eq!(logs(0).unwrap(), "d\n"); // clamp to 1
+        fs::write(host.join("scrollback"), "PTY").unwrap();
+        assert!(!logs(10).unwrap().contains("PTY"));
+    }
+
+    #[test]
+    fn reset_db_requires_yes_and_refuses_running() {
+        let _lock = lock_env();
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = EnvGuard::set("RUSTTRAYCER_HOME", tmp.path());
+        let err = reset_db(false).unwrap_err();
+        assert_eq!(err.code(), "reset_needs_yes");
+        write_pid(&tmp.path().join("host"), std::process::id());
+        let err = reset_db(true).unwrap_err();
+        assert_eq!(err.code(), "host_running");
+    }
+
+    #[test]
+    fn reset_db_removes_sqlite_files_keeps_log() {
+        let _lock = lock_env();
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = EnvGuard::set("RUSTTRAYCER_HOME", tmp.path());
+        let host = tmp.path().join("host");
+        fs::create_dir_all(&host).unwrap();
+        fs::write(host.join("host.db"), b"db").unwrap();
+        fs::write(host.join("host.db-wal"), b"wal").unwrap();
+        fs::write(host.join("host.db-shm"), b"shm").unwrap();
+        fs::write(host.join("host.log"), b"keep").unwrap();
+        fs::write(host.join("agent-selection-guide.md"), b"keep").unwrap();
+        reset_db(true).unwrap();
+        assert!(!host.join("host.db").exists());
+        assert!(!host.join("host.db-wal").exists());
+        assert!(!host.join("host.db-shm").exists());
+        assert_eq!(fs::read(host.join("host.log")).unwrap(), b"keep");
+        assert_eq!(
+            fs::read(host.join("agent-selection-guide.md")).unwrap(),
+            b"keep"
+        );
     }
 }

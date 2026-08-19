@@ -18,10 +18,17 @@ path = "src/main.rs"
 [dependencies]
 eframe.workspace = true
 egui.workspace = true
-rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "async-std"] }
 rt-protocol = { path = "../rt-protocol" }
 serde.workspace = true
 serde_json.workspace = true
 tungstenite = { version = "0.30.0", default-features = false, features = ["handshake"] }
 ureq = { version = "2", default-features = false, features = ["json"] }
 uuid.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+eframe = { workspace = true, features = ["x11"] }
+rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "async-std"] }
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+rfd = { version = "0.15", default-features = false, features = ["async-std"] }
+

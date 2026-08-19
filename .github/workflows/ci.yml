@@ -73,3 +73,18 @@ jobs:
 
       - name: cargo audit
         run: cargo audit
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.85"
+
+      - name: build workspace (aarch64 host)
+        run: cargo build --workspace
+
