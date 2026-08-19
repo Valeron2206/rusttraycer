@@ -3,7 +3,7 @@
 Для: Core (host/protocol), UI (дерево/inbox/loop), Integration (caps.a2aInbox + vendor transcript).
 От: Architect. Дата: 2026-08-19. Не код.
 База: brief №7; matrix C43–C47; directive E6; architecture-v0 A2A; e2-ladder-v2; e4-terminal-v2; live [Agent-to-Agent](https://docs.traycer.ai/concepts/agent-to-agent.md) (2026-08-19).
-Протокол: minor bump **1.5**. 1.0–1.4 не ломать. Конверт camelCase. Storage: **миграции нет**. 0001–0005 байтово. `agents.parent_id` уже есть.
+Протокол: minor bump **1.5**. 1.0–1.4 не ломать. Конверт camelCase. Storage: миграция **0006** (только `loops`). 0001–0005 **байтово**. `agents.parent_id` уже в 0001 — не патчить.
 
 ## Закон №7
 
@@ -18,16 +18,16 @@
 `reference ⊃ transcript ⊃ delivery`. Можно быть referenceable без inbox — это норма, не баг.
 
 1. Delivery **local**: same `hostId`, same user. Cross-host → `cross_host`, **не очередь**.
-2. Не копировать Traycer 1.1.10 «A2A requires full access» как default. Лестница E2: ask default, yolo явный. `a2a.deliver` / turn в loop, который спавнит exec — `kind=exec`.
+2. Не копировать Traycer 1.1.10 «A2A requires full access» как default (C26 oos). Лестница E2: ask default, yolo явный. `a2a.deliver` и `loop.*` **не** выставляют yolo сами. Turn в loop, который спавнит exec — `kind=exec`.
 3. Artifact ≠ A2A-сообщение. Inbox ≠ artifact viewer. E5 RPC не трогать.
 4. Shell (C33) **не** участвует ни в одной из трёх.
 5. Бесконечный цикл двух агентов = **P0**. `loop.start` без `maxIterations` → `invalid_params`. Host сам не крутит «пока не надоест».
-6. Child — тот же `Agent`, свой transcript. `parentId` = provenance, не ACL: reference не ограничен деревом.
+6. Child — `agents.parent_id` (не `artifacts.parent_id`). Тот же `taskId`. Provenance, не ACL. Delete parent-агента **не** сносит child.
 7. Vendor scrollback не наш transcript (e4). Terminal history — session провайдера, не `messages` и не PTY bytes.
 
 ## Решение по C43–C47 (закон)
 
-**Все пять — Ф4 must.** Резать later нельзя: master-e2e «child получает delivery» + «loop упирается в max-iterations» иначе не закрывается. Как C37 не режем must.
+**Все пять — Ф4 must.** Later только то, чего нет в C43–C47: fork chat, глубина nested tree, C63 stop-children.
 
 ## Caps per harness (Integration)
 
@@ -36,7 +36,7 @@
 | Harness | interface | reference | transcript | a2aInbox |
 |---|---|---|---|---|
 | `cli.claude` | chat | да | `messages` | **true** |
-| `cli.claude` | terminal | да | vendor session на этом host | **true** |
+| `cli.claude` | terminal | да | vendor session на этом host (E6 transcript, не scrollback) | **true** (эталон Terminal inbox) |
 | `cli.codex` | chat | да | `messages` | false |
 | `cli.codex` | terminal | да | vendor session на этом host | **false** (эталон) |
 | `cli.generic` | chat | да | `messages` | **false** |
@@ -48,29 +48,53 @@
 
 ## Child в Task (C46)
 
-`agent.create` 1.5: optional `parentId` (тот же `taskId`, тот же host). Иначе как сейчас. Host пишет `agents.parent_id` (колонка есть; сегодня всегда NULL).
+`agent.create` 1.5: optional `parentId`. Host **принимает** и пишет `agents.parent_id` (сегодня INSERT всегда NULL). Колонку 0001 не менять.
 
-Цикл parent / чужой task → `invalid_params`. Child = новый агент, свой `messages`. Не merge в родителя.
+`parentId` — тот же `taskId`, тот же host, существующий агент. Это **не** `artifacts.parent_id`. Цикл parent (A→B→A, A→A) → `invalid_params`. Чужой task → `invalid_params`.
 
-Удаление артефакта-родителя агентов не сносит (E5). `agent.delete` нет — parent_id живёт.
+Child = новый `Agent`, свой `messages`. Не merge в родителя. Reference не ограничен деревом.
+
+Delete parent-агента (если появится) **не** сносит children: `parent_id` → NULL («поднимаются»). Delete артефакта-родителя агентов не трогает (E5).
 
 ## Loops (C47)
 
-Живое состояние **в памяти host**, не таблица.
+**Сущность** в sqlite (0006), не только память.
+
+```sql
+CREATE TABLE loops (
+  id              TEXT PRIMARY KEY,
+  task_id         TEXT NOT NULL REFERENCES tasks(id),
+  agent_a         TEXT NOT NULL REFERENCES agents(id),
+  agent_b         TEXT NOT NULL REFERENCES agents(id),
+  max_iterations  INTEGER NOT NULL,
+  budget_turns    INTEGER NOT NULL,
+  iteration       INTEGER NOT NULL DEFAULT 0,
+  turns           INTEGER NOT NULL DEFAULT 0,
+  status          TEXT NOT NULL CHECK (status IN ('running', 'stopped')),
+  reason          TEXT,
+  prompt          TEXT NOT NULL,
+  created_at      TEXT NOT NULL,
+  updated_at      TEXT NOT NULL,
+  CHECK (max_iterations BETWEEN 1 AND 32),
+  CHECK (budget_turns BETWEEN 1 AND 64)
+);
+```
+
+Нет `ON DELETE CASCADE`. 0001–0005 не трогать.
 
 ```
 loop.start  { taskId, agentIds: [id, id], maxIterations, budgetTurns?, prompt }
+loop.get    { loopId }
 loop.stop   { loopId }
 ```
 
 - `agentIds` ровно 2, оба в Task, не Shell.
-- `maxIterations` обязателен, 1…32.
-- `budgetTurns` optional, default `maxIterations * 2`, потолок 64. Каждый `agent.send` / deliver в loop = 1 turn.
+- `maxIterations` **обязателен**, 1…32. Нет / 0 / infinity → `invalid_params`.
+- `budgetTurns` optional, default `maxIterations * 2`, потолок 64. Каждый send/deliver в loop = 1 turn.
 - Stop: `loop.stop` | maxIterations | budget | `denied` | error | `pty_dead`. После stop новых send нет.
-- Host чередует A→B→A… с `prompt` на первом ходе. Каждый ход — обычный turn + лестница.
-- Нет maxIterations / 0 / «infinity» → `invalid_params`. Регрессия без верхней границы = P0.
-
-Рестарт host убивает loop (live). Это ок.
+- Host чередует A→B→A… `prompt` на первом ходе. Каждый ход — turn + лестница. Loop **не** включает yolo.
+- Рестарт host: все `running` → `stopped` reason=`error` (не возобновлять).
+- Тест: два агента в loop с max=2 **останавливаются**. Без лимита = P0.
 
 ## Protocol 1.5
 
@@ -148,7 +172,8 @@ Ok start: `{ "loopId", "iteration": 0, "turns": 0, "maxIterations", "budgetTurns
 - Inference, секреты в db
 - Vendor-history как строки `messages`
 - A2A в Shell / artifacts-in-PTY
-- Новая миграция / новая message role
+- Fork chat, глубина nested tree, C63 stop-children
+- Новая message role
 
 ## Приёмка Ф4 / E6
 
@@ -159,6 +184,7 @@ Ok start: `{ "loopId", "iteration": 0, "turns": 0, "maxIterations", "budgetTurns
 5. e2e кусок: artifact жив (E5) → child create → `a2a.deliver` → child `get_context` видит system a2a-строку.
 6. `loop.start` без maxIterations → `invalid_params`. С max=2: после 2 итераций `loop.stopped` reason=`max_iterations`, новых send нет. Два агента без cap = P0, регрессия тестом.
 7. Клиент без 1.5: artifact/pty/write живы.
-8. Нет INSERT в `artifacts` из a2a. 0001–0005 не изменены.
+8. Нет INSERT в `artifacts` из a2a. 0001–0005 байтово целы. 0006 = только `loops`.
+9. Delete parent-агента не удаляет child (если такой RPC появится в тесте — parent_id NULL).
 
 Код — следующие STAR (Core host, UI дерево/loop, Integration caps). E7 не открывать из этого файла.
