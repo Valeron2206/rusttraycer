@@ -32,6 +32,10 @@ pub enum ConnectError {
 }
 
 impl ConnectError {
+    pub fn is_not_found(&self) -> bool {
+        matches!(self, Self::Rpc { code, .. } if code == "not_found")
+    }
+
     pub fn as_label(&self) -> String {
         match self {
             Self::Health(msg) => format!("health: {msg}"),
@@ -88,6 +92,15 @@ fn req_id() -> String {
 fn hello_methods() -> Value {
     let mut map = serde_json::Map::new();
     for name in rt_protocol::TRADABLE_METHODS {
+        map.insert(name.to_string(), json!({ "major": 1, "minor": 0 }));
+    }
+    for name in [
+        "worktree.ensure",
+        "worktree.get",
+        "worktree.list",
+        "git.status",
+        "git.diff",
+    ] {
         map.insert(name.to_string(), json!({ "major": 1, "minor": 0 }));
     }
     Value::Object(map)
@@ -388,10 +401,7 @@ impl Session {
         workspace_id: &str,
         path: &str,
     ) -> Result<rt_protocol::FileTreeOk, ConnectError> {
-        parse_ok(self.call(
-            rt_protocol::METHOD_FILES_TREE,
-            json!({ "workspaceId": workspace_id, "path": path, "depth": 1 }),
-        )?)
+        self.files_tree_for(workspace_id, path, None)
     }
 
     pub fn files_read(
@@ -399,11 +409,119 @@ impl Session {
         workspace_id: &str,
         path: &str,
     ) -> Result<rt_protocol::FileReadOk, ConnectError> {
-        parse_ok(self.call(
-            rt_protocol::METHOD_FILES_READ,
-            json!({ "workspaceId": workspace_id, "path": path }),
-        )?)
+        self.files_read_for(workspace_id, path, None)
     }
+
+    pub fn files_tree_for(
+        &self,
+        workspace_id: &str,
+        path: &str,
+        worktree_id: Option<&str>,
+    ) -> Result<rt_protocol::FileTreeOk, ConnectError> {
+        let mut params = json!({ "workspaceId": workspace_id, "path": path, "depth": 1 });
+        if let Some(id) = worktree_id {
+            params["worktreeId"] = json!(id);
+        }
+        parse_ok(self.call(rt_protocol::METHOD_FILES_TREE, params)?)
+    }
+
+    pub fn files_read_for(
+        &self,
+        workspace_id: &str,
+        path: &str,
+        worktree_id: Option<&str>,
+    ) -> Result<rt_protocol::FileReadOk, ConnectError> {
+        let mut params = json!({ "workspaceId": workspace_id, "path": path });
+        if let Some(id) = worktree_id {
+            params["worktreeId"] = json!(id);
+        }
+        parse_ok(self.call(rt_protocol::METHOD_FILES_READ, params)?)
+    }
+
+    pub fn worktree_ensure(&self, agent_id: &str) -> Result<Worktree, ConnectError> {
+        parse_ok(self.call("worktree.ensure", json!({ "agentId": agent_id }))?)
+    }
+
+    pub fn worktree_get(&self, agent_id: &str) -> Result<Option<Worktree>, ConnectError> {
+        match self.call("worktree.get", json!({ "agentId": agent_id })) {
+            Ok(ok) => parse_ok(ok).map(Some),
+            Err(err) if err.is_not_found() => Ok(None),
+            Err(err) => Err(err),
+        }
+    }
+
+    pub fn git_status(
+        &self,
+        workspace_id: &str,
+        worktree_id: Option<&str>,
+    ) -> Result<GitStatusOk, ConnectError> {
+        let mut params = json!({ "workspaceId": workspace_id });
+        if let Some(id) = worktree_id {
+            params["worktreeId"] = json!(id);
+        }
+        parse_ok(self.call("git.status", params)?)
+    }
+
+    pub fn git_diff(
+        &self,
+        workspace_id: &str,
+        worktree_id: Option<&str>,
+        path: Option<&str>,
+    ) -> Result<GitDiffOk, ConnectError> {
+        let mut params = json!({ "workspaceId": workspace_id });
+        if let Some(id) = worktree_id {
+            params["worktreeId"] = json!(id);
+        }
+        if let Some(path) = path {
+            params["path"] = json!(path);
+        }
+        parse_ok(self.call("git.diff", params)?)
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
+pub struct Worktree {
+    pub id: String,
+    pub workspace_id: String,
+    pub agent_id: String,
+    pub path: String,
+    pub branch: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitStatusOk {
+    pub branch: String,
+    pub dirty: bool,
+    #[serde(default)]
+    pub entries: Vec<GitStatusEntry>,
+    #[serde(default)]
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitStatusEntry {
+    pub path: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitDiffOk {
+    pub files: Vec<GitDiffFile>,
+    #[serde(default)]
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitDiffFile {
+    pub path: String,
+    pub patch: Option<String>,
 }
 
 
@@ -915,7 +1033,7 @@ mod tests {
         let host_id = host_id.to_string();
         let token = token.to_string();
         thread::spawn(move || {
-            for stream in listener.incoming().take(24) {
+            for stream in listener.incoming().take(40) {
                 let Ok(mut stream) = stream else { break };
                 let (headers, body) = read_http_request(&mut stream);
                 let has_session = headers.to_ascii_lowercase().contains("x-rt-session:");
@@ -982,6 +1100,43 @@ mod tests {
                             "ok": { "userMessage": sample_message("m-new", agent_id, "user", content) }
                         }).to_string()
                     }
+                    "worktree.ensure" => {
+                        let agent_id = params.get("agentId").and_then(|v| v.as_str()).unwrap_or("ag-1");
+                        json!({
+                            "id": "echo",
+                            "ok": {
+                                "id": "wt-1",
+                                "workspaceId": "ws-1",
+                                "agentId": agent_id,
+                                "path": "/tmp/wt",
+                                "branch": "agent/ag",
+                                "createdAt": "2026-08-17T12:00:00Z"
+                            }
+                        }).to_string()
+                    }
+                    "worktree.get" => json!({
+                        "id": "echo",
+                        "error": { "code": "not_found", "message": "no worktree" }
+                    }).to_string(),
+                    "git.status" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "branch": "main",
+                            "dirty": true,
+                            "truncated": false,
+                            "entries": [{ "path": "src/lib.rs", "status": "modified" }]
+                        }
+                    }).to_string(),
+                    "git.diff" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "truncated": false,
+                            "files": [{
+                                "path": params.get("path").and_then(|v| v.as_str()).unwrap_or("src/lib.rs"),
+                                "patch": "@@ -1 +1 @@\\n-a\\n+b\\n"
+                            }]
+                        }
+                    }).to_string(),
                     "files.tree" => json!({
                         "id": "echo",
                         "ok": {
@@ -995,6 +1150,7 @@ mod tests {
                             "truncated": false
                         }
                     }).to_string(),
+
                     "files.read" => {
                         let path = params.get("path").and_then(|v| v.as_str()).unwrap_or("");
                         if path == "bin.dat" {
@@ -1458,4 +1614,100 @@ mod tests {
         let _ = live.child.kill();
         let _ = std::fs::remove_dir_all(&script_home);
     }
+    #[test]
+    fn handshake_advertises_git_and_worktree() {
+        let mock = start_catalog_mock("host-a", "tok-1");
+        let _session = connect(&pid("host-a", &mock.origin)).expect("online");
+        let hs = mock
+            .hits
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|h| h.method == "handshake")
+            .cloned()
+            .expect("handshake");
+        for name in [
+            "worktree.ensure",
+            "worktree.get",
+            "worktree.list",
+            "git.status",
+            "git.diff",
+        ] {
+            assert_eq!(hs.params["methods"][name]["major"], 1, "{name}");
+            assert_eq!(hs.params["methods"][name]["minor"], 0, "{name}");
+        }
+    }
+
+    #[test]
+    fn worktree_ensure_then_tree_sends_worktree_id() {
+        let mock = start_agent_files_mock("host-a", "tok-1");
+        let session = connect(&pid("host-a", &mock.origin)).expect("online");
+        let wt = session.worktree_ensure("ag-1").expect("ensure");
+        assert_eq!(wt.id, "wt-1");
+        assert_eq!(wt.agent_id, "ag-1");
+        let _tree = session
+            .files_tree_for("ws-1", "", Some(&wt.id))
+            .expect("tree");
+        let hits = mock.hits.lock().unwrap().clone();
+        let ensure = hits.iter().find(|h| h.method == "worktree.ensure").unwrap();
+        assert_eq!(ensure.params["agentId"], "ag-1");
+        let tree = hits.iter().rev().find(|h| h.method == "files.tree").unwrap();
+        assert_eq!(tree.params["workspaceId"], "ws-1");
+        assert_eq!(tree.params["worktreeId"], "wt-1");
+    }
+
+    #[test]
+    fn git_status_and_diff_send_workspace_and_path() {
+        let mock = start_agent_files_mock("host-a", "tok-1");
+        let session = connect(&pid("host-a", &mock.origin)).expect("online");
+        let status = session.git_status("ws-1", Some("wt-1")).expect("status");
+        assert_eq!(status.branch, "main");
+        assert!(status.dirty);
+        let diff = session
+            .git_diff("ws-1", Some("wt-1"), Some("src/lib.rs"))
+            .expect("diff");
+        assert_eq!(diff.files[0].path, "src/lib.rs");
+        let hits = mock.hits.lock().unwrap().clone();
+        let st = hits.iter().find(|h| h.method == "git.status").unwrap();
+        assert_eq!(st.params["workspaceId"], "ws-1");
+        assert_eq!(st.params["worktreeId"], "wt-1");
+        let df = hits.iter().find(|h| h.method == "git.diff").unwrap();
+        assert_eq!(df.params["path"], "src/lib.rs");
+        assert_eq!(df.params["worktreeId"], "wt-1");
+    }
+
+    #[test]
+    fn isolate_selected_agent_sends_ensure_and_tree() {
+        use crate::state::{AgentStatus, AgentStub, AppState, HostStatus};
+        let mock = start_agent_files_mock("host-a", "tok-1");
+        let session = connect(&pid("host-a", &mock.origin)).expect("online");
+        let mut state = AppState::new();
+        state.pending_discover = false;
+        state.demo = false;
+        state.host_status = HostStatus::Online;
+        state.session = Some(session);
+        state.workspace_id = Some("ws-1".into());
+        state.selected_task_id = Some("task-1".into());
+        state.selected_agent_id = Some("ag-1".into());
+        state.agents.push(AgentStub {
+            id: "ag-1".into(),
+            task_id: "task-1".into(),
+            provider: "cli.generic".into(),
+            status: AgentStatus::Idle,
+        });
+        state.isolate_selected_agent();
+        assert_eq!(state.worktree.as_ref().map(|w| w.id.as_str()), Some("wt-1"));
+        let hits = mock.hits.lock().unwrap().clone();
+        let ensure = hits
+            .iter()
+            .find(|h| h.method == "worktree.ensure")
+            .expect("ensure");
+        assert_eq!(ensure.params["agentId"], "ag-1");
+        assert!(
+            hits.iter()
+                .any(|h| h.method == "files.tree" && h.params["worktreeId"] == "wt-1"),
+            "{hits:?}"
+        );
+    }
+
 }

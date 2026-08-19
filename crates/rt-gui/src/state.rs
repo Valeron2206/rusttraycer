@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use crate::discovery::{self, DiscoverError};
+use crate::rpc::{GitDiffOk, GitStatusOk, Worktree};
 use crate::ws::{self, ApplyOutcome, WsBridge, WsIncoming};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -238,6 +239,11 @@ pub struct AppState {
     pub ws: Option<WsBridge>,
     pub ws_banner: Option<String>,
     pub canvas_loaded_for: Option<String>,
+    pub worktree: Option<Worktree>,
+    pub git_status: Option<GitStatusOk>,
+    pub git_diff: Option<GitDiffOk>,
+    pub git_selected_path: Option<String>,
+    pub git_note: Option<String>,
 }
 
 impl AppState {
@@ -284,6 +290,11 @@ impl AppState {
             ws: None,
             ws_banner: None,
             canvas_loaded_for: None,
+            worktree: None,
+            git_status: None,
+            git_diff: None,
+            git_selected_path: None,
+            git_note: None,
         };
 
         if demo {
@@ -534,6 +545,100 @@ impl AppState {
             && self.agents_for_selected_task().is_empty()
     }
 
+    pub fn worktree_id(&self) -> Option<&str> {
+        self.worktree.as_ref().map(|w| w.id.as_str())
+    }
+
+    pub fn can_isolate_agent(&self) -> bool {
+        self.can_rpc() && self.selected_agent().is_some()
+    }
+
+    pub fn isolate_selected_agent(&mut self) {
+        if !self.can_isolate_agent() {
+            return;
+        }
+        let Some(agent_id) = self.selected_agent().map(|a| a.id.clone()) else {
+            return;
+        };
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        match session.worktree_ensure(&agent_id) {
+            Ok(wt) => {
+                self.worktree = Some(wt);
+                self.git_note = None;
+                self.load_file_tree_root();
+                self.load_git_panel();
+            }
+            Err(err) => {
+                self.toast = Some(err.as_label());
+                self.git_note = Some(err.as_label());
+            }
+        }
+    }
+
+    pub fn select_git_path(&mut self, path: String) {
+        self.git_selected_path = Some(path);
+        self.load_git_diff();
+    }
+
+    fn load_git_panel(&mut self) {
+        self.git_note = None;
+        let Some(workspace_id) = self.workspace_id.clone() else {
+            self.git_status = None;
+            self.git_diff = None;
+            return;
+        };
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        if let Some(agent_id) = self.selected_agent().map(|a| a.id.clone()) {
+            let same = self
+                .worktree
+                .as_ref()
+                .map(|w| w.agent_id == agent_id)
+                .unwrap_or(false);
+            if !same {
+                match session.worktree_get(&agent_id) {
+                    Ok(wt) => self.worktree = wt,
+                    Err(err) => {
+                        self.toast = Some(err.as_label());
+                    }
+                }
+            }
+        } else {
+            self.worktree = None;
+        }
+        let wt = self.worktree_id().map(|s| s.to_string());
+        match session.git_status(&workspace_id, wt.as_deref()) {
+            Ok(status) => self.git_status = Some(status),
+            Err(err) => {
+                self.git_status = None;
+                self.git_note = Some(err.as_label());
+            }
+        }
+        self.load_git_diff();
+    }
+
+    fn load_git_diff(&mut self) {
+        let Some(workspace_id) = self.workspace_id.clone() else {
+            self.git_diff = None;
+            return;
+        };
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        let wt = self.worktree_id().map(|s| s.to_string());
+        let path = self.git_selected_path.clone();
+        match session.git_diff(&workspace_id, wt.as_deref(), path.as_deref()) {
+            Ok(diff) => self.git_diff = Some(diff),
+            Err(err) => {
+                self.git_diff = None;
+                self.git_note = Some(err.as_label());
+            }
+        }
+    }
+
     pub fn selected_task(&self) -> Option<&TaskStub> {
         let id = self.selected_task_id.as_ref()?;
         self.tasks.iter().find(|t| &t.id == id)
@@ -667,6 +772,7 @@ impl AppState {
                 self.toast = Some(err.as_label());
             }
         }
+        self.load_git_panel();
     }
 
     fn load_file_tree_root(&mut self) {
@@ -676,7 +782,7 @@ impl AppState {
         let Some(session) = self.session.clone() else {
             return;
         };
-        match session.files_tree(&workspace_id, "") {
+        match session.files_tree_for(&workspace_id, "", self.worktree_id()) {
             Ok(tree) => {
                 self.file_tree = tree.items.into_iter().map(FileNode::from).collect();
                 self.file_tree_truncated = tree.truncated;
@@ -759,7 +865,7 @@ impl AppState {
             let Some(session) = self.session.clone() else {
                 return;
             };
-            match session.files_tree(&workspace_id, &path) {
+            match session.files_tree_for(&workspace_id, &path, self.worktree_id()) {
                 Ok(tree) => {
                     self.file_children.insert(
                         path.clone(),
@@ -798,7 +904,7 @@ impl AppState {
             });
             return;
         };
-        match session.files_read(&workspace_id, &path) {
+        match session.files_read_for(&workspace_id, &path, self.worktree_id()) {
             Ok(read) => {
                 self.file_preview = Some(FilePreview::Text {
                     path: read.path,
