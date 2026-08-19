@@ -5,7 +5,7 @@
 
 - Docs: https://docs.traycer.ai/ · index https://docs.traycer.ai/llms.txt
 - Changelog Desktop: https://docs.traycer.ai/changelog.md
-- GitHub latest Desktop: [traycer-desktop-v1.1.10](https://github.com/traycerai/traycer/releases/tag/traycer-desktop-v1.1.10) (2026-08-06). Host latest: 1.1.11 (2026-08-07).
+- GitHub latest Desktop: [desktop-v1.1.10](https://github.com/traycerai/traycer/releases/tag/desktop-v1.1.10) (2026-08-06). Host latest: 1.1.11 (2026-08-07).
 - Agents catalog: https://docs.traycer.ai/agents-and-models/coding-agents.md
 - Terminal vs shell: https://docs.traycer.ai/concepts/terminal-agents-vs-terminals.md
 - Pricing / cloud sync: https://docs.traycer.ai/account/pricing.md
