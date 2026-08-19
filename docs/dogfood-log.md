@@ -10,7 +10,7 @@ Status: `open` | `tasked` | `closed`. Empty coverage = no live session yet.
 | id | category | severity | zone | session | status | note |
 |---|---|---|---|---|---|---|
 | DF-001 | friction | P2 | doctor / harness | 0102-session1 | open | `rt-cli doctor` reports `cli.generic` unavailable when `RUSTTRAYCER_GENERIC_CMD` is unset. `agent.create` with `provider=cli.generic` still succeeds. Directive says generic is always available. Reconfirmed 0102-cont: `host.doctor` + `rt-cli doctor` still `available=false` / `RUSTTRAYCER_GENERIC_CMD unset`. |
-| DF-002 | bug | P1 | git.commit | 0102-session1 | open | `git.commit` returns `git_identity`: requires `user.email` / `user.name` in git config. No host RPC to set identity. Session could not commit via product; did not set git config outside host. Assigned Core 0105 — not retested this continuation. |
+| DF-002 | bug | P1 | git.commit | 0102-session1 | closed | resolved: commit works with env identity, no git config. 0105 (`93ed298`) host accepts GIT_AUTHOR_NAME/EMAIL + GIT_COMMITTER_*; retested 0105-int on :40481. First commit 87476362. |
 
 ## Coverage — epic → last live session
 
@@ -18,7 +18,7 @@ Status: `open` | `tasked` | `closed`. Empty coverage = no live session yet.
 |---|---|---|---|
 | Ladder ask | — | — | — |
 | Ladder Yolo | 0102-session1 | cli.generic | 2026-08-19 |
-| Write + commit | 0102-session1 (write yes; commit blocked DF-002) | cli.generic | 2026-08-19 |
+| Write + commit | 0102-session1 + 0105-int (commit via env identity) | cli.generic | 2026-08-19 |
 | Terminal + resume | — | — | — |
 | Artifacts | — | — | — |
 | A2A-loop | — | — | — |
@@ -53,6 +53,12 @@ Passed:
 Host also has a second workspace from STAR 0103 (`wt-0103-v3-df-session-core`, branch `rt/b2ca7c77`) — observed, not a finding.
 
 **Новых находок нет.** DF-001 still open (reconfirmed). DF-002 not retested (Core 0105).
+
+
+
+### Session 0105-int — 2026-08-19 YEKT — Integration / STAR 0105 (git.commit env identity)
+
+Host restarted on same home `df-0102-home` after phase0-merge `93ed298`. New bind `:40481`. Identity in host process env only (`GIT_AUTHOR_*` / `GIT_COMMITTER_*`). No `git config`. Handshake client=`cli`. `git.stage` + `git.commit` on session workspace `task/0102-v3-df-session1-host` returned 200 / sha `87476362`. DF-002 closed (resolved: commit works with env identity, no git config). Product wt `rt/3fd5ef18` left clean. No origin push.
 
 ## Parity-watch — cycle 1
 
