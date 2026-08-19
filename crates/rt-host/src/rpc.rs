@@ -1,10 +1,10 @@
-//! HTTP JSON-RPC (`POST /rpc`), `GET /health`, `GET /ws`.
+//! HTTP JSON-RPC (`POST /rpc`), `GET /health`, `GET /metrics`, `GET /ws`.
 
 use std::sync::Arc;
 
 use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
 use axum::extract::{FromRequest, Request, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -25,6 +25,7 @@ pub fn router(service: HostService) -> Router {
     Router::new()
         .route("/rpc", post(rpc_handler))
         .route("/health", get(health_handler))
+        .route("/metrics", get(metrics_handler))
         .route("/ws", get(ws_upgrade))
         .with_state(AppState { service })
 }
@@ -50,6 +51,25 @@ fn rpc_err(id: String, err: &HostError) -> Json<Value> {
 
 async fn health_handler(State(state): State<AppState>) -> Json<Value> {
     Json(json!({ "ok": true, "hostId": state.service.host_id() }))
+}
+
+const PROMETHEUS_CONTENT_TYPE: &str = "text/plain; version=0.0.4";
+
+async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
+    match state.service.prometheus_metrics() {
+        Ok(body) => {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static(PROMETHEUS_CONTENT_TYPE),
+            );
+            (headers, body).into_response()
+        }
+        Err(e) => {
+            tracing::error!(code = e.code(), error = %e, "metrics");
+            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
+        }
+    }
 }
 
 fn session_token(headers: &HeaderMap) -> Option<String> {
