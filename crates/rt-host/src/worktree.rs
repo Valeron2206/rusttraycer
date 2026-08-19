@@ -1151,14 +1151,30 @@ fn git_config_get(root: &Path, key: &str) -> Result<Option<String>> {
     }
 }
 
+fn env_nonempty(key: &str) -> bool {
+    std::env::var(key).is_ok_and(|v| !v.trim().is_empty())
+}
+
+/// Identity is accepted when all four git author/committer env vars are set.
+/// `git commit` inherits process env via `git_command`, so git will see them.
+fn env_git_identity_complete() -> bool {
+    env_nonempty("GIT_AUTHOR_NAME")
+        && env_nonempty("GIT_AUTHOR_EMAIL")
+        && env_nonempty("GIT_COMMITTER_NAME")
+        && env_nonempty("GIT_COMMITTER_EMAIL")
+}
+
+const GIT_IDENTITY_MISSING: &str = "set GIT_AUTHOR_NAME, GIT_AUTHOR_EMAIL, GIT_COMMITTER_NAME, and GIT_COMMITTER_EMAIL (or git config user.email and user.name) before committing";
+
 fn require_git_identity(root: &Path) -> Result<()> {
+    if env_git_identity_complete() {
+        return Ok(());
+    }
     let name = git_config_get(root, "user.name")?;
     let email = git_config_get(root, "user.email")?;
     match (name, email) {
         (Some(n), Some(e)) if !n.is_empty() && !e.is_empty() => Ok(()),
-        _ => Err(HostError::GitIdentity(
-            "set git config user.email (and user.name) before committing".into(),
-        )),
+        _ => Err(HostError::GitIdentity(GIT_IDENTITY_MISSING.into())),
     }
 }
 
@@ -1168,7 +1184,7 @@ fn classify_commit_fail(stderr: &str) -> HostError {
         || low.contains("tell me who you are")
         || (low.contains("user.email") && low.contains("unable"))
     {
-        HostError::GitIdentity("set git config user.email (and user.name) before committing".into())
+        HostError::GitIdentity(GIT_IDENTITY_MISSING.into())
     } else {
         HostError::Internal(format!("git commit failed: {stderr}"))
     }
