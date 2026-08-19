@@ -1,6 +1,7 @@
 //! Thin desktop client for RustTraycer (eframe + egui).
 //! No host spawn, no sqlite, no workspace walk.
 
+mod a2a;
 mod app;
 mod artifacts;
 mod chrome;

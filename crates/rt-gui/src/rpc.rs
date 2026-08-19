@@ -78,6 +78,20 @@ pub const ARTIFACT_METHODS: &[&str] = &[
     METHOD_CLEAR_TRANSCRIPT,
 ];
 
+pub const METHOD_A2A_TRANSCRIPT: &str = "a2a.transcript";
+pub const METHOD_A2A_DELIVER: &str = "a2a.deliver";
+pub const METHOD_LOOP_START: &str = "loop.start";
+pub const METHOD_LOOP_GET: &str = "loop.get";
+pub const METHOD_LOOP_STOP: &str = "loop.stop";
+
+pub const A2A_METHODS: &[&str] = &[
+    METHOD_A2A_TRANSCRIPT,
+    METHOD_A2A_DELIVER,
+    METHOD_LOOP_START,
+    METHOD_LOOP_GET,
+    METHOD_LOOP_STOP,
+];
+
 #[derive(Debug, Clone)]
 pub struct Session {
     pub host_id: String,
@@ -138,6 +152,10 @@ impl ConnectError {
     }
 
     pub fn is_artifacts_unsupported(&self) -> bool {
+        self.is_unsupported_method() || self.is_version_mismatch()
+    }
+
+    pub fn is_a2a_unsupported(&self) -> bool {
         self.is_unsupported_method() || self.is_version_mismatch()
     }
 
@@ -247,6 +265,9 @@ fn hello_methods() -> Value {
     }
     for name in ARTIFACT_METHODS {
         map.insert(name.to_string(), json!({ "major": 1, "minor": 4 }));
+    }
+    for name in A2A_METHODS {
+        map.insert(name.to_string(), json!({ "major": 1, "minor": 5 }));
     }
     Value::Object(map)
 }
@@ -1012,6 +1033,79 @@ impl Session {
     ) -> Result<ClearTranscriptOk, ConnectError> {
         parse_ok(self.call(METHOD_CLEAR_TRANSCRIPT, json!({ "agentId": agent_id }))?)
     }
+
+    pub fn a2a_accepted(&self) -> bool {
+        fn ok(map: &BTreeMap<String, rt_protocol::MethodVersion>, name: &str) -> bool {
+            map.get(name)
+                .map(|v| v.major == 1 && v.minor >= 5)
+                .unwrap_or(false)
+        }
+        A2A_METHODS.iter().all(|name| ok(&self.accepted, name))
+    }
+
+    pub fn a2a_rejected(&self) -> bool {
+        A2A_METHODS
+            .iter()
+            .any(|name| self.rejected.contains_key(*name))
+    }
+
+    pub fn agent_create_child(
+        &self,
+        task_id: &str,
+        provider: &str,
+        interface: &str,
+        parent_id: &str,
+    ) -> Result<rt_protocol::Agent, ConnectError> {
+        let mut params = json!({
+            "taskId": task_id,
+            "provider": provider,
+            "parentId": parent_id,
+        });
+        if interface != "chat" {
+            params["interface"] = json!(interface);
+        }
+        parse_ok(self.call(rt_protocol::METHOD_AGENT_CREATE, params)?)
+    }
+
+    pub fn a2a_deliver(
+        &self,
+        from_agent_id: &str,
+        to_agent_id: &str,
+        content: &str,
+    ) -> Result<DeliverOk, ConnectError> {
+        parse_ok(self.call(
+            METHOD_A2A_DELIVER,
+            json!({
+                "fromAgentId": from_agent_id,
+                "toAgentId": to_agent_id,
+                "content": content,
+            }),
+        )?)
+    }
+
+    pub fn loop_start(
+        &self,
+        task_id: &str,
+        agent_a: &str,
+        agent_b: &str,
+        max_iterations: u32,
+        prompt: &str,
+    ) -> Result<LoopOk, ConnectError> {
+        let max = crate::a2a::clamp_max_iterations(i64::from(max_iterations));
+        parse_ok(self.call(
+            METHOD_LOOP_START,
+            json!({
+                "taskId": task_id,
+                "agentIds": [agent_a, agent_b],
+                "maxIterations": max,
+                "prompt": prompt,
+            }),
+        )?)
+    }
+
+    pub fn loop_stop(&self, loop_id: &str) -> Result<LoopOk, ConnectError> {
+        parse_ok(self.call(METHOD_LOOP_STOP, json!({ "loopId": loop_id }))?)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1287,6 +1381,42 @@ pub struct CommentListOk {
 pub struct ClearTranscriptOk {
     #[serde(default)]
     pub cleared: i64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeliverOk {
+    pub message_id: String,
+    pub to_agent_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LoopOk {
+    pub loop_id: String,
+    #[serde(default)]
+    pub iteration: u32,
+    #[serde(default)]
+    pub turns: u32,
+    #[serde(default)]
+    pub max_iterations: u32,
+    #[serde(default)]
+    pub budget_turns: u32,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+impl LoopOk {
+    pub fn display_max(&self, fallback: u32) -> u32 {
+        let _budget = self.budget_turns;
+        if self.max_iterations == 0 {
+            fallback
+        } else {
+            self.max_iterations
+        }
+    }
 }
 
 fn bool_from_wire<'de, D>(deserializer: D) -> Result<bool, D::Error>
@@ -2564,6 +2694,7 @@ mod tests {
         state.agents.push(AgentStub {
             id: "ag-1".into(),
             task_id: "task-1".into(),
+            parent_id: None,
             provider: "cli.generic".into(),
             status: AgentStatus::Idle,
             interface: "chat".into(),
@@ -3193,6 +3324,28 @@ mod tests {
         assert_eq!(hs.params["methods"]["artifact.export"]["minor"], 4);
         assert_eq!(hs.params["methods"]["agent.clear_transcript"]["minor"], 4);
         assert_eq!(hs.params["methods"]["comment.create"]["minor"], 4);
+    }
+
+    #[test]
+    fn handshake_advertises_a2a_methods_1_5() {
+        let mock = start_catalog_mock("host-a", "tok-1");
+        let _session = connect(&pid("host-a", &mock.origin)).expect("online");
+        let hs = mock
+            .hits
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|h| h.method == "handshake")
+            .cloned()
+            .expect("handshake");
+        for name in A2A_METHODS {
+            assert_eq!(hs.params["methods"][name]["major"], 1, "{name}");
+            assert_eq!(hs.params["methods"][name]["minor"], 5, "{name}");
+        }
+        assert_eq!(hs.params["methods"]["a2a.deliver"]["minor"], 5);
+        assert_eq!(hs.params["methods"]["loop.start"]["minor"], 5);
+        assert_eq!(hs.params["methods"]["loop.stop"]["minor"], 5);
+        assert_eq!(hs.params["methods"]["agent.create"]["minor"], 0);
     }
 
     fn start_artifacts_rpc_mock() -> CatalogMock {

@@ -5,6 +5,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::Instant;
 
+use crate::a2a::{self, InboxItem, LoopView, A2A_UNAVAILABLE, DEFAULT_ITERATIONS};
 use crate::artifacts::{
     self, ArtifactKind, ArtifactStub, CommentThread, ARTIFACTS_UNAVAILABLE, CREATE_KINDS,
     EXPORT_FORMAT, FILTER_ALL,
@@ -164,6 +165,7 @@ impl From<rt_protocol::Task> for TaskStub {
 pub struct AgentStub {
     pub id: String,
     pub task_id: String,
+    pub parent_id: Option<String>,
     pub provider: String,
     pub status: AgentStatus,
     pub interface: String,
@@ -184,6 +186,7 @@ impl From<rt_protocol::Agent> for AgentStub {
         Self {
             id: agent.id,
             task_id: agent.task_id,
+            parent_id: agent.parent_id,
             provider: agent.provider,
             status: AgentStatus::from_wire(&agent.status),
             interface: if agent.interface.is_empty() {
@@ -332,6 +335,15 @@ pub struct AppState {
     pub artifact_selection: Option<(usize, usize)>,
     pub artifacts_status: Option<String>,
     pub show_clear_transcript_confirm: bool,
+    pub inbox: Vec<InboxItem>,
+    pub deliver_target: Option<String>,
+    pub deliver_text: String,
+    pub loop_agent_a: Option<String>,
+    pub loop_agent_b: Option<String>,
+    pub loop_max_draft: String,
+    pub loop_prompt: String,
+    pub loop_state: Option<LoopView>,
+    pub a2a_status: Option<String>,
     pending_cancel: Option<String>,
     rpc_tx: Sender<RpcIncoming>,
     rpc_rx: Receiver<RpcIncoming>,
@@ -430,6 +442,15 @@ impl AppState {
             artifact_selection: None,
             artifacts_status: None,
             show_clear_transcript_confirm: false,
+            inbox: Vec::new(),
+            deliver_target: None,
+            deliver_text: String::new(),
+            loop_agent_a: None,
+            loop_agent_b: None,
+            loop_max_draft: DEFAULT_ITERATIONS.to_string(),
+            loop_prompt: String::new(),
+            loop_state: None,
+            a2a_status: None,
             pending_cancel: None,
             rpc_tx,
             rpc_rx,
@@ -448,6 +469,7 @@ impl AppState {
         self.agents.push(AgentStub {
             id: "demo-agent-1".into(),
             task_id: "demo-task-1".into(),
+            parent_id: None,
             provider: "cli.generic".into(),
             status: AgentStatus::Idle,
             interface: "chat".into(),
@@ -590,6 +612,7 @@ impl AppState {
                         self.refresh_doctor();
                         self.refresh_terminal_capability();
                         self.refresh_artifacts_capability();
+                        self.refresh_a2a_capability();
                         self.refresh_tasks_catalog();
                         if self.screen == Screen::Canvas {
                             self.refresh_canvas_after_reconnect();
@@ -692,6 +715,33 @@ impl AppState {
             }
             return;
         }
+        if let ws::WsEvent::A2aDelivered {
+            from_agent_id,
+            to_agent_id,
+            message_id,
+        } = &event
+        {
+            self.push_inbox_item(InboxItem {
+                from_agent_id: from_agent_id.clone(),
+                to_agent_id: to_agent_id.clone(),
+                message_id: message_id.clone(),
+                content: String::new(),
+            });
+            return;
+        }
+        if let ws::WsEvent::LoopStopped { loop_id, reason } = &event {
+            if let Some(loop_state) = self.loop_state.as_mut() {
+                if loop_state.id == *loop_id {
+                    loop_state.status = "stopped".into();
+                    loop_state.reason = if reason.is_empty() {
+                        None
+                    } else {
+                        Some(reason.clone())
+                    };
+                }
+            }
+            return;
+        }
         if let ws::WsEvent::AgentApproval {
             approval_id,
             agent_id,
@@ -756,7 +806,9 @@ impl AppState {
             | ApplyOutcome::Ignored
             | ApplyOutcome::Approval
             | ApplyOutcome::PtyData
-            | ApplyOutcome::PtyExit => {}
+            | ApplyOutcome::PtyExit
+            | ApplyOutcome::A2aDelivered
+            | ApplyOutcome::LoopStopped => {}
         }
     }
 
@@ -1101,6 +1153,7 @@ impl AppState {
                     &mut self.messages,
                     messages.into_iter().map(ChatMessage::from).collect(),
                 );
+                self.ingest_inbox_from_messages(&agent_id);
             }
             Err(err) => {
                 self.toast = Some(err.as_label());
@@ -2721,6 +2774,295 @@ impl AppState {
         }
     }
 
+    pub fn a2a_host_ok(&self) -> bool {
+        self.session
+            .as_ref()
+            .map(|s| s.a2a_accepted() && !s.a2a_rejected())
+            .unwrap_or(false)
+    }
+
+    fn refresh_a2a_capability(&mut self) {
+        match &self.session {
+            Some(s) if s.a2a_accepted() && !s.a2a_rejected() => {
+                if self.a2a_status.as_deref() == Some(A2A_UNAVAILABLE) {
+                    self.a2a_status = None;
+                }
+            }
+            Some(_) | None => {
+                if self.can_rpc() {
+                    self.a2a_status = Some(A2A_UNAVAILABLE.into());
+                }
+            }
+        }
+    }
+
+    fn surface_a2a_unavailable(&mut self) {
+        self.a2a_status = Some(A2A_UNAVAILABLE.into());
+        self.toast = Some(A2A_UNAVAILABLE.into());
+    }
+
+    fn surface_a2a_error(&mut self, err: ConnectError) {
+        if err.is_a2a_unsupported() {
+            self.surface_a2a_unavailable();
+        } else {
+            let label = err.as_label();
+            self.a2a_status = Some(label.clone());
+            self.toast = Some(label);
+        }
+    }
+
+    pub fn agent_has_inbox(&self, agent: &AgentStub) -> bool {
+        self.providers
+            .iter()
+            .find(|p| p.id == agent.provider)
+            .and_then(|p| p.caps.as_ref())
+            .map(|c| c.a2a_inbox)
+            .unwrap_or(false)
+    }
+
+    pub fn selected_inbox_live(&self) -> bool {
+        self.selected_agent()
+            .map(|a| self.agent_has_inbox(a))
+            .unwrap_or(false)
+    }
+
+    pub fn inbox_for_selected(&self) -> Vec<&InboxItem> {
+        let Some(id) = self.selected_agent().map(|a| a.id.as_str()) else {
+            return Vec::new();
+        };
+        self.inbox
+            .iter()
+            .filter(|item| item.to_agent_id == id)
+            .collect()
+    }
+
+    fn push_inbox_item(&mut self, item: InboxItem) {
+        a2a::merge_inbox_item(&mut self.inbox, item);
+    }
+
+    fn ingest_inbox_from_messages(&mut self, agent_id: &str) {
+        for msg in &self.messages {
+            if let Some(item) =
+                a2a::inbox_item_from_message(agent_id, &msg.id, &msg.role, &msg.content)
+            {
+                a2a::merge_inbox_item(&mut self.inbox, item);
+            }
+        }
+    }
+
+    pub fn can_create_child(&self) -> bool {
+        self.can_create_agent() && self.selected_agent().is_some()
+    }
+
+    pub fn create_child_conversation(&mut self) {
+        if !self.can_create_child() {
+            if self.selected_agent().is_none() {
+                self.toast = Some("сначала создайте агента".into());
+            } else if self.providers.is_empty() {
+                self.toast = Some(PICKER_EMPTY.into());
+            } else if self.picker_provider.is_none() {
+                self.toast = Some(PICKER_HINT.into());
+            }
+            return;
+        }
+        if !self.a2a_host_ok() {
+            self.surface_a2a_unavailable();
+            return;
+        }
+        let Some(task_id) = self.selected_task_id.clone() else {
+            return;
+        };
+        let Some(parent_id) = self.selected_agent().map(|a| a.id.clone()) else {
+            return;
+        };
+        let Some(provider) = self.picker_provider.clone() else {
+            self.toast = Some(PICKER_HINT.into());
+            return;
+        };
+        if self.picker_interface == AgentInterface::Terminal && !self.picker_allows_terminal() {
+            self.toast = Some(terminal::TERMINAL_DISABLED_CAPS.into());
+            return;
+        }
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        let interface = self.picker_interface.as_wire();
+        match session.agent_create_child(&task_id, &provider, interface, &parent_id) {
+            Ok(agent) => {
+                let stub = AgentStub::from(agent);
+                self.selected_agent_id = Some(stub.id.clone());
+                self.remember_selected_agent();
+                self.agents.push(stub);
+                self.load_selected_agent();
+            }
+            Err(err) => self.surface_a2a_error(err),
+        }
+    }
+
+    /// Drop one agent. Surviving children stay on the same Task (C46).
+    pub fn remove_agent(&mut self, id: &str) {
+        self.agents.retain(|a| a.id != id);
+        for agent in &mut self.agents {
+            if agent.parent_id.as_deref() == Some(id) {
+                agent.parent_id = None;
+            }
+        }
+        self.inbox
+            .retain(|item| item.to_agent_id != id && item.from_agent_id != id);
+        if self.selected_agent_id.as_deref() == Some(id) {
+            self.selected_agent_id = self.selected_task_id.as_ref().and_then(|task| {
+                self.agents
+                    .iter()
+                    .find(|a| &a.task_id == task)
+                    .map(|a| a.id.clone())
+            });
+            if self.selected_agent_id.is_some() {
+                self.remember_selected_agent();
+                self.load_selected_agent();
+            } else {
+                self.messages.clear();
+            }
+        }
+    }
+
+    pub fn mention_targets(&self) -> Vec<&AgentStub> {
+        self.agents_for_selected_task()
+    }
+
+    pub fn can_deliver_to(&self, to_id: &str) -> bool {
+        self.a2a_host_ok()
+            && self
+                .agents
+                .iter()
+                .find(|a| a.id == to_id)
+                .is_some_and(|a| self.agent_has_inbox(a))
+    }
+
+    pub fn deliver_to_selected_target(&mut self) {
+        if !self.a2a_host_ok() {
+            self.surface_a2a_unavailable();
+            return;
+        }
+        let Some(from) = self.selected_agent().map(|a| a.id.clone()) else {
+            self.toast = Some("сначала создайте агента".into());
+            return;
+        };
+        let Some(to) = self.deliver_target.clone() else {
+            return;
+        };
+        if from == to {
+            return;
+        }
+        if !self.can_deliver_to(&to) {
+            self.toast = Some(a2a::INBOX_OFF.into());
+            return;
+        }
+        let content = self.deliver_text.trim().to_string();
+        if content.is_empty() {
+            return;
+        }
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        match session.a2a_deliver(&from, &to, &content) {
+            Ok(ok) => {
+                self.push_inbox_item(InboxItem {
+                    from_agent_id: from,
+                    to_agent_id: ok.to_agent_id,
+                    message_id: ok.message_id,
+                    content,
+                });
+                self.deliver_text.clear();
+            }
+            Err(err) => self.surface_a2a_error(err),
+        }
+    }
+
+    pub fn loop_max_value(&self) -> u32 {
+        a2a::parse_max_iterations(&self.loop_max_draft)
+    }
+
+    pub fn can_start_loop(&self) -> bool {
+        self.can_rpc()
+            && self.selected_task_id.is_some()
+            && self.loop_agent_a.is_some()
+            && self.loop_agent_b.is_some()
+            && self.loop_agent_a != self.loop_agent_b
+    }
+
+    pub fn start_loop(&mut self) {
+        if !self.a2a_host_ok() {
+            self.surface_a2a_unavailable();
+            return;
+        }
+        if !self.can_start_loop() {
+            return;
+        }
+        let Some(task_id) = self.selected_task_id.clone() else {
+            return;
+        };
+        let Some(a) = self.loop_agent_a.clone() else {
+            return;
+        };
+        let Some(b) = self.loop_agent_b.clone() else {
+            return;
+        };
+        if a2a::allows_infinite_loop() {
+            return;
+        }
+        let max = self.loop_max_value();
+        let prompt = self.loop_prompt.clone();
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        match session.loop_start(&task_id, &a, &b, max, &prompt) {
+            Ok(ok) => {
+                let max_iterations = ok.display_max(max);
+                self.loop_state = Some(LoopView {
+                    id: ok.loop_id,
+                    iteration: ok.iteration,
+                    max_iterations,
+                    turns: ok.turns,
+                    status: ok.status.unwrap_or_else(|| "running".into()),
+                    reason: ok.reason,
+                });
+            }
+            Err(err) => self.surface_a2a_error(err),
+        }
+    }
+
+    pub fn stop_loop(&mut self) {
+        if !self.a2a_host_ok() {
+            self.surface_a2a_unavailable();
+            return;
+        }
+        let Some(loop_id) = self.loop_state.as_ref().map(|l| l.id.clone()) else {
+            return;
+        };
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        match session.loop_stop(&loop_id) {
+            Ok(ok) => {
+                let fallback = self
+                    .loop_state
+                    .as_ref()
+                    .map(|l| l.max_iterations)
+                    .unwrap_or(self.loop_max_value());
+                let max_iterations = ok.display_max(fallback);
+                self.loop_state = Some(LoopView {
+                    id: ok.loop_id,
+                    iteration: ok.iteration,
+                    max_iterations,
+                    turns: ok.turns,
+                    status: ok.status.unwrap_or_else(|| "stopped".into()),
+                    reason: ok.reason.or(Some("stop".into())),
+                });
+            }
+            Err(err) => self.surface_a2a_error(err),
+        }
+    }
+
     #[cfg(test)]
     pub fn test_apply_ws_event(&mut self, event: crate::ws::WsEvent) {
         self.apply_ws_event(event);
@@ -3053,6 +3395,7 @@ mod tests {
         state.agents.push(AgentStub {
             id: "ag-1".into(),
             task_id: "task-1".into(),
+            parent_id: None,
             provider: "cli.generic".into(),
             status: AgentStatus::Idle,
             interface: "chat".into(),
@@ -3309,6 +3652,7 @@ mod tests {
         state.agents.push(AgentStub {
             id: "ag-1".into(),
             task_id: "task-1".into(),
+            parent_id: None,
             provider: "cli.generic".into(),
             status: AgentStatus::Idle,
             interface: "chat".into(),
@@ -3837,6 +4181,7 @@ mod tests {
         state.agents.push(AgentStub {
             id: "ag-1".into(),
             task_id: "task-1".into(),
+            parent_id: None,
             provider: "byoa.foo".into(),
             status: AgentStatus::Idle,
             interface: "chat".into(),
@@ -3991,6 +4336,7 @@ mod tests {
         state.agents.push(AgentStub {
             id: "ag-1".into(),
             task_id: "task-1".into(),
+            parent_id: None,
             provider: "byoa.foo".into(),
             status: AgentStatus::Idle,
             interface: "chat".into(),
@@ -3998,6 +4344,7 @@ mod tests {
         state.agents.push(AgentStub {
             id: "ag-9".into(),
             task_id: "task-2".into(),
+            parent_id: None,
             provider: "cli.claude".into(),
             status: AgentStatus::Idle,
             interface: "chat".into(),
@@ -4789,6 +5136,7 @@ mod tests {
         state.agents.push(AgentStub {
             id: "ag-1".into(),
             task_id: "task-1".into(),
+            parent_id: None,
             provider: "cli.generic".into(),
             status: AgentStatus::Idle,
             interface: "chat".into(),
@@ -4850,5 +5198,466 @@ mod tests {
         assert!(!state.comments_visible());
         state.selected_artifact_id = Some("art-1".into());
         assert!(state.comments_visible());
+    }
+
+    fn a2a_accepted_map() -> serde_json::Map<String, Value> {
+        let mut accepted = serde_json::Map::new();
+        for name in crate::rpc::A2A_METHODS {
+            accepted.insert(name.to_string(), json!({"major": 1, "minor": 5}));
+        }
+        accepted
+    }
+
+    fn start_a2a_state_mock() -> SliceMock {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(Mutex::new(Vec::new()));
+        let hits_t = hits.clone();
+        thread::spawn(move || {
+            let mut child_n = 0u32;
+            for stream in listener.incoming().take(40) {
+                let Ok(mut stream) = stream else { break };
+                let (headers, body) = read_http_request(&mut stream);
+                let parsed: Value = serde_json::from_slice(&body).unwrap_or(json!({}));
+                let method = if headers.starts_with("GET /health") {
+                    "GET /health".to_string()
+                } else {
+                    parsed
+                        .get("method")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("other")
+                        .to_string()
+                };
+                let params = parsed.get("params").cloned().unwrap_or(json!({}));
+                hits_t.lock().unwrap().push(RpcHit {
+                    method: method.clone(),
+                    params: params.clone(),
+                });
+                let body = match method.as_str() {
+                    "GET /health" => json!({"ok": true, "hostId": "host-a"}).to_string(),
+                    "handshake" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "hostId": "host-a",
+                            "hostVersion": "0.1.0",
+                            "sessionToken": "tok-1",
+                            "accepted": a2a_accepted_map(),
+                            "rejected": {}
+                        }
+                    })
+                    .to_string(),
+                    "host.ping" => json!({
+                        "id": "echo",
+                        "ok": { "hostId": "host-a", "now": "2026-08-17T12:00:00Z" }
+                    })
+                    .to_string(),
+                    "agent.create" => {
+                        child_n += 1;
+                        let parent = params.get("parentId").cloned().unwrap_or(Value::Null);
+                        json!({
+                            "id": "echo",
+                            "ok": {
+                                "id": format!("child-{child_n}"),
+                                "taskId": params.get("taskId").cloned().unwrap_or(json!("task-1")),
+                                "hostId": "host-a",
+                                "parentId": parent,
+                                "interface": params.get("interface").cloned().unwrap_or(json!("chat")),
+                                "provider": params.get("provider").cloned().unwrap_or(json!("cli.claude")),
+                                "status": "idle",
+                                "runLocation": "local",
+                                "createdAt": "2026-08-19T10:00:00Z"
+                            }
+                        })
+                        .to_string()
+                    }
+                    "agent.get" => {
+                        let id = params
+                            .get("id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("ag-1")
+                            .to_string();
+                        let parent = if id.starts_with("child-") {
+                            json!("ag-1")
+                        } else {
+                            Value::Null
+                        };
+                        json!({
+                            "id": "echo",
+                            "ok": {
+                                "id": id,
+                                "taskId": "task-1",
+                                "hostId": "host-a",
+                                "parentId": parent,
+                                "interface": "chat",
+                                "provider": "cli.claude",
+                                "status": "idle",
+                                "runLocation": "local",
+                                "createdAt": "2026-08-19T10:00:00Z"
+                            }
+                        })
+                        .to_string()
+                    }
+                    "agent.get_context" => json!({
+                        "id": "echo",
+                        "ok": { "messages": [] }
+                    })
+                    .to_string(),
+                    "a2a.deliver" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "messageId": "msg-a2a-1",
+                            "toAgentId": params.get("toAgentId").cloned().unwrap_or(json!("ag-2"))
+                        }
+                    })
+                    .to_string(),
+                    "a2a.transcript" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "agentId": params.get("agentId").cloned().unwrap_or(json!("ag-1")),
+                            "interface": "chat",
+                            "messages": []
+                        }
+                    })
+                    .to_string(),
+                    "loop.start" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "loopId": "lp-1",
+                            "iteration": 0,
+                            "turns": 0,
+                            "maxIterations": params.get("maxIterations").cloned().unwrap_or(json!(2)),
+                            "budgetTurns": 4,
+                            "status": "running"
+                        }
+                    })
+                    .to_string(),
+                    "loop.get" | "loop.stop" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "loopId": params.get("loopId").cloned().unwrap_or(json!("lp-1")),
+                            "iteration": 1,
+                            "turns": 2,
+                            "maxIterations": 2,
+                            "budgetTurns": 4,
+                            "status": "stopped",
+                            "reason": "stop"
+                        }
+                    })
+                    .to_string(),
+                    "host.doctor" | "policy.get" | "agent.list" | "artifact.list" => json!({
+                        "id": "echo",
+                        "ok": { "items": [], "providers": [] }
+                    })
+                    .to_string(),
+                    _ => json!({
+                        "id": "echo",
+                        "error": { "code": "unsupported_method", "message": "no" }
+                    })
+                    .to_string(),
+                };
+                write_http_json(&mut stream, &body);
+            }
+        });
+        SliceMock {
+            origin: format!("http://{addr}"),
+            hits,
+        }
+    }
+
+    fn session_without_1_5() -> crate::rpc::Session {
+        use std::collections::BTreeMap;
+        let mut rejected = BTreeMap::new();
+        for name in crate::rpc::A2A_METHODS {
+            rejected.insert((*name).to_string(), "unsupported".into());
+        }
+        crate::rpc::Session {
+            host_id: "host-a".into(),
+            host_version: "0.1.0".into(),
+            session_token: "tok-1".into(),
+            rpc_url: "http://127.0.0.1:1".into(),
+            ws_url: None,
+            accepted: BTreeMap::new(),
+            rejected,
+        }
+    }
+
+    fn claude_inbox_caps() -> crate::rpc::HarnessCapsView {
+        crate::rpc::HarnessCapsView {
+            a2a_inbox: true,
+            ..Default::default()
+        }
+    }
+
+    fn generic_no_inbox_caps() -> crate::rpc::HarnessCapsView {
+        crate::rpc::HarnessCapsView {
+            a2a_inbox: false,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn new_conversation_sends_parent_id_and_same_task() {
+        let mock = start_a2a_state_mock();
+        let session = connect(&pid(&mock.origin)).expect("online");
+        assert!(session.a2a_accepted());
+        let mut state = online_state(session);
+        state.agents.clear();
+        state.agents.push(AgentStub {
+            id: "ag-1".into(),
+            task_id: "task-1".into(),
+            parent_id: None,
+            provider: "cli.claude".into(),
+            status: AgentStatus::Idle,
+            interface: "chat".into(),
+        });
+        state.selected_agent_id = Some("ag-1".into());
+        state.providers.push(DoctorProvider {
+            id: "cli.claude".into(),
+            available: true,
+            detail: String::new(),
+            caps: Some(claude_inbox_caps()),
+        });
+        state.set_picker_provider("cli.claude".into());
+        assert!(state.can_create_child());
+        state.create_child_conversation();
+        assert_eq!(state.selected_agent_id.as_deref(), Some("child-1"));
+        let child = state
+            .agents
+            .iter()
+            .find(|a| a.id == "child-1")
+            .expect("child");
+        assert_eq!(child.task_id, "task-1");
+        assert_eq!(child.parent_id.as_deref(), Some("ag-1"));
+        let hits = mock.hits.lock().unwrap().clone();
+        let create = hits
+            .iter()
+            .find(|h| h.method == "agent.create")
+            .expect("agent.create");
+        assert_eq!(create.params["parentId"], "ag-1");
+        assert_eq!(create.params["taskId"], "task-1");
+        assert_eq!(create.params["provider"], "cli.claude");
+        assert!(create.params.get("maxIterations").is_none());
+    }
+
+    #[test]
+    fn parent_delete_does_not_drop_children() {
+        let mut state = AppState::new();
+        state.pending_discover = false;
+        state.demo = false;
+        state.selected_task_id = Some("task-1".into());
+        state.agents.push(AgentStub {
+            id: "parent".into(),
+            task_id: "task-1".into(),
+            parent_id: None,
+            provider: "cli.claude".into(),
+            status: AgentStatus::Idle,
+            interface: "chat".into(),
+        });
+        state.agents.push(AgentStub {
+            id: "child".into(),
+            task_id: "task-1".into(),
+            parent_id: Some("parent".into()),
+            provider: "cli.claude".into(),
+            status: AgentStatus::Idle,
+            interface: "chat".into(),
+        });
+        state.selected_agent_id = Some("parent".into());
+        let before = a2a::build_agent_tree(&state.agents);
+        assert_eq!(before[0].children[0].id, "child");
+        state.remove_agent("parent");
+        assert!(state.agents.iter().any(|a| a.id == "child"));
+        assert!(!state.agents.iter().any(|a| a.id == "parent"));
+        let child = state.agents.iter().find(|a| a.id == "child").unwrap();
+        assert_eq!(child.parent_id, None);
+        assert_eq!(child.task_id, "task-1");
+        let listed: Vec<&str> = state
+            .agents_for_selected_task()
+            .into_iter()
+            .map(|a| a.id.as_str())
+            .collect();
+        assert_eq!(listed, vec!["child"]);
+        let tree = a2a::build_agent_tree(&state.agents);
+        assert_eq!(tree.len(), 1);
+        assert_eq!(tree[0].id, "child");
+        assert!(tree[0].children.is_empty());
+    }
+
+    #[test]
+    fn inbox_live_only_with_cap_and_deliver_is_not_artifact() {
+        let mock = start_a2a_state_mock();
+        let session = connect(&pid(&mock.origin)).expect("online");
+        let mut state = online_state(session);
+        state.agents.clear();
+        state.agents.push(AgentStub {
+            id: "ag-1".into(),
+            task_id: "task-1".into(),
+            parent_id: None,
+            provider: "cli.generic".into(),
+            status: AgentStatus::Idle,
+            interface: "chat".into(),
+        });
+        state.agents.push(AgentStub {
+            id: "ag-2".into(),
+            task_id: "task-1".into(),
+            parent_id: None,
+            provider: "cli.claude".into(),
+            status: AgentStatus::Idle,
+            interface: "chat".into(),
+        });
+        state.selected_agent_id = Some("ag-1".into());
+        state.providers = vec![
+            DoctorProvider {
+                id: "cli.generic".into(),
+                available: true,
+                detail: String::new(),
+                caps: Some(generic_no_inbox_caps()),
+            },
+            DoctorProvider {
+                id: "cli.claude".into(),
+                available: true,
+                detail: String::new(),
+                caps: Some(claude_inbox_caps()),
+            },
+        ];
+        assert!(!state.selected_inbox_live());
+        assert!(!state.can_deliver_to("ag-1"));
+        assert!(state.can_deliver_to("ag-2"));
+        state.deliver_target = Some("ag-2".into());
+        state.deliver_text = "review this".into();
+        let arts_before = state.artifacts.len();
+        state.deliver_to_selected_target();
+        assert_eq!(state.inbox.len(), 1);
+        assert_eq!(state.inbox[0].from_agent_id, "ag-1");
+        assert_eq!(state.inbox[0].to_agent_id, "ag-2");
+        assert_eq!(state.inbox[0].content, "review this");
+        assert_eq!(state.artifacts.len(), arts_before);
+        assert!(!state.inbox[0].content.contains("artifact"));
+        let hits = mock.hits.lock().unwrap().clone();
+        assert!(hits.iter().any(|h| h.method == "a2a.deliver"));
+        assert!(!hits.iter().any(|h| h.method.starts_with("artifact.")));
+        state.test_apply_ws_event(
+            crate::ws::parse_event(
+                r#"{"event":"a2a.delivered","fromAgentId":"ag-2","toAgentId":"ag-1","messageId":"msg-ws"}"#,
+            )
+            .expect("parse"),
+        );
+        assert!(state.inbox.iter().any(|i| i.message_id == "msg-ws"));
+        assert_eq!(state.artifacts.len(), arts_before);
+    }
+
+    #[test]
+    fn loop_start_sends_max_iterations_never_infinite() {
+        let mock = start_a2a_state_mock();
+        let session = connect(&pid(&mock.origin)).expect("online");
+        let mut state = online_state(session);
+        state.agents.push(AgentStub {
+            id: "ag-2".into(),
+            task_id: "task-1".into(),
+            parent_id: None,
+            provider: "cli.claude".into(),
+            status: AgentStatus::Idle,
+            interface: "chat".into(),
+        });
+        state.loop_agent_a = Some("ag-1".into());
+        state.loop_agent_b = Some("ag-2".into());
+        state.loop_max_draft = "0".into();
+        state.loop_prompt = "ping".into();
+        assert!(!a2a::allows_infinite_loop());
+        state.start_loop();
+        let hits = mock.hits.lock().unwrap().clone();
+        let start = hits
+            .iter()
+            .find(|h| h.method == "loop.start")
+            .expect("loop.start");
+        assert_eq!(start.params["taskId"], "task-1");
+        assert_eq!(start.params["agentIds"], json!(["ag-1", "ag-2"]));
+        assert_eq!(start.params["maxIterations"], 1);
+        assert!(start.params.get("infinite").is_none());
+        assert_ne!(start.params["maxIterations"], Value::Null);
+        assert_eq!(
+            state.loop_state.as_ref().map(|l| l.id.as_str()),
+            Some("lp-1")
+        );
+        assert_eq!(
+            state.loop_state.as_ref().map(|l| l.counter_label()),
+            Some("0 / 1".into())
+        );
+    }
+
+    #[test]
+    fn loop_stop_sends_rpc() {
+        let mock = start_a2a_state_mock();
+        let session = connect(&pid(&mock.origin)).expect("online");
+        let mut state = online_state(session);
+        state.agents.push(AgentStub {
+            id: "ag-2".into(),
+            task_id: "task-1".into(),
+            parent_id: None,
+            provider: "cli.claude".into(),
+            status: AgentStatus::Idle,
+            interface: "chat".into(),
+        });
+        state.loop_agent_a = Some("ag-1".into());
+        state.loop_agent_b = Some("ag-2".into());
+        state.loop_max_draft = "2".into();
+        state.start_loop();
+        state.stop_loop();
+        let hits = mock.hits.lock().unwrap().clone();
+        let stop = hits
+            .iter()
+            .find(|h| h.method == "loop.stop")
+            .expect("loop.stop");
+        assert_eq!(stop.params["loopId"], "lp-1");
+        assert_eq!(
+            state.loop_state.as_ref().map(|l| l.status.as_str()),
+            Some("stopped")
+        );
+    }
+
+    #[test]
+    fn old_host_a2a_toasts_and_does_not_panic() {
+        let mut state = AppState::new();
+        state.pending_discover = false;
+        state.demo = false;
+        state.host_status = HostStatus::Online;
+        state.session = Some(session_without_1_5());
+        state.workspace_id = Some("ws-1".into());
+        state.selected_task_id = Some("task-1".into());
+        state.selected_agent_id = Some("ag-1".into());
+        state.agents.push(AgentStub {
+            id: "ag-1".into(),
+            task_id: "task-1".into(),
+            parent_id: None,
+            provider: "cli.claude".into(),
+            status: AgentStatus::Idle,
+            interface: "chat".into(),
+        });
+        state.providers.push(DoctorProvider {
+            id: "cli.claude".into(),
+            available: true,
+            detail: String::new(),
+            caps: Some(claude_inbox_caps()),
+        });
+        state.set_picker_provider("cli.claude".into());
+        state.create_child_conversation();
+        assert_eq!(state.toast.as_deref(), Some(A2A_UNAVAILABLE));
+        assert_eq!(state.a2a_status.as_deref(), Some(A2A_UNAVAILABLE));
+        assert_eq!(A2A_UNAVAILABLE, "a2a недоступен: host без 1.5");
+        state.deliver_target = Some("ag-1".into());
+        state.deliver_text = "x".into();
+        state.deliver_to_selected_target();
+        assert_eq!(state.toast.as_deref(), Some(A2A_UNAVAILABLE));
+        state.loop_agent_a = Some("ag-1".into());
+        state.loop_agent_b = Some("ag-1".into());
+        state.start_loop();
+        assert_eq!(state.toast.as_deref(), Some(A2A_UNAVAILABLE));
+        state.stop_loop();
+        assert_eq!(state.toast.as_deref(), Some(A2A_UNAVAILABLE));
+        let _ = state.composer_enabled();
+        let _ = state.write_ready();
+        let _ = state.terminal_host_ok();
+        let _ = state.artifacts_host_ok();
+        assert!(state.artifacts.is_empty());
+        assert_eq!(state.agents.len(), 1);
     }
 }

@@ -1,3 +1,8 @@
+use crate::a2a::{
+    self, A2A_UNAVAILABLE, DELETE_AGENT, DELIVER_BUTTON, DELIVER_HINT, INBOX_LIVE, INBOX_OFF,
+    INBOX_PANE, LOOP_MAX_LABEL, LOOP_PANE, LOOP_PROMPT_HINT, LOOP_RUNNING, LOOP_START, LOOP_STOP,
+    NEW_CONVERSATION,
+};
 use crate::artifacts::{
     self, ArtifactKind, ARTIFACTS_PANE, ARTIFACTS_UNAVAILABLE, CLEAR_CONFIRM_BODY,
     CLEAR_CONFIRM_OK, CLEAR_CONFIRM_TITLE, CLEAR_TRANSCRIPT, COMMENTS_HEADING, COMMENT_HINT,
@@ -13,7 +18,7 @@ use crate::ladder::{
     YOLO_CONFIRM_BODY, YOLO_CONFIRM_OK, YOLO_CONFIRM_TITLE, YOLO_OFF, YOLO_ON_BUTTON,
 };
 use crate::rpc::HarnessCapsView;
-use crate::state::{AgentStatus, AppState, FileKind, FilePreview};
+use crate::state::{AppState, FileKind, FilePreview};
 use crate::terminal::{
     self, AgentInterface, AgentView, AGENT_IS_CHAT, CHAT_TAB, CLOSE_TERMINAL, INTERFACE_LABEL,
     NEW_TERMINAL, NO_LIVE_SHELL, OPEN_PTY, PTY_HINT, PTY_INPUT_HINT, PTY_SUBMIT, SHELL_HINT,
@@ -306,43 +311,83 @@ fn show_agents(ui: &mut egui::Ui, state: &mut AppState) {
     ui.separator();
     ui.add_space(6.0);
 
-    let agents: Vec<(String, String, AgentStatus, String)> = state
+    let listed = state
         .agents_for_selected_task()
         .into_iter()
-        .map(|a| {
-            (
-                a.id.clone(),
-                a.provider.clone(),
-                a.status,
-                a.interface.clone(),
-            )
-        })
-        .collect();
+        .cloned()
+        .collect::<Vec<_>>();
+    let tree = a2a::build_agent_tree(&listed);
     let selected = state.selected_agent().map(|a| a.id.clone());
+    let mut pick = None;
+    let mut delete = None;
 
-    if agents.is_empty() {
+    if listed.is_empty() {
         ui.label("Агента ещё нет.");
-    } else {
-        for (id, provider, status, interface) in &agents {
-            let is_sel = selected.as_deref() == Some(id.as_str());
-            let resp = egui::Frame::new()
-                .fill(if is_sel {
-                    egui::Color32::from_rgb(40, 48, 64)
-                } else {
-                    egui::Color32::from_rgb(32, 32, 38)
-                })
-                .inner_margin(egui::Margin::same(8))
-                .corner_radius(6.0)
-                .show(ui, |ui| {
-                    ui.strong(provider);
-                    ui.label(format!("статус: {}", status.label_ru()));
-                    ui.weak(AgentInterface::from_wire(interface).label_ru());
-                    ui.weak(id);
-                    ui.weak("нажмите, чтобы выбрать");
-                });
-            if resp.response.interact(egui::Sense::click()).clicked() {
-                state.select_agent(id.clone());
+    }
+
+    let live_ids: std::collections::HashSet<String> = listed
+        .iter()
+        .filter(|a| state.agent_has_inbox(a))
+        .map(|a| a.id.clone())
+        .collect();
+    if !listed.is_empty() {
+        fn paint(
+            ui: &mut egui::Ui,
+            agents: &[crate::state::AgentStub],
+            node: &a2a::AgentTreeNode,
+            selected: Option<&str>,
+            live_ids: &std::collections::HashSet<String>,
+            pick: &mut Option<String>,
+            depth: usize,
+        ) {
+            let Some(agent) = agents.iter().find(|a| a.id == node.id) else {
+                return;
+            };
+            let is_sel = selected == Some(agent.id.as_str());
+            let inbox_live = live_ids.contains(&agent.id);
+            ui.horizontal(|ui| {
+                ui.add_space(depth as f32 * 12.0);
+                let resp = egui::Frame::new()
+                    .fill(if is_sel {
+                        egui::Color32::from_rgb(40, 48, 64)
+                    } else {
+                        egui::Color32::from_rgb(32, 32, 38)
+                    })
+                    .inner_margin(egui::Margin::same(8))
+                    .corner_radius(6.0)
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.strong(&agent.provider);
+                            let (dot, color, label) = if inbox_live {
+                                ("●", egui::Color32::from_rgb(80, 200, 120), INBOX_LIVE)
+                            } else {
+                                ("○", egui::Color32::from_rgb(120, 120, 128), INBOX_OFF)
+                            };
+                            ui.colored_label(color, format!("{dot} {label}"));
+                        });
+                        ui.label(format!("статус: {}", agent.status.label_ru()));
+                        ui.weak(AgentInterface::from_wire(&agent.interface).label_ru());
+                        ui.weak(&agent.id);
+                        ui.weak("нажмите, чтобы выбрать");
+                    });
+                if resp.response.interact(egui::Sense::click()).clicked() {
+                    *pick = Some(agent.id.clone());
+                }
+            });
+            for child in &node.children {
+                paint(ui, agents, child, selected, live_ids, pick, depth + 1);
             }
+        }
+        for node in &tree {
+            paint(
+                ui,
+                &listed,
+                node,
+                selected.as_deref(),
+                &live_ids,
+                &mut pick,
+                0,
+            );
         }
     }
 
@@ -358,12 +403,149 @@ fn show_agents(ui: &mut egui::Ui, state: &mut AppState) {
             state.create_agent();
         }
     });
+    ui.add_enabled_ui(state.can_create_child(), |ui| {
+        if ui
+            .add_sized(
+                [ui.available_width(), 28.0],
+                egui::Button::new(NEW_CONVERSATION),
+            )
+            .clicked()
+        {
+            state.create_child_conversation();
+        }
+    });
+    if state.selected_agent().is_some() && ui.small_button(DELETE_AGENT).clicked() {
+        if let Some(id) = state.selected_agent().map(|a| a.id.clone()) {
+            delete = Some(id);
+        }
+    }
     if !state.can_rpc() {
         ui.weak("недоступно: host offline");
     } else if state.providers.is_empty() {
         ui.weak(PICKER_EMPTY);
     } else if state.picker_provider.is_none() {
         ui.weak(PICKER_HINT);
+    }
+    if state.can_rpc() && !state.a2a_host_ok() {
+        ui.weak(A2A_UNAVAILABLE);
+    }
+    if let Some(id) = pick {
+        state.select_agent(id);
+    }
+    if let Some(id) = delete {
+        state.remove_agent(&id);
+    }
+    ui.add_space(8.0);
+    ui.separator();
+    show_inbox(ui, state);
+    ui.add_space(8.0);
+    ui.separator();
+    show_loop(ui, state);
+}
+
+fn show_inbox(ui: &mut egui::Ui, state: &mut AppState) {
+    ui.heading(INBOX_PANE);
+    let live = state.selected_inbox_live();
+    let (dot, color, label) = if live {
+        ("●", egui::Color32::from_rgb(80, 200, 120), INBOX_LIVE)
+    } else {
+        ("○", egui::Color32::from_rgb(120, 120, 128), INBOX_OFF)
+    };
+    ui.colored_label(color, format!("{dot} {label}"));
+    let items: Vec<(String, String, String)> = state
+        .inbox_for_selected()
+        .into_iter()
+        .map(|i| {
+            (
+                i.from_agent_id.clone(),
+                i.message_id.clone(),
+                i.content.clone(),
+            )
+        })
+        .collect();
+    if items.is_empty() {
+        ui.weak("нет входящих");
+    } else {
+        for (from, mid, content) in items {
+            ui.label(format!("от {from}"));
+            if !content.is_empty() {
+                ui.weak(content);
+            } else {
+                ui.weak(mid);
+            }
+        }
+    }
+}
+
+fn show_loop(ui: &mut egui::Ui, state: &mut AppState) {
+    ui.heading(LOOP_PANE);
+    if let Some(status) = state.a2a_status.clone() {
+        ui.weak(status);
+    }
+    let agents: Vec<(String, String)> = state
+        .agents_for_selected_task()
+        .into_iter()
+        .map(|a| (a.id.clone(), a.provider.clone()))
+        .collect();
+    ui.horizontal(|ui| {
+        ui.weak("A");
+        let mut a = state.loop_agent_a.clone();
+        egui::ComboBox::from_id_salt("loop_agent_a")
+            .selected_text(a.clone().unwrap_or_else(|| "—".into()))
+            .show_ui(ui, |ui| {
+                for (id, provider) in &agents {
+                    ui.selectable_value(&mut a, Some(id.clone()), format!("{provider} · {id}"));
+                }
+            });
+        state.loop_agent_a = a;
+    });
+    ui.horizontal(|ui| {
+        ui.weak("B");
+        let mut b = state.loop_agent_b.clone();
+        egui::ComboBox::from_id_salt("loop_agent_b")
+            .selected_text(b.clone().unwrap_or_else(|| "—".into()))
+            .show_ui(ui, |ui| {
+                for (id, provider) in &agents {
+                    ui.selectable_value(&mut b, Some(id.clone()), format!("{provider} · {id}"));
+                }
+            });
+        state.loop_agent_b = b;
+    });
+    ui.horizontal(|ui| {
+        ui.weak(LOOP_MAX_LABEL);
+        ui.add(
+            egui::TextEdit::singleline(&mut state.loop_max_draft)
+                .desired_width(48.0)
+                .hint_text("2"),
+        );
+        ui.weak(format!("1…{}", a2a::MAX_ITERATIONS));
+    });
+    ui.add(
+        egui::TextEdit::singleline(&mut state.loop_prompt)
+            .desired_width(ui.available_width())
+            .hint_text(LOOP_PROMPT_HINT),
+    );
+    ui.horizontal(|ui| {
+        ui.add_enabled_ui(state.can_start_loop(), |ui| {
+            if ui.button(LOOP_START).clicked() {
+                state.start_loop();
+            }
+        });
+        let running = state.loop_state.as_ref().is_some_and(|l| l.is_running());
+        ui.add_enabled_ui(running, |ui| {
+            if ui.button(LOOP_STOP).clicked() {
+                state.stop_loop();
+            }
+        });
+    });
+    if let Some(loop_state) = &state.loop_state {
+        if loop_state.is_running() {
+            ui.colored_label(egui::Color32::from_rgb(220, 180, 80), LOOP_RUNNING);
+        }
+        ui.label(loop_state.counter_label());
+        if let Some(reason) = &loop_state.reason {
+            ui.weak(reason);
+        }
     }
 }
 
@@ -981,6 +1163,7 @@ fn show_chat(ui: &mut egui::Ui, state: &mut AppState) {
                 .hint_text("Написать сообщение…"),
         );
     });
+    show_deliver(ui, state);
     ui.horizontal(|ui| {
         ui.add_enabled_ui(enabled, |ui| {
             if ui.button("Отправить").clicked() {
@@ -1000,6 +1183,54 @@ fn show_chat(ui: &mut egui::Ui, state: &mut AppState) {
     if let Some(reason) = reason {
         ui.weak(reason);
     }
+}
+
+fn show_deliver(ui: &mut egui::Ui, state: &mut AppState) {
+    let targets: Vec<(String, String, bool)> = state
+        .mention_targets()
+        .into_iter()
+        .map(|a| {
+            (
+                a.id.clone(),
+                a.provider.clone(),
+                state.can_deliver_to(&a.id),
+            )
+        })
+        .collect();
+    if targets.len() < 2 {
+        return;
+    }
+    ui.horizontal(|ui| {
+        ui.weak("@");
+        let mut target = state.deliver_target.clone();
+        egui::ComboBox::from_id_salt("deliver_target")
+            .selected_text(target.clone().unwrap_or_else(|| "агент".into()))
+            .show_ui(ui, |ui| {
+                for (id, provider, inbox) in &targets {
+                    let label = if *inbox {
+                        format!("{provider} · {id}")
+                    } else {
+                        format!("{provider} · {id} ({INBOX_OFF})")
+                    };
+                    ui.selectable_value(&mut target, Some(id.clone()), label);
+                }
+            });
+        state.deliver_target = target;
+        ui.add(
+            egui::TextEdit::singleline(&mut state.deliver_text)
+                .desired_width(160.0)
+                .hint_text(DELIVER_HINT),
+        );
+        let can = state
+            .deliver_target
+            .as_deref()
+            .is_some_and(|id| state.can_deliver_to(id));
+        ui.add_enabled_ui(can, |ui| {
+            if ui.button(DELIVER_BUTTON).clicked() {
+                state.deliver_to_selected_target();
+            }
+        });
+    });
 }
 
 fn bubble(ui: &mut egui::Ui, _id: &str, role: &str, content: &str) {
