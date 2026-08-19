@@ -38,7 +38,7 @@ Sources (live, 2026-08-19):
 | C23 | Permission ladder ask → allow-once → allow-always → deny | Desktop agents.md Supervised/Auto-accept/Full; brief №15 | missing | E2 | Ф1 | 15 |
 | C24 | Persistent policy per agent/workspace | directive E2 | missing | E2 | Ф1 | 15 |
 | C25 | Explicit Yolo (visible bypass, not extension YOLO) | directive E2; not `/extension/tasks/yolo-mode` | missing | E2 | Ф1 | 15 |
-| C26 | Full-access default (Traycer 1.1.x changelog) | changelog | missing | E2 | Ф1 | 15 |
+| C26 | Full-access default (Traycer 1.1.x changelog) | changelog; [e2-ladder-v2](e2-ladder-v2.md) | out-of-scope-by-ADR | — | — | 15 |
 | C27 | `files.write` / patch-apply behind ladder | directive E3 | missing | E3 | Ф2 | 9, 15 |
 | C28 | Diff review apply/revert in GUI | directive E3; git-diff panel | missing | E3 | Ф2 | 9 |
 | C29 | Open-in-editor (we are not an IDE) | brief №9 | missing | E3 | Ф2 | 9 |
