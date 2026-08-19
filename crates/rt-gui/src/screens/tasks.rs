@@ -1,6 +1,9 @@
 use crate::state::{AppState, TaskFilter, TaskStatus};
 use crate::workspace_ux::{
-    preset_label_ru, role_label_ru, PRESET_LABEL, PRESET_NONE, WORKSPACE_UNAVAILABLE,
+    self, preset_combo_label, role_label_ru, PRESETS_UNAVAILABLE, PRESET_CREATE, PRESET_DELETE,
+    PRESET_DELETE_BODY, PRESET_DELETE_OK, PRESET_DELETE_TITLE, PRESET_LABEL, PRESET_NAME_HINT,
+    PRESET_NAME_LABEL, PRESET_NONE, PRESET_PROMPT_LABEL, PRESET_SAVE, PRESET_TITLE_HINT_LABEL,
+    ROLE_LABEL, WORKSPACE_UNAVAILABLE,
 };
 
 pub fn show(ctx: &egui::Context, state: &mut AppState) {
@@ -266,14 +269,11 @@ pub fn show_new_task_dialog(ctx: &egui::Context, state: &mut AppState) {
                 let selected = preset
                     .as_deref()
                     .and_then(|id| {
-                        state.presets.iter().find(|item| item.id == id).map(|item| {
-                            format!(
-                                "{} · {} → {}",
-                                preset_label_ru(&item.id),
-                                item.title,
-                                role_label_ru(&item.default_role)
-                            )
-                        })
+                        state
+                            .presets
+                            .iter()
+                            .find(|item| item.id == id)
+                            .map(preset_combo_label)
                     })
                     .unwrap_or_else(|| PRESET_NONE.to_string());
                 egui::ComboBox::from_id_salt("task_preset")
@@ -281,12 +281,7 @@ pub fn show_new_task_dialog(ctx: &egui::Context, state: &mut AppState) {
                     .show_ui(ui, |ui| {
                         ui.selectable_value(&mut preset, None, PRESET_NONE);
                         for item in &state.presets {
-                            let label = format!(
-                                "{} · {} → {}",
-                                preset_label_ru(&item.id),
-                                item.title,
-                                role_label_ru(&item.default_role)
-                            );
+                            let label = preset_combo_label(item);
                             ui.selectable_value(&mut preset, Some(item.id.clone()), label);
                         }
                     });
@@ -297,6 +292,8 @@ pub fn show_new_task_dialog(ctx: &egui::Context, state: &mut AppState) {
             if state.can_rpc() && !host_ok {
                 ui.weak(WORKSPACE_UNAVAILABLE);
             }
+            ui.add_space(8.0);
+            show_user_preset_editor(ui, state);
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 let can = state.can_create_task() && !state.new_task_title.trim().is_empty();
@@ -356,5 +353,88 @@ pub fn show_rename_dialog(ctx: &egui::Context, state: &mut AppState) {
         });
     if !open {
         state.show_rename_dialog = false;
+    }
+}
+
+fn show_user_preset_editor(ui: &mut egui::Ui, state: &mut AppState) {
+    ui.label(PRESET_NAME_LABEL);
+    ui.add(
+        egui::TextEdit::singleline(&mut state.preset_name_draft)
+            .desired_width(320.0)
+            .hint_text(PRESET_NAME_HINT),
+    );
+    ui.add_space(4.0);
+    ui.label(ROLE_LABEL);
+    let mut role = state.preset_role_draft.clone();
+    let role_text = role_label_ru(&role).to_string();
+    egui::ComboBox::from_id_salt("user_preset_role")
+        .selected_text(role_text)
+        .show_ui(ui, |ui| {
+            for choice in workspace_ux::ROLE_CHOICES {
+                ui.selectable_value(&mut role, (*choice).to_string(), role_label_ru(choice));
+            }
+        });
+    if role != state.preset_role_draft {
+        state.preset_role_draft = role;
+    }
+    ui.add_space(4.0);
+    ui.label(PRESET_TITLE_HINT_LABEL);
+    ui.add(
+        egui::TextEdit::singleline(&mut state.preset_title_hint_draft)
+            .desired_width(320.0)
+            .hint_text(PRESET_TITLE_HINT_LABEL),
+    );
+    ui.add_space(4.0);
+    ui.label(PRESET_PROMPT_LABEL);
+    ui.add(
+        egui::TextEdit::multiline(&mut state.preset_prompt_draft)
+            .desired_width(320.0)
+            .desired_rows(3)
+            .hint_text(PRESET_PROMPT_LABEL),
+    );
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        if ui.button(PRESET_CREATE).clicked() {
+            state.create_user_preset();
+        }
+        let user_selected = state.selected_user_preset_id().is_some();
+        ui.add_enabled_ui(user_selected, |ui| {
+            if ui.button(PRESET_SAVE).clicked() {
+                state.save_user_preset();
+            }
+            if ui.button(PRESET_DELETE).clicked() {
+                state.request_delete_user_preset();
+            }
+        });
+    });
+    if state.can_rpc() && !state.preset_crud_host_ok() {
+        ui.weak(PRESETS_UNAVAILABLE);
+    }
+}
+
+pub fn show_preset_delete_confirm(ctx: &egui::Context, state: &mut AppState) {
+    if !state.show_preset_delete_confirm {
+        return;
+    }
+    let mut open = true;
+    egui::Window::new(PRESET_DELETE_TITLE)
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ctx, |ui| {
+            ui.label(PRESET_DELETE_BODY);
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button(PRESET_DELETE_OK).clicked() {
+                    state.confirm_delete_user_preset();
+                }
+                if ui.button("Отмена").clicked() {
+                    state.cancel_delete_user_preset();
+                }
+            });
+        });
+    if !open {
+        state.cancel_delete_user_preset();
     }
 }

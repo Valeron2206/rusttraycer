@@ -114,7 +114,16 @@ pub const METHOD_WORKSPACE_GUIDES_GET: &str = "workspace.guides.get";
 pub const METHOD_SETTINGS_GUIDE_GET: &str = "settings.guide.get";
 pub const METHOD_SETTINGS_GUIDE_SET: &str = "settings.guide.set";
 pub const METHOD_PRESET_LIST: &str = "preset.list";
+pub const METHOD_PRESET_CREATE: &str = "preset.create";
+pub const METHOD_PRESET_UPDATE: &str = "preset.update";
+pub const METHOD_PRESET_DELETE: &str = "preset.delete";
 pub const METHOD_AGENT_UPDATE: &str = "agent.update";
+
+pub const PRESET_CRUD_METHODS: &[&str] = &[
+    METHOD_PRESET_CREATE,
+    METHOD_PRESET_UPDATE,
+    METHOD_PRESET_DELETE,
+];
 
 pub const WORKSPACE_METHODS: &[&str] = &[
     METHOD_WORKSPACE_GUIDES_GET,
@@ -126,8 +135,11 @@ pub const WORKSPACE_METHODS: &[&str] = &[
 
 pub const METHOD_SYNC_EXPORT: &str = "sync.export";
 pub const METHOD_SYNC_IMPORT: &str = "sync.import";
+pub const METHOD_SYNC_PUSH: &str = "sync.push";
+pub const METHOD_SYNC_PULL: &str = "sync.pull";
 
 pub const SYNC_METHODS: &[&str] = &[METHOD_SYNC_EXPORT, METHOD_SYNC_IMPORT];
+pub const SYNC_PEER_METHODS: &[&str] = &[METHOD_SYNC_PUSH, METHOD_SYNC_PULL];
 
 pub const METHOD_SEARCH_QUERY: &str = "search.query";
 pub const METHOD_WORKTREE_GC: &str = "worktree.gc";
@@ -249,6 +261,14 @@ impl ConnectError {
     }
 
     pub fn is_stash_unsupported(&self) -> bool {
+        self.is_unsupported_method() || self.is_version_mismatch()
+    }
+
+    pub fn is_sync_peer_unsupported(&self) -> bool {
+        self.is_unsupported_method() || self.is_version_mismatch()
+    }
+
+    pub fn is_preset_crud_unsupported(&self) -> bool {
         self.is_unsupported_method() || self.is_version_mismatch()
     }
 
@@ -381,6 +401,12 @@ fn hello_methods() -> Value {
         map.insert(name.to_string(), json!({ "major": 1, "minor": 9 }));
     }
     for name in STASH_METHODS {
+        map.insert(name.to_string(), json!({ "major": 1, "minor": 9 }));
+    }
+    for name in SYNC_PEER_METHODS {
+        map.insert(name.to_string(), json!({ "major": 1, "minor": 9 }));
+    }
+    for name in PRESET_CRUD_METHODS {
         map.insert(name.to_string(), json!({ "major": 1, "minor": 9 }));
     }
     Value::Object(map)
@@ -1433,6 +1459,62 @@ impl Session {
         parse_items(self.call(METHOD_PRESET_LIST, json!({}))?)
     }
 
+    pub fn preset_crud_accepted(&self) -> bool {
+        PRESET_CRUD_METHODS.iter().all(|name| {
+            self.accepted
+                .get(*name)
+                .map(|v| v.major == 1 && v.minor >= 9)
+                .unwrap_or(false)
+        })
+    }
+
+    pub fn preset_crud_rejected(&self) -> bool {
+        PRESET_CRUD_METHODS
+            .iter()
+            .any(|name| self.rejected.contains_key(*name))
+    }
+
+    pub fn preset_create(
+        &self,
+        name: &str,
+        default_role: &str,
+        title_hint: &str,
+        prompt: &str,
+    ) -> Result<PresetItem, ConnectError> {
+        let Some(params) =
+            crate::workspace_ux::preset_create_params(name, default_role, title_hint, prompt)
+        else {
+            return Ok(PresetItem::default());
+        };
+        let ok = self.call(METHOD_PRESET_CREATE, params)?;
+        Ok(crate::workspace_ux::parse_preset_item(&ok))
+    }
+
+    pub fn preset_update(
+        &self,
+        id: &str,
+        name: &str,
+        default_role: &str,
+        title_hint: &str,
+        prompt: &str,
+    ) -> Result<PresetItem, ConnectError> {
+        let Some(params) =
+            crate::workspace_ux::preset_update_params(id, name, default_role, title_hint, prompt)
+        else {
+            return Ok(PresetItem::default());
+        };
+        let ok = self.call(METHOD_PRESET_UPDATE, params)?;
+        Ok(crate::workspace_ux::parse_preset_item(&ok))
+    }
+
+    pub fn preset_delete(&self, id: &str) -> Result<(), ConnectError> {
+        let Some(params) = crate::workspace_ux::preset_delete_params(id) else {
+            return Ok(());
+        };
+        let _ = self.call(METHOD_PRESET_DELETE, params)?;
+        Ok(())
+    }
+
     pub fn agent_update_role(
         &self,
         agent_id: &str,
@@ -1515,6 +1597,35 @@ impl Session {
             METHOD_SYNC_IMPORT,
             json!({ "workspaceId": workspace_id, "archive": archive }),
         )
+    }
+
+    pub fn sync_peer_accepted(&self) -> bool {
+        SYNC_PEER_METHODS.iter().all(|name| {
+            self.accepted
+                .get(*name)
+                .map(|v| v.major == 1 && v.minor >= 9)
+                .unwrap_or(false)
+        })
+    }
+
+    pub fn sync_peer_rejected(&self) -> bool {
+        SYNC_PEER_METHODS
+            .iter()
+            .any(|name| self.rejected.contains_key(*name))
+    }
+
+    pub fn sync_push(&self, peer_url: &str) -> Result<Value, ConnectError> {
+        let Some(params) = crate::sync_ux::push_params(peer_url) else {
+            return Ok(json!({}));
+        };
+        self.call(METHOD_SYNC_PUSH, params)
+    }
+
+    pub fn sync_pull(&self, peer_url: &str, workspace_id: &str) -> Result<Value, ConnectError> {
+        let Some(params) = crate::sync_ux::pull_params(peer_url, workspace_id) else {
+            return Ok(json!({}));
+        };
+        self.call(METHOD_SYNC_PULL, params)
     }
 
     pub fn search_accepted(&self) -> bool {
@@ -1757,12 +1868,21 @@ pub struct SettingsGuide {
     pub truncated: bool,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct PresetItem {
+    #[serde(default)]
     pub id: String,
+    #[serde(default)]
     pub title: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
     pub default_role: String,
+    #[serde(default)]
+    pub title_hint: String,
+    #[serde(default)]
+    pub prompt: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -5814,6 +5934,350 @@ mod tests {
             .iter()
             .filter(|h| h.method.starts_with("stash."))
             .all(|h| h.has_session));
+    }
+
+    fn start_sync_peer_rpc_mock() -> CatalogMock {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(Mutex::new(Vec::new()));
+        let hits_t = hits.clone();
+        thread::spawn(move || {
+            for stream in listener.incoming().take(32) {
+                let Ok(mut stream) = stream else { break };
+                let (headers, body) = read_http_request(&mut stream);
+                let has_session = headers.to_ascii_lowercase().contains("x-rt-session:");
+                let (method, params) = if headers.starts_with("GET /health") {
+                    ("GET /health".to_string(), json!({}))
+                } else {
+                    let parsed: Value = serde_json::from_slice(&body).unwrap_or(json!({}));
+                    (
+                        parsed
+                            .get("method")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("other")
+                            .to_string(),
+                        parsed.get("params").cloned().unwrap_or(json!({})),
+                    )
+                };
+                hits_t.lock().unwrap().push(RpcHit {
+                    method: method.clone(),
+                    params: params.clone(),
+                    has_session,
+                });
+                let body = match method.as_str() {
+                    "GET /health" => json!({"ok": true, "hostId": "host-a"}).to_string(),
+                    "handshake" => {
+                        let mut accepted = serde_json::Map::new();
+                        for name in SYNC_METHODS {
+                            accepted.insert(name.to_string(), json!({"major": 1, "minor": 8}));
+                        }
+                        for name in SYNC_PEER_METHODS {
+                            accepted.insert(name.to_string(), json!({"major": 1, "minor": 9}));
+                        }
+                        json!({
+                            "id": "echo",
+                            "ok": {
+                                "hostId": "host-a",
+                                "hostVersion": "0.1.0",
+                                "sessionToken": "tok-1",
+                                "accepted": accepted,
+                                "rejected": {}
+                            }
+                        })
+                        .to_string()
+                    }
+                    "host.ping" => json!({
+                        "id": "echo",
+                        "ok": { "hostId": "host-a", "now": "2026-08-19T12:00:00Z" }
+                    })
+                    .to_string(),
+                    "sync.push" => json!({
+                        "id": "echo",
+                        "ok": { "ok": true }
+                    })
+                    .to_string(),
+                    "sync.pull" => json!({
+                        "id": "echo",
+                        "ok": { "tasks": 1, "agents": 0 }
+                    })
+                    .to_string(),
+                    _ => json!({
+                        "id": "echo",
+                        "error": { "code": "unsupported_method", "message": "no" }
+                    })
+                    .to_string(),
+                };
+                write_http_json(&mut stream, &body);
+            }
+        });
+        CatalogMock {
+            origin: format!("http://{addr}"),
+            hits,
+        }
+    }
+
+    fn start_preset_crud_rpc_mock() -> CatalogMock {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(Mutex::new(Vec::new()));
+        let hits_t = hits.clone();
+        thread::spawn(move || {
+            for stream in listener.incoming().take(32) {
+                let Ok(mut stream) = stream else { break };
+                let (headers, body) = read_http_request(&mut stream);
+                let has_session = headers.to_ascii_lowercase().contains("x-rt-session:");
+                let (method, params) = if headers.starts_with("GET /health") {
+                    ("GET /health".to_string(), json!({}))
+                } else {
+                    let parsed: Value = serde_json::from_slice(&body).unwrap_or(json!({}));
+                    (
+                        parsed
+                            .get("method")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("other")
+                            .to_string(),
+                        parsed.get("params").cloned().unwrap_or(json!({})),
+                    )
+                };
+                hits_t.lock().unwrap().push(RpcHit {
+                    method: method.clone(),
+                    params: params.clone(),
+                    has_session,
+                });
+                let body = match method.as_str() {
+                    "GET /health" => json!({"ok": true, "hostId": "host-a"}).to_string(),
+                    "handshake" => {
+                        let mut accepted = serde_json::Map::new();
+                        for name in WORKSPACE_METHODS {
+                            accepted.insert(name.to_string(), json!({"major": 1, "minor": 7}));
+                        }
+                        for name in PRESET_CRUD_METHODS {
+                            accepted.insert(name.to_string(), json!({"major": 1, "minor": 9}));
+                        }
+                        json!({
+                            "id": "echo",
+                            "ok": {
+                                "hostId": "host-a",
+                                "hostVersion": "0.1.0",
+                                "sessionToken": "tok-1",
+                                "accepted": accepted,
+                                "rejected": {}
+                            }
+                        })
+                        .to_string()
+                    }
+                    "host.ping" => json!({
+                        "id": "echo",
+                        "ok": { "hostId": "host-a", "now": "2026-08-19T12:00:00Z" }
+                    })
+                    .to_string(),
+                    "preset.list" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "items": [
+                                { "id": "planning", "title": "Planning", "defaultRole": "planner" },
+                                {
+                                    "id": "p-1",
+                                    "name": "Mine",
+                                    "defaultRole": "coder",
+                                    "titleHint": "hint",
+                                    "prompt": "do"
+                                }
+                            ]
+                        }
+                    })
+                    .to_string(),
+                    "preset.create" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "id": "p-new",
+                            "name": params.get("name").cloned().unwrap_or(json!("")),
+                            "defaultRole": params.get("defaultRole").cloned().unwrap_or(json!("coder")),
+                            "titleHint": params.get("titleHint").cloned().unwrap_or(json!("")),
+                            "prompt": params.get("prompt").cloned().unwrap_or(json!(""))
+                        }
+                    })
+                    .to_string(),
+                    "preset.update" => json!({
+                        "id": "echo",
+                        "ok": {
+                            "id": params.get("id").cloned().unwrap_or(json!("")),
+                            "name": params.get("name").cloned().unwrap_or(json!("")),
+                            "defaultRole": params.get("defaultRole").cloned().unwrap_or(json!("coder"))
+                        }
+                    })
+                    .to_string(),
+                    "preset.delete" => json!({
+                        "id": "echo",
+                        "ok": { "id": params.get("id").cloned().unwrap_or(json!("")) }
+                    })
+                    .to_string(),
+                    _ => json!({
+                        "id": "echo",
+                        "error": { "code": "unsupported_method", "message": "no" }
+                    })
+                    .to_string(),
+                };
+                write_http_json(&mut stream, &body);
+            }
+        });
+        CatalogMock {
+            origin: format!("http://{addr}"),
+            hits,
+        }
+    }
+
+    #[test]
+    fn handshake_advertises_sync_peer_1_9_and_keeps_1_8() {
+        let mock = start_catalog_mock("host-a", "tok-1");
+        let _session = connect(&pid("host-a", &mock.origin)).expect("online");
+        let hs = mock
+            .hits
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|h| h.method == "handshake")
+            .cloned()
+            .expect("handshake");
+        for name in SYNC_METHODS {
+            assert_eq!(hs.params["methods"][name]["major"], 1, "{name}");
+            assert_eq!(hs.params["methods"][name]["minor"], 8, "{name}");
+        }
+        for name in SYNC_PEER_METHODS {
+            assert_eq!(hs.params["methods"][name]["major"], 1, "{name}");
+            assert_eq!(hs.params["methods"][name]["minor"], 9, "{name}");
+        }
+        assert_eq!(hs.params["methods"]["sync.export"]["minor"], 8);
+        assert_eq!(hs.params["methods"]["sync.import"]["minor"], 8);
+        assert_eq!(hs.params["methods"]["sync.push"]["minor"], 9);
+        assert_eq!(hs.params["methods"]["sync.pull"]["minor"], 9);
+        assert_eq!(hs.params["client"], "gui");
+    }
+
+    #[test]
+    fn handshake_advertises_preset_crud_1_9_and_keeps_1_7_list() {
+        let mock = start_catalog_mock("host-a", "tok-1");
+        let _session = connect(&pid("host-a", &mock.origin)).expect("online");
+        let hs = mock
+            .hits
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|h| h.method == "handshake")
+            .cloned()
+            .expect("handshake");
+        assert_eq!(hs.params["methods"]["preset.list"]["minor"], 7);
+        for name in PRESET_CRUD_METHODS {
+            assert_eq!(hs.params["methods"][name]["major"], 1, "{name}");
+            assert_eq!(hs.params["methods"][name]["minor"], 9, "{name}");
+        }
+        assert_eq!(hs.params["methods"]["preset.create"]["minor"], 9);
+        assert_eq!(hs.params["methods"]["preset.update"]["minor"], 9);
+        assert_eq!(hs.params["methods"]["preset.delete"]["minor"], 9);
+        assert_eq!(hs.params["methods"]["workspace.guides.get"]["minor"], 7);
+        assert_eq!(hs.params["client"], "gui");
+    }
+
+    #[test]
+    fn sync_push_sends_peer_url_only() {
+        let mock = start_sync_peer_rpc_mock();
+        let session = connect(&pid("host-a", &mock.origin)).expect("online");
+        assert!(session.sync_accepted());
+        assert!(session.sync_peer_accepted());
+        session
+            .sync_push("  http://127.0.0.1:7420  ")
+            .expect("push");
+        session.sync_push("   ").expect("empty");
+        let hits = mock.hits.lock().unwrap().clone();
+        let pushes: Vec<Value> = hits
+            .iter()
+            .filter(|h| h.method == "sync.push")
+            .map(|h| h.params.clone())
+            .collect();
+        assert_eq!(pushes.len(), 1);
+        assert_eq!(pushes[0], json!({ "peerUrl": "http://127.0.0.1:7420" }));
+        assert!(pushes[0].get("secret").is_none());
+        assert!(pushes[0].get("token").is_none());
+        assert!(hits
+            .iter()
+            .filter(|h| h.method == "sync.push")
+            .all(|h| h.has_session));
+    }
+
+    #[test]
+    fn sync_pull_sends_peer_url_and_workspace() {
+        let mock = start_sync_peer_rpc_mock();
+        let session = connect(&pid("host-a", &mock.origin)).expect("online");
+        session
+            .sync_pull("http://127.0.0.1:9", "ws-1")
+            .expect("pull");
+        session.sync_pull("", "ws-1").expect("empty url");
+        session
+            .sync_pull("http://127.0.0.1:9", "")
+            .expect("empty ws");
+        let hits = mock.hits.lock().unwrap().clone();
+        let pulls: Vec<Value> = hits
+            .iter()
+            .filter(|h| h.method == "sync.pull")
+            .map(|h| h.params.clone())
+            .collect();
+        assert_eq!(pulls.len(), 1);
+        assert_eq!(
+            pulls[0],
+            json!({ "peerUrl": "http://127.0.0.1:9", "workspaceId": "ws-1" })
+        );
+        assert!(pulls[0].get("secret").is_none());
+    }
+
+    #[test]
+    fn preset_create_update_delete_shapes_and_list_1_7() {
+        let mock = start_preset_crud_rpc_mock();
+        let session = connect(&pid("host-a", &mock.origin)).expect("online");
+        assert!(session.workspace_accepted());
+        assert!(session.preset_crud_accepted());
+        let listed = session.preset_list().expect("list");
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].id, "planning");
+        assert_eq!(listed[1].id, "p-1");
+        assert_eq!(listed[1].name, "Mine");
+        let created = session
+            .preset_create("Mine", "planner", "hint", "do")
+            .expect("create");
+        assert_eq!(created.id, "p-new");
+        assert_eq!(created.name, "Mine");
+        session
+            .preset_update("p-1", "Mine2", "reviewer", "", "")
+            .expect("update");
+        session.preset_delete("p-1").expect("delete");
+        session.preset_delete("planning").expect("builtin skipped");
+        session.preset_create("  ", "coder", "", "").expect("empty");
+        let hits = mock.hits.lock().unwrap().clone();
+        let creates: Vec<Value> = hits
+            .iter()
+            .filter(|h| h.method == "preset.create")
+            .map(|h| h.params.clone())
+            .collect();
+        assert_eq!(creates.len(), 1);
+        assert_eq!(creates[0]["name"], "Mine");
+        assert_eq!(creates[0]["defaultRole"], "planner");
+        assert_eq!(creates[0]["titleHint"], "hint");
+        assert_eq!(creates[0]["prompt"], "do");
+        assert!(creates[0].get("secret").is_none());
+        let updates: Vec<Value> = hits
+            .iter()
+            .filter(|h| h.method == "preset.update")
+            .map(|h| h.params.clone())
+            .collect();
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0]["id"], "p-1");
+        assert_eq!(updates[0]["name"], "Mine2");
+        let deletes: Vec<Value> = hits
+            .iter()
+            .filter(|h| h.method == "preset.delete")
+            .map(|h| h.params.clone())
+            .collect();
+        assert_eq!(deletes, vec![json!({ "id": "p-1" })]);
+        assert!(hits.iter().any(|h| h.method == "preset.list"));
     }
 
     #[test]

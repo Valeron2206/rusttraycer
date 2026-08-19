@@ -3,7 +3,9 @@ use crate::hooks::{HOOKS_HINT, HOOKS_LABEL, HOOKS_SAVE};
 use crate::state::AppState;
 use crate::sync_ux::{
     EXPORT_BUTTON, IMPORT_BUTTON, IMPORT_CONFIRM_BODY, IMPORT_CONFIRM_OK, IMPORT_CONFIRM_TITLE,
-    SYNC_SECTION, SYNC_UNAVAILABLE,
+    PEER_URL_HINT, PEER_URL_LABEL, PULL_BUTTON, PULL_CONFIRM_BODY, PULL_CONFIRM_OK,
+    PULL_CONFIRM_TITLE, PUSH_BUTTON, SYNC_PEER_UNAVAILABLE, SYNC_SECRET_HINT, SYNC_SECTION,
+    SYNC_UNAVAILABLE,
 };
 use crate::workspace_ux::{
     GLOBAL_GUIDE_HINT, GLOBAL_GUIDE_LABEL, GLOBAL_GUIDE_SAVE, WORKSPACE_UNAVAILABLE,
@@ -177,6 +179,26 @@ pub fn show_body(ui: &mut egui::Ui, state: &mut AppState) {
             }
         });
     });
+    ui.add_space(8.0);
+    ui.horizontal(|ui| {
+        ui.label(PEER_URL_LABEL);
+        ui.add(
+            egui::TextEdit::singleline(&mut state.sync_peer_url)
+                .desired_width(280.0)
+                .hint_text(PEER_URL_HINT)
+                .password(false),
+        );
+        if ui.button(PUSH_BUTTON).clicked() {
+            state.request_sync_push();
+        }
+        if ui.button(PULL_BUTTON).clicked() {
+            state.request_sync_pull();
+        }
+    });
+    ui.weak(SYNC_SECRET_HINT);
+    if state.can_rpc() && sync_ok && !state.sync_peer_host_ok() {
+        ui.weak(SYNC_PEER_UNAVAILABLE);
+    }
 
     ui.add_space(16.0);
     ui.separator();
@@ -266,5 +288,32 @@ pub fn show_sync_import_confirm(ctx: &egui::Context, state: &mut AppState) {
         });
     if !open {
         state.cancel_sync_import();
+    }
+}
+
+pub fn show_sync_pull_confirm(ctx: &egui::Context, state: &mut AppState) {
+    if !state.show_sync_pull_confirm {
+        return;
+    }
+    let mut open = true;
+    egui::Window::new(PULL_CONFIRM_TITLE)
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ctx, |ui| {
+            ui.label(PULL_CONFIRM_BODY);
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button(PULL_CONFIRM_OK).clicked() {
+                    state.confirm_sync_pull();
+                }
+                if ui.button("Отмена").clicked() {
+                    state.cancel_sync_pull();
+                }
+            });
+        });
+    if !open {
+        state.cancel_sync_pull();
     }
 }

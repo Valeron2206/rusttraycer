@@ -1,6 +1,8 @@
 //! E8 workspace GUI: AGENTS.md / selection guides, agent roles, task presets.
 //! Guides come from host RPC only. No workspace walk. Host without 1.7 degrades.
 
+use serde_json::{json, Value};
+
 use crate::rpc::{GuideFile, PresetItem, WorkspaceGuides};
 
 pub const WORKSPACE_UNAVAILABLE: &str = "воркспейс-гайд недоступен: host без 1.7";
@@ -16,6 +18,17 @@ pub const GLOBAL_GUIDE_LABEL: &str = "Глобальный гайд выбора
 pub const GLOBAL_GUIDE_SAVE: &str = "Сохранить гайд";
 pub const GLOBAL_GUIDE_HINT: &str = "как выбирать агента";
 pub const GUIDE_TOO_LONG: &str = "гайд: не больше 65536 байт";
+pub const PRESETS_UNAVAILABLE: &str = "пресеты недоступны: host без 1.9";
+pub const PRESET_CREATE: &str = "Создать";
+pub const PRESET_SAVE: &str = "Сохранить";
+pub const PRESET_DELETE: &str = "Удалить";
+pub const PRESET_NAME_LABEL: &str = "Имя";
+pub const PRESET_NAME_HINT: &str = "имя пресета";
+pub const PRESET_TITLE_HINT_LABEL: &str = "Подсказка названия";
+pub const PRESET_PROMPT_LABEL: &str = "Промпт";
+pub const PRESET_DELETE_TITLE: &str = "Удалить пресет?";
+pub const PRESET_DELETE_BODY: &str = "Пользовательский пресет будет удалён.";
+pub const PRESET_DELETE_OK: &str = "Удалить";
 
 pub const ROLE_CODER: &str = "coder";
 pub const ROLE_PLANNER: &str = "planner";
@@ -51,6 +64,125 @@ pub fn valid_role(role: &str) -> bool {
 
 pub fn valid_preset(preset: &str) -> bool {
     PRESET_CHOICES.contains(&preset)
+}
+
+pub fn is_builtin_preset(id: &str) -> bool {
+    valid_preset(id)
+}
+
+pub fn listed_preset(id: &str, listed: &[PresetItem]) -> bool {
+    valid_preset(id) || listed.iter().any(|item| item.id == id)
+}
+
+pub fn preset_display_name(item: &PresetItem) -> &str {
+    if !item.name.is_empty() {
+        &item.name
+    } else if !item.title.is_empty() {
+        &item.title
+    } else {
+        &item.id
+    }
+}
+
+pub fn preset_combo_label(item: &PresetItem) -> String {
+    let name = preset_display_name(item);
+    format!(
+        "{} · {} → {}",
+        preset_label_ru(&item.id),
+        name,
+        role_label_ru(&item.default_role)
+    )
+}
+
+/// `None` when name/role empty or invalid — no RPC.
+pub fn preset_create_params(
+    name: &str,
+    default_role: &str,
+    title_hint: &str,
+    prompt: &str,
+) -> Option<Value> {
+    let name = name.trim();
+    if name.is_empty() {
+        return None;
+    }
+    let default_role = default_role.trim();
+    if !valid_role(default_role) {
+        return None;
+    }
+    let mut params = json!({
+        "name": name,
+        "defaultRole": default_role,
+    });
+    let hint = title_hint.trim();
+    if !hint.is_empty() {
+        params["titleHint"] = json!(hint);
+    }
+    let prompt = prompt.trim();
+    if !prompt.is_empty() {
+        params["prompt"] = json!(prompt);
+    }
+    Some(params)
+}
+
+/// `None` when id is empty or a built-in — no RPC.
+pub fn preset_update_params(
+    id: &str,
+    name: &str,
+    default_role: &str,
+    title_hint: &str,
+    prompt: &str,
+) -> Option<Value> {
+    let id = id.trim();
+    if id.is_empty() || is_builtin_preset(id) {
+        return None;
+    }
+    let mut params = preset_create_params(name, default_role, title_hint, prompt)?;
+    params["id"] = json!(id);
+    Some(params)
+}
+
+/// `None` when id is empty or a built-in — no RPC.
+pub fn preset_delete_params(id: &str) -> Option<Value> {
+    let id = id.trim();
+    if id.is_empty() || is_builtin_preset(id) {
+        return None;
+    }
+    Some(json!({ "id": id }))
+}
+
+pub fn parse_preset_item(ok: &Value) -> PresetItem {
+    let src = if let Some(nested) = ok.get("item").filter(|v| v.is_object()) {
+        nested
+    } else if let Some(nested) = ok.get("preset").filter(|v| v.is_object()) {
+        nested
+    } else {
+        ok
+    };
+    PresetItem {
+        id: first_str(src, &["id", "presetId", "preset_id"]).unwrap_or_default(),
+        title: first_str(src, &["title"]).unwrap_or_default(),
+        name: first_str(src, &["name"]).unwrap_or_default(),
+        default_role: first_str(src, &["defaultRole", "default_role", "role"]).unwrap_or_default(),
+        title_hint: first_str(src, &["titleHint", "title_hint"]).unwrap_or_default(),
+        prompt: first_str(src, &["prompt", "body"]).unwrap_or_default(),
+    }
+}
+
+fn first_str(v: &Value, keys: &[&str]) -> Option<String> {
+    for key in keys {
+        let Some(item) = v.get(*key) else {
+            continue;
+        };
+        if let Some(s) = item
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+        {
+            return Some(s);
+        }
+    }
+    None
 }
 
 pub fn role_label_ru(role: &str) -> &str {
@@ -90,21 +222,25 @@ pub fn builtin_presets() -> Vec<PresetItem> {
             id: PRESET_PLANNING.into(),
             title: "Planning".into(),
             default_role: ROLE_PLANNER.into(),
+            ..Default::default()
         },
         PresetItem {
             id: PRESET_REVIEW.into(),
             title: "Review".into(),
             default_role: ROLE_REVIEWER.into(),
+            ..Default::default()
         },
         PresetItem {
             id: PRESET_DEBUG.into(),
             title: "Debug".into(),
             default_role: ROLE_DEBUGGER.into(),
+            ..Default::default()
         },
         PresetItem {
             id: PRESET_DOCUMENT.into(),
             title: "Document".into(),
             default_role: ROLE_DOCUMENTER.into(),
+            ..Default::default()
         },
     ]
 }
@@ -159,9 +295,25 @@ mod tests {
         );
         assert_eq!(crate::rpc::METHOD_SETTINGS_GUIDE_GET, "settings.guide.get");
         assert_eq!(crate::rpc::METHOD_SETTINGS_GUIDE_SET, "settings.guide.set");
+        assert_eq!(PRESETS_UNAVAILABLE, "пресеты недоступны: host без 1.9");
+        assert_eq!(PRESET_CREATE, "Создать");
+        assert_eq!(PRESET_SAVE, "Сохранить");
+        assert_eq!(PRESET_DELETE, "Удалить");
+        assert_eq!(PRESET_NAME_LABEL, "Имя");
+        assert_eq!(PRESET_NAME_HINT, "имя пресета");
+        assert_eq!(PRESET_TITLE_HINT_LABEL, "Подсказка названия");
+        assert_eq!(PRESET_PROMPT_LABEL, "Промпт");
+        assert_eq!(PRESET_DELETE_TITLE, "Удалить пресет?");
+        assert_eq!(PRESET_DELETE_BODY, "Пользовательский пресет будет удалён.");
+        assert_eq!(PRESET_DELETE_OK, "Удалить");
         assert_eq!(crate::rpc::METHOD_PRESET_LIST, "preset.list");
+        assert_eq!(crate::rpc::METHOD_PRESET_CREATE, "preset.create");
+        assert_eq!(crate::rpc::METHOD_PRESET_UPDATE, "preset.update");
+        assert_eq!(crate::rpc::METHOD_PRESET_DELETE, "preset.delete");
         assert_eq!(crate::rpc::METHOD_AGENT_UPDATE, "agent.update");
         assert_eq!(crate::rpc::WORKSPACE_METHODS.len(), 5);
+        assert_eq!(crate::rpc::PRESET_CRUD_METHODS.len(), 3);
+        assert!(!crate::rpc::WORKSPACE_METHODS.contains(&crate::rpc::METHOD_PRESET_CREATE));
         assert_eq!(
             ROLE_CHOICES,
             ["coder", "planner", "reviewer", "debugger", "documenter"]
@@ -198,5 +350,58 @@ mod tests {
         assert!(!crate::rpc::WORKSPACE_METHODS.contains(&"files.tree"));
         assert!(!ROLE_CHOICES.iter().any(|r| *r == "search"));
         assert!(!PRESET_CHOICES.iter().any(|p| *p == "custom"));
+        assert!(is_builtin_preset(PRESET_PLANNING));
+        assert!(!is_builtin_preset("mine"));
+    }
+
+    #[test]
+    fn preset_crud_shapes_omit_empty_and_protect_builtin() {
+        let created =
+            preset_create_params(" Mine ", "planner", " hint ", " do it ").expect("create");
+        assert_eq!(created["name"], "Mine");
+        assert_eq!(created["defaultRole"], "planner");
+        assert_eq!(created["titleHint"], "hint");
+        assert_eq!(created["prompt"], "do it");
+        assert!(created.get("secret").is_none());
+        assert!(created.get("token").is_none());
+        let slim = preset_create_params("Mine", "coder", "  ", "").expect("slim");
+        assert_eq!(slim, json!({ "name": "Mine", "defaultRole": "coder" }));
+        assert!(preset_create_params("  ", "coder", "", "").is_none());
+        assert!(preset_create_params("Mine", "owner", "", "").is_none());
+
+        let updated = preset_update_params("p-1", "Mine", "reviewer", "", "x").expect("update");
+        assert_eq!(updated["id"], "p-1");
+        assert_eq!(updated["name"], "Mine");
+        assert_eq!(updated["defaultRole"], "reviewer");
+        assert_eq!(updated["prompt"], "x");
+        assert!(updated.get("titleHint").is_none());
+        assert!(preset_update_params("planning", "Mine", "coder", "", "").is_none());
+        assert!(preset_update_params("", "Mine", "coder", "", "").is_none());
+
+        assert_eq!(
+            preset_delete_params("  p-1  "),
+            Some(json!({ "id": "p-1" }))
+        );
+        assert!(preset_delete_params("planning").is_none());
+        assert!(preset_delete_params("review").is_none());
+        assert!(preset_delete_params("debug").is_none());
+        assert!(preset_delete_params("document").is_none());
+        assert!(preset_delete_params("").is_none());
+
+        let item = parse_preset_item(&json!({
+            "item": {
+                "id": "p-2",
+                "name": "Mine",
+                "defaultRole": "debugger",
+                "titleHint": "fix",
+                "prompt": "debug it"
+            }
+        }));
+        assert_eq!(item.id, "p-2");
+        assert_eq!(item.name, "Mine");
+        assert_eq!(item.default_role, "debugger");
+        assert_eq!(item.title_hint, "fix");
+        assert_eq!(item.prompt, "debug it");
+        assert!(!is_builtin_preset(&item.id));
     }
 }
