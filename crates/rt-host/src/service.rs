@@ -461,7 +461,9 @@ impl HostService {
             self.inflight.remove_if(agent_id, gen);
             return Err(e.into());
         }
-        let _ = self.store.task_touch(&task.id);
+        if let Err(e) = self.store.task_touch(&task.id) {
+            tracing::warn!(task_id = %task.id, error = %e, "task_touch failed");
+        }
         let _ = self.events.send(WsEvent::agent_status(
             &task.id,
             agent_id,
