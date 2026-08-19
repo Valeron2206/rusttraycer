@@ -536,6 +536,7 @@ sys.stdout.flush()
     fn caps_are_cli_generic() {
         let backend = CliGeneric::new("/bin/true");
         assert_eq!(backend.caps(), HarnessCaps::CLI_GENERIC);
+        assert!(!backend.caps().steer);
         assert_eq!(backend.id(), "cli.generic");
     }
 
