@@ -47,6 +47,10 @@ pub fn show(ctx: &egui::Context, state: &mut AppState) {
             ui.separator();
             ui.add_space(8.0);
             show_file_tree(ui, state);
+            ui.add_space(8.0);
+            ui.separator();
+            ui.add_space(8.0);
+            show_git(ui, state);
         });
 
     egui::SidePanel::right("canvas_preview")
@@ -123,6 +127,81 @@ fn show_agents(ui: &mut egui::Ui, state: &mut AppState) {
         } else {
             ui.weak("Несколько агентов (созданы вне GUI). Чат — у выбранного.");
         }
+    }
+}
+
+fn show_git(ui: &mut egui::Ui, state: &mut AppState) {
+    ui.heading("Git");
+    ui.weak("только чтение · git не спавним");
+    ui.add_space(4.0);
+    ui.add_enabled_ui(state.can_isolate_agent(), |ui| {
+        if ui
+            .add_sized(
+                [ui.available_width(), 28.0],
+                egui::Button::new("Изолировать"),
+            )
+            .clicked()
+        {
+            state.isolate_selected_agent();
+        }
+    });
+    if let Some(wt) = &state.worktree {
+        ui.weak(format!("worktree {} · {}", wt.branch, wt.id));
+    } else {
+        ui.weak("worktree нет (local)");
+    }
+    if let Some(note) = &state.git_note {
+        ui.label(note.clone());
+    }
+    if let Some(status) = state.git_status.clone() {
+        ui.label(format!(
+            "{}{}",
+            status.branch,
+            if status.dirty { " · dirty" } else { " · clean" }
+        ));
+        if status.truncated {
+            ui.weak("список усечён");
+        }
+        let selected = state.git_selected_path.clone();
+        for entry in status.entries {
+            let label = format!("{}  {}", entry.status, entry.path);
+            if ui
+                .selectable_label(selected.as_deref() == Some(entry.path.as_str()), label)
+                .clicked()
+            {
+                state.select_git_path(entry.path);
+            }
+        }
+    }
+    if let Some(diff) = &state.git_diff {
+        ui.add_space(6.0);
+        ui.strong("diff");
+        if diff.truncated {
+            ui.weak("патч усечён");
+        }
+        egui::ScrollArea::vertical()
+            .max_height(180.0)
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                if diff.files.is_empty() {
+                    ui.weak("нет diff");
+                }
+                for file in &diff.files {
+                    ui.weak(&file.path);
+                    match &file.patch {
+                        Some(patch) => {
+                            ui.add(
+                                egui::Label::new(egui::RichText::new(patch).monospace())
+                                    .wrap()
+                                    .selectable(true),
+                            );
+                        }
+                        None => {
+                            ui.weak("(binary)");
+                        }
+                    }
+                }
+            });
     }
 }
 
