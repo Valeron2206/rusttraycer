@@ -703,4 +703,220 @@ print(json.dumps({"type":"assistant","message":{"content":[{"type":"text","text"
         let events = collect_exec(&backend, req).await;
         assert_eq!(tokens_of(&events).trim(), "a1 t1", "events={events:?}");
     }
+
+    struct EnvRestore {
+        key: &'static str,
+        prev: Option<String>,
+    }
+
+    impl EnvRestore {
+        fn set(key: &'static str, val: &str) -> Self {
+            let prev = std::env::var(key).ok();
+            std::env::set_var(key, val);
+            Self { key, prev }
+        }
+
+        fn unset(key: &'static str) -> Self {
+            let prev = std::env::var(key).ok();
+            std::env::remove_var(key);
+            Self { key, prev }
+        }
+    }
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(v) => std::env::set_var(self.key, v),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    #[test]
+    fn from_env_defaults_to_claude_and_honors_override() {
+        let _g = crate::TEST_ENV_LOCK.lock().unwrap();
+        let _cmd = EnvRestore::unset("RUSTTRAYCER_CLAUDE_CMD");
+        let unset = CliClaude::from_env();
+        assert_eq!(unset.command.as_deref(), Some("claude"));
+        let defaulted = CliClaude::default();
+        assert_eq!(defaulted.command.as_deref(), Some("claude"));
+
+        drop(_cmd);
+        let _cmd = EnvRestore::set("RUSTTRAYCER_CLAUDE_CMD", "/bin/true");
+        let set = CliClaude::from_env();
+        assert!(set.available().available, "{}", set.available().detail);
+    }
+
+    #[test]
+    fn available_path_name_not_found() {
+        let missing = CliClaude::new("definitely-not-a-rt-claude-bin");
+        assert!(!missing.available().available);
+        assert!(
+            missing.available().detail.contains("not found"),
+            "{}",
+            missing.available().detail
+        );
+        let slash_missing = CliClaude::new("/no/such/rt-claude-cmd");
+        assert!(!slash_missing.available().available);
+        let found = CliClaude::new("true");
+        assert!(found.available().available, "{}", found.available().detail);
+    }
+
+    #[test]
+    fn parse_more_line_types() {
+        match parse_stream_json_line("") {
+            LineEffect::Ignore => {}
+            other => panic!("empty must ignore, got {other:?}"),
+        }
+        match parse_stream_json_line("   ") {
+            LineEffect::Ignore => {}
+            other => panic!("whitespace must ignore, got {other:?}"),
+        }
+        match parse_stream_json_line(r#"{"type":"assistant","content":"plain"}"#) {
+            LineEffect::Tokens(t) => assert_eq!(t, vec!["plain".to_string()]),
+            other => panic!("plain content, got {other:?}"),
+        }
+        match parse_stream_json_line(r#"{"type":"assistant","message":{"content":""}}"#) {
+            LineEffect::Ignore => {}
+            other => panic!("empty string content, got {other:?}"),
+        }
+        match parse_stream_json_line(r#"{"type":"assistant","message":{"content":[]}}"#) {
+            LineEffect::Ignore => {}
+            other => panic!("empty array, got {other:?}"),
+        }
+        match parse_stream_json_line(
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use"}]}}"#,
+        ) {
+            LineEffect::Ignore => {}
+            other => panic!("non-text block, got {other:?}"),
+        }
+        match parse_stream_json_line(r#"{"type":"text","text":"delta"}"#) {
+            LineEffect::Tokens(t) => assert_eq!(t, vec!["delta".to_string()]),
+            other => panic!("text type, got {other:?}"),
+        }
+        match parse_stream_json_line(r#"{"type":"text","text":""}"#) {
+            LineEffect::Ignore => {}
+            other => panic!("empty text, got {other:?}"),
+        }
+        match parse_stream_json_line(r#"{"type":"text"}"#) {
+            LineEffect::Ignore => {}
+            other => panic!("text missing, got {other:?}"),
+        }
+        match parse_stream_json_line(
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"text":"x"}}}"#,
+        ) {
+            LineEffect::Tokens(t) => assert_eq!(t, vec!["x".to_string()]),
+            other => panic!("stream_event delta, got {other:?}"),
+        }
+        match parse_stream_json_line(
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"text":""}}}"#,
+        ) {
+            LineEffect::Ignore => {}
+            other => panic!("empty delta, got {other:?}"),
+        }
+        match parse_stream_json_line(r#"{"type":"stream_event","event":{"type":"other"}}"#) {
+            LineEffect::Ignore => {}
+            other => panic!("other stream_event, got {other:?}"),
+        }
+        match parse_stream_json_line(r#"{"type":"result","subtype":"error"}"#) {
+            LineEffect::ResultError(m) => assert_eq!(m, "claude result error"),
+            other => panic!("subtype error default, got {other:?}"),
+        }
+        match parse_stream_json_line(r#"{"type":"result","is_error":true,"errors":"nope"}"#) {
+            LineEffect::ResultError(m) => assert_eq!(m, "nope"),
+            other => panic!("errors field, got {other:?}"),
+        }
+        match parse_stream_json_line(r#"{"type":"result","is_error":false}"#) {
+            LineEffect::Ignore => {}
+            other => panic!("success result, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn workspace_path_not_a_dir_fails() {
+        let mut req = echo_req();
+        req.workspace_path = std::env::temp_dir().join("rt-claude-not-a-dir-file");
+        std::fs::write(&req.workspace_path, b"x").unwrap();
+        let backend = CliClaude::new("/bin/true");
+        let events = collect(&backend, req.clone()).await;
+        let _ = std::fs::remove_file(&req.workspace_path);
+        match events.as_slice() {
+            [TurnEvent::Failed { message }] => {
+                assert!(message.contains("not a directory"), "message={message}");
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn flatten_prompt_joins_multiple_roles() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("echo_prompt.py");
+        write_exec(
+            &path,
+            r#"#!/usr/bin/env python3
+import json, sys
+prompt = sys.stdin.read()
+print(json.dumps({"type":"assistant","message":{"content":[{"type":"text","text": prompt}]}}), end="")
+"#,
+        );
+        let req = TurnRequest {
+            agent_id: "a1".into(),
+            task_id: "t1".into(),
+            workspace_path: std::env::temp_dir(),
+            messages: vec![
+                WireMessage {
+                    role: WireRole::User,
+                    content: "one".into(),
+                },
+                WireMessage {
+                    role: WireRole::Assistant,
+                    content: "two".into(),
+                },
+                WireMessage {
+                    role: WireRole::System,
+                    content: "sys".into(),
+                },
+            ],
+            extra_env: BTreeMap::new(),
+        };
+        let backend = CliClaude::new(path.to_string_lossy().into_owned());
+        let events = collect_exec(&backend, req).await;
+        let tokens = tokens_of(&events);
+        assert!(tokens.contains("user: one"), "tokens={tokens:?}");
+        assert!(tokens.contains("assistant: two"), "tokens={tokens:?}");
+        assert!(tokens.contains("system: sys"), "tokens={tokens:?}");
+    }
+
+    #[tokio::test]
+    async fn leftover_line_without_newline_is_parsed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("no_nl.py");
+        write_exec(
+            &path,
+            r#"#!/usr/bin/env python3
+import json, sys
+sys.stdin.read()
+sys.stdout.write(json.dumps({"type":"assistant","message":{"content":[{"type":"text","text":"tail"}]}}))
+"#,
+        );
+        let backend = CliClaude::new(path.to_string_lossy().into_owned());
+        let events = collect_exec(&backend, echo_req()).await;
+        assert_eq!(tokens_of(&events), "tail", "events={events:?}");
+    }
+
+    #[tokio::test]
+    async fn spawn_failure_for_non_executable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("not_exec.txt");
+        std::fs::write(&path, "not a program").unwrap();
+        let backend = CliClaude::new(path.to_string_lossy().into_owned());
+        let events = collect(&backend, echo_req()).await;
+        match events.last() {
+            Some(TurnEvent::Failed { message }) => {
+                assert!(message.contains("spawn"), "message={message}");
+            }
+            other => panic!("expected spawn Failed, got {other:?}"),
+        }
+    }
 }

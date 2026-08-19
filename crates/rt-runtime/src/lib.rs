@@ -173,6 +173,9 @@ pub fn probe_harnesses() -> Vec<HarnessProbe> {
 }
 
 #[cfg(test)]
+pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
 mod cancel_tests {
     use super::*;
     use std::pin::Pin;
@@ -198,6 +201,66 @@ mod cancel_tests {
     fn cancel_without_child_is_ok() {
         assert!(NoChild.cancel_turn("no-such-agent").is_ok());
     }
+
+    #[test]
+    fn default_caps_on_backend_without_override() {
+        assert_eq!(NoChild.caps(), HarnessCaps::CLI_GENERIC);
+        assert_eq!(NoChild.id(), "test.noop");
+        assert!(!NoChild.available().available);
+        assert_eq!(NoChild.available().detail, "none");
+    }
+
+    #[test]
+    fn cancel_err_equality() {
+        let a = CancelErr {
+            message: "cancelled".into(),
+        };
+        let b = CancelErr {
+            message: "cancelled".into(),
+        };
+        let c = CancelErr {
+            message: "other".into(),
+        };
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn wire_role_as_str_all_variants() {
+        assert_eq!(WireRole::User.as_str(), "user");
+        assert_eq!(WireRole::Assistant.as_str(), "assistant");
+        assert_eq!(WireRole::System.as_str(), "system");
+        assert_eq!(WireRole::Tool.as_str(), "tool");
+    }
+
+    fn assert_one_shot_cli_caps(caps: HarnessCaps) {
+        assert!(caps.one_shot);
+        assert!(!caps.long_lived);
+        assert!(caps.stream_tokens);
+        assert!(!caps.tools);
+        assert!(!caps.session_resume);
+        assert!(!caps.a2a_inbox);
+        assert!(!caps.pty);
+        assert!(!caps.needs_api_key);
+        assert!(caps.api_key_env.is_none());
+    }
+
+    #[test]
+    fn harness_caps_cli_generic_fields() {
+        assert_one_shot_cli_caps(HarnessCaps::CLI_GENERIC);
+    }
+
+    #[test]
+    fn harness_caps_cli_claude_fields() {
+        assert_one_shot_cli_caps(HarnessCaps::CLI_CLAUDE);
+        assert_eq!(HarnessCaps::CLI_CLAUDE, HarnessCaps::CLI_GENERIC);
+    }
+
+    #[test]
+    fn harness_caps_cli_codex_fields() {
+        assert_one_shot_cli_caps(HarnessCaps::CLI_CODEX);
+        assert_eq!(HarnessCaps::CLI_CODEX, HarnessCaps::CLI_GENERIC);
+    }
 }
 
 #[cfg(test)]
@@ -206,8 +269,31 @@ mod probe_tests {
 
     #[test]
     fn probe_harnesses_returns_three_ids_in_order() {
+        let _g = crate::TEST_ENV_LOCK.lock().unwrap();
         let probes = probe_harnesses();
         let ids: Vec<&str> = probes.iter().map(|p| p.id.as_str()).collect();
         assert_eq!(ids, ["cli.generic", "cli.claude", "cli.codex"]);
+    }
+
+    #[test]
+    fn probe_harnesses_generic_unavailable_when_env_unset() {
+        let _g = crate::TEST_ENV_LOCK.lock().unwrap();
+        let prev = std::env::var("RUSTTRAYCER_GENERIC_CMD").ok();
+        std::env::remove_var("RUSTTRAYCER_GENERIC_CMD");
+        let probes = probe_harnesses();
+        match prev {
+            Some(v) => std::env::set_var("RUSTTRAYCER_GENERIC_CMD", v),
+            None => std::env::remove_var("RUSTTRAYCER_GENERIC_CMD"),
+        }
+        let generic = probes
+            .iter()
+            .find(|p| p.id == "cli.generic")
+            .expect("generic probe");
+        assert!(!generic.available);
+        assert!(
+            generic.detail.contains("unset") || generic.detail.contains("not found"),
+            "detail={}",
+            generic.detail
+        );
     }
 }
