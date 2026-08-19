@@ -81,6 +81,22 @@ pub enum WsEvent {
         #[serde(rename = "taskId")]
         task_id: String,
     },
+    #[serde(rename = "a2a.delivered")]
+    A2aDelivered {
+        #[serde(rename = "fromAgentId")]
+        from_agent_id: String,
+        #[serde(rename = "toAgentId")]
+        to_agent_id: String,
+        #[serde(rename = "messageId")]
+        message_id: String,
+    },
+    #[serde(rename = "loop.stopped")]
+    LoopStopped {
+        #[serde(rename = "loopId")]
+        loop_id: String,
+        #[serde(default)]
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -94,6 +110,8 @@ pub enum ApplyOutcome {
     PtyData,
     PtyExit,
     ArtifactChanged,
+    A2aDelivered,
+    LoopStopped,
     Ignored,
 }
 
@@ -207,6 +225,20 @@ pub fn apply_event(
                 ApplyOutcome::Ignored
             } else {
                 ApplyOutcome::ArtifactChanged
+            }
+        }
+        WsEvent::A2aDelivered { message_id, .. } => {
+            if message_id.is_empty() {
+                ApplyOutcome::Ignored
+            } else {
+                ApplyOutcome::A2aDelivered
+            }
+        }
+        WsEvent::LoopStopped { loop_id, .. } => {
+            if loop_id.is_empty() {
+                ApplyOutcome::Ignored
+            } else {
+                ApplyOutcome::LoopStopped
             }
         }
     }
@@ -582,6 +614,40 @@ mod tests {
         assert_eq!(
             apply_event(&mut messages, &deleted, None, None),
             ApplyOutcome::ArtifactChanged
+        );
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn a2a_delivered_is_not_artifact_or_chat() {
+        let mut messages = Vec::new();
+        let ev = parse_event(
+            r#"{"event":"a2a.delivered","fromAgentId":"ag-a","toAgentId":"ag-b","messageId":"m-1"}"#,
+        )
+        .unwrap();
+        match &ev {
+            WsEvent::A2aDelivered {
+                from_agent_id,
+                to_agent_id,
+                message_id,
+            } => {
+                assert_eq!(from_agent_id, "ag-a");
+                assert_eq!(to_agent_id, "ag-b");
+                assert_eq!(message_id, "m-1");
+            }
+            other => panic!("expected a2a.delivered, got {other:?}"),
+        }
+        assert_eq!(
+            apply_event(&mut messages, &ev, Some("task-1"), Some("ag-b")),
+            ApplyOutcome::A2aDelivered
+        );
+        assert!(messages.is_empty());
+        let stop =
+            parse_event(r#"{"event":"loop.stopped","loopId":"lp-1","reason":"max_iterations"}"#)
+                .unwrap();
+        assert_eq!(
+            apply_event(&mut messages, &stop, None, None),
+            ApplyOutcome::LoopStopped
         );
         assert!(messages.is_empty());
     }
