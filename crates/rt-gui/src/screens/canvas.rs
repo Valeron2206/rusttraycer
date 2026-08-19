@@ -1,7 +1,7 @@
 use crate::ladder::{
     AgentPolicy, PaneKind, PolicyMode, APPROVAL_ALWAYS, APPROVAL_DENY, APPROVAL_ONCE,
-    APPROVAL_TITLE, CAPS_LABEL, PICKER_EMPTY, PICKER_LABEL, PICKER_UNAVAILABLE, POLICY_LABEL,
-    YOLO_CONFIRM_BODY, YOLO_CONFIRM_OK, YOLO_CONFIRM_TITLE, YOLO_OFF, YOLO_ON_BUTTON,
+    APPROVAL_TITLE, CAPS_LABEL, PICKER_EMPTY, PICKER_HINT, PICKER_LABEL, PICKER_UNAVAILABLE,
+    POLICY_LABEL, YOLO_CONFIRM_BODY, YOLO_CONFIRM_OK, YOLO_CONFIRM_TITLE, YOLO_OFF, YOLO_ON_BUTTON,
 };
 use crate::rpc::HarnessCapsView;
 use crate::state::{AgentStatus, AppState, FileKind, FilePreview};
@@ -211,7 +211,8 @@ fn show_approval_card(ctx: &egui::Context, state: &mut AppState) {
             });
         });
     if !open {
-        state.pending_approvals.remove(&approval.agent_id);
+        // Title-bar X is deny, not a silent dismiss.
+        state.close_approval_card();
     }
 }
 
@@ -273,6 +274,8 @@ fn show_agents(ui: &mut egui::Ui, state: &mut AppState) {
         ui.weak("недоступно: host offline");
     } else if state.providers.is_empty() {
         ui.weak(PICKER_EMPTY);
+    } else if state.picker_provider.is_none() {
+        ui.weak(PICKER_HINT);
     }
 }
 
@@ -287,9 +290,7 @@ fn show_provider_picker(ui: &mut egui::Ui, state: &mut AppState) {
     if providers.is_empty() {
         ui.weak(PICKER_EMPTY);
     } else {
-        let selected_text = current
-            .clone()
-            .unwrap_or_else(|| "выберите провайдера".into());
+        let selected_text = current.clone().unwrap_or_else(|| PICKER_HINT.into());
         let mut next = current.clone();
         egui::ComboBox::from_id_salt("provider_picker")
             .selected_text(selected_text)

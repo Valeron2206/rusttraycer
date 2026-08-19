@@ -4,6 +4,7 @@ use crate::rpc::PolicyOk;
 
 pub const PICKER_LABEL: &str = "Провайдер";
 pub const PICKER_EMPTY: &str = "нет провайдеров (doctor пуст)";
+pub const PICKER_HINT: &str = "выберите провайдера";
 pub const PICKER_UNAVAILABLE: &str = "недоступен — host всё равно примет";
 pub const CAPS_LABEL: &str = "Возможности";
 pub const POLICY_LABEL: &str = "Разрешения";
@@ -256,6 +257,7 @@ mod tests {
     fn ui_copy_is_locked() {
         assert_eq!(PICKER_LABEL, "Провайдер");
         assert_eq!(PICKER_EMPTY, "нет провайдеров (doctor пуст)");
+        assert_eq!(PICKER_HINT, "выберите провайдера");
         assert_eq!(YOLO_CONFIRM_TITLE, "Включить Yolo?");
         assert_eq!(
             YOLO_CONFIRM_BODY,
