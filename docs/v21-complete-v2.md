@@ -4,7 +4,7 @@
 От: Architect. Дата: 2026-08-19. Не код.
 База: origin/main `ded044c` = tag **v2.0.0**. Тег не двигать. Origin не пушить.
 Закон: [f7-release-v2](f7-release-v2.md) freeze **снят только** на строки ниже. Новых способностей вне списка нет. Новых Cxx нет.
-Протокол: minor **1.9** (1.0–1.8 живы). Storage: **0009** (0001–0008 байтово).
+Протокол: minor **1.9** (1.0–1.8 живы). Storage: **0009** + **0010 must** (0001–0009 байтово; 0009 не переписывать).
 
 ## Закон
 
@@ -88,7 +88,7 @@ User preset: те же поля, что built-in + `name`. Не board.
 
 ## Storage 0009
 
-Не править 0001–0008.
+Не править 0001–0008. 0009 после появления **не переписывать** — C37 уходит в 0010.
 
 ```sql
 CREATE TABLE provider_accounts (
@@ -124,6 +124,18 @@ CREATE TABLE worktree_settings (
 Нет token/pat/hook-secret колонок. Hooks: файл `$RUSTTRAYCER_HOME/hooks.json` (command или URL), не sqlite.
 
 `agents.account_id` nullable TEXT, без FK на секреты.
+
+## Storage 0010 (MUST)
+
+C37. Не править файл 0009. 0001–0009 **байтово**. SQLite не умеет DROP NOT NULL — rebuild `agents`, FK restrict (не CASCADE).
+
+- `task_id` **nullable** (`REFERENCES tasks(id)` без NOT NULL).
+- `workspace_id` nullable `REFERENCES workspaces(id)`.
+- `CHECK (task_id IS NOT NULL OR workspace_id IS NOT NULL)`.
+- Нет Task → `workspace_id` обязателен (host). Есть Task → `workspace_id` может быть NULL (как сейчас: связь через `task_workspaces`).
+- Индекс `idx_agents_workspace`. `schema_meta` = `10`.
+
+Это закрывает nit 0084: nullable `task_id` + `workspace_id` — закон спеки, не «потом».
 
 ## Волны (порядок)
 
@@ -170,7 +182,7 @@ Job `e2e-master` на `ubuntu-latest`, host-API, GUI smoke отдельно. Ц�
 
 1. Матрица: 0 `missing`/`partial`. Later-таблица Ф7 пуста (всё либо shipped, либо oos).
 2. Клиент 1.8: create/send/export живы.
-3. 0001–0008 байтово. 0009 без секретов.
+3. 0001–0009 байтово. 0009 не переписывать. 0010 = C37 nullable `task_id` + `workspace_id`. Без секретов.
 4. `format=pdf` 200. `logs --follow` пишет пока SIGINT.
 5. CI `e2e-master` зелёный на ubuntu.
 6. Tag v2.0.0 не переписан. Origin — по Chief.
