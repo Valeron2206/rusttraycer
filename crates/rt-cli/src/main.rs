@@ -7,7 +7,7 @@ struct Cli {
     command: Command,
 }
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 enum Command {
     /// Exec the rt-host binary (host writes pid.json).
     Start,
@@ -17,11 +17,14 @@ enum Command {
     Doctor,
     /// pid.json only: alive, pid, rpcUrl, dataDir. No /rpc.
     Status,
-    /// Print the tail of host.log (no --follow).
+    /// Print the tail of host.log. --follow keeps printing until SIGINT.
     Logs {
         /// Lines to print (default 200, 1..=10000).
         #[arg(long, default_value_t = 200, value_parser = clap::value_parser!(u32).range(1..=10_000))]
         lines: u32,
+        /// Keep printing new host.log bytes until SIGINT (exit 0).
+        #[arg(long)]
+        follow: bool,
     },
     /// Delete host.db (+ wal/shm). Requires --yes. Refuses if host is running.
     ResetDb {
@@ -63,15 +66,62 @@ fn run(cmd: Command) -> Result<(), rt_cli::CliError> {
             println!();
             Ok(())
         }
-        Command::Logs { lines } => {
-            let text = rt_cli::logs(lines)?;
-            print!("{text}");
-            Ok(())
+        Command::Logs { lines, follow } => {
+            if follow {
+                rt_cli::logs_follow(lines)
+            } else {
+                let text = rt_cli::logs(lines)?;
+                print!("{text}");
+                Ok(())
+            }
         }
         Command::ResetDb { yes } => {
             rt_cli::reset_db(yes)?;
             println!("reset-db ok");
             Ok(())
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn logs_follow_flag_exists() {
+        let cli = Cli::try_parse_from(["rt-cli", "logs", "--follow"]).expect("parse");
+        match cli.command {
+            Command::Logs { follow, lines } => {
+                assert!(follow);
+                assert_eq!(lines, 200);
+            }
+            other => panic!("expected Logs, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn logs_follow_combines_with_lines() {
+        let cli =
+            Cli::try_parse_from(["rt-cli", "logs", "--follow", "--lines", "10"]).expect("parse");
+        match cli.command {
+            Command::Logs { follow, lines } => {
+                assert!(follow);
+                assert_eq!(lines, 10);
+            }
+            other => panic!("expected Logs, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn logs_without_follow_defaults() {
+        let cli = Cli::try_parse_from(["rt-cli", "logs"]).expect("parse");
+        match cli.command {
+            Command::Logs { follow, lines } => {
+                assert!(!follow);
+                assert_eq!(lines, 200);
+            }
+            other => panic!("expected Logs, got {other:?}"),
         }
     }
 }

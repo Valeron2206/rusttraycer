@@ -3,8 +3,12 @@
 //! Does not open host.db, does not depend on rt-storage / rusqlite / rt-host.
 
 use std::fs;
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
@@ -396,15 +400,101 @@ fn last_n_lines(text: &str, n: usize) -> String {
     out
 }
 
+const FOLLOW_POLL: Duration = Duration::from_millis(50);
+
 /// Tail `host.log`. Missing file → empty string. `lines` clamped to 1..=10000.
 pub fn logs(lines: u32) -> Result<String, CliError> {
     let n = lines.clamp(1, 10_000) as usize;
-    let path = log_path(&resolve_data_dir());
-    if !path.exists() {
-        return Ok(String::new());
+    tail_file(&log_path(&resolve_data_dir()), n)
+}
+
+fn tail_file(path: &Path, n: usize) -> Result<String, CliError> {
+    match fs::read_to_string(path) {
+        Ok(text) => Ok(last_n_lines(&text, n)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(e.into()),
     }
-    let text = fs::read_to_string(&path)?;
-    Ok(last_n_lines(&text, n))
+}
+
+fn read_from_offset(path: &Path, offset: u64) -> std::io::Result<(Vec<u8>, u64)> {
+    let mut file = File::open(path)?;
+    let len = file.metadata()?.len();
+    let start = if len < offset { 0 } else { offset };
+    file.seek(SeekFrom::Start(start))?;
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf)?;
+    let new_offset = start + buf.len() as u64;
+    Ok((buf, new_offset))
+}
+
+/// Print the current tail of `path`, then append new bytes until `stop` is true.
+///
+/// Missing file: write nothing and wait for it to appear (or stop). File-only;
+/// does not call `/rpc` or `/metrics`.
+pub fn follow_log(path: &Path, lines: u32, stop: impl FnMut() -> bool) -> Result<(), CliError> {
+    follow_log_to(path, lines, &mut std::io::stdout(), stop)
+}
+
+/// Same as [`follow_log`] but writes to `out` so tests can assert without hanging.
+pub fn follow_log_to<W: Write>(
+    path: &Path,
+    lines: u32,
+    out: &mut W,
+    mut stop: impl FnMut() -> bool,
+) -> Result<(), CliError> {
+    let n = lines.clamp(1, 10_000) as usize;
+
+    while !path.exists() {
+        if stop() {
+            return Ok(());
+        }
+        std::thread::sleep(FOLLOW_POLL);
+    }
+
+    let text = match fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e.into()),
+    };
+    let tail = last_n_lines(&text, n);
+    out.write_all(tail.as_bytes())?;
+    out.flush()?;
+    let mut offset = text.len() as u64;
+
+    loop {
+        if stop() {
+            return Ok(());
+        }
+        match read_from_offset(path, offset) {
+            Ok((buf, new_offset)) => {
+                if !buf.is_empty() {
+                    out.write_all(&buf)?;
+                    out.flush()?;
+                }
+                offset = new_offset;
+                if buf.is_empty() {
+                    std::thread::sleep(FOLLOW_POLL);
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                offset = 0;
+                std::thread::sleep(FOLLOW_POLL);
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+}
+
+/// Tail then follow `<RUSTTRAYCER_HOME>/host/host.log` until SIGINT. Exit 0 on SIGINT.
+pub fn logs_follow(lines: u32) -> Result<(), CliError> {
+    let path = log_path(&resolve_data_dir());
+    let stop = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&stop);
+    ctrlc::set_handler(move || {
+        flag.store(true, Ordering::SeqCst);
+    })
+    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    follow_log(&path, lines, move || stop.load(Ordering::SeqCst))
 }
 
 /// Unlink `host.db` + wal/shm. Requires `--yes`. Refuses if the host pid is alive.
@@ -844,5 +934,64 @@ done
             fs::read(host.join("agent-selection-guide.md")).unwrap(),
             b"keep"
         );
+    }
+
+    #[test]
+    fn follow_log_missing_file_stop_immediately_is_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("host.log");
+        let mut out = Vec::new();
+        follow_log_to(&path, 200, &mut out, || true).unwrap();
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn follow_log_prints_tail_then_new_lines_then_stops() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("host.log");
+        fs::write(&path, "a\nb\nc\n").unwrap();
+        let mut out = Vec::new();
+        let mut step = 0u8;
+        follow_log_to(&path, 2, &mut out, || {
+            step += 1;
+            if step == 1 {
+                let mut f = fs::OpenOptions::new().append(true).open(&path).unwrap();
+                f.write_all(b"d\ne\n").unwrap();
+                false
+            } else {
+                true
+            }
+        })
+        .unwrap();
+        assert_eq!(String::from_utf8(out).unwrap(), "b\nc\nd\ne\n");
+    }
+
+    #[test]
+    fn follow_log_waits_for_missing_file_then_tails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("host.log");
+        let mut out = Vec::new();
+        let mut step = 0u8;
+        follow_log_to(&path, 10, &mut out, || {
+            step += 1;
+            if step == 1 {
+                fs::write(&path, "hello\nworld\n").unwrap();
+                false
+            } else {
+                true
+            }
+        })
+        .unwrap();
+        assert_eq!(String::from_utf8(out).unwrap(), "hello\nworld\n");
+    }
+
+    #[test]
+    fn follow_log_clamps_lines_like_logs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("host.log");
+        fs::write(&path, "a\nb\nc\n").unwrap();
+        let mut out = Vec::new();
+        follow_log_to(&path, 0, &mut out, || true).unwrap();
+        assert_eq!(String::from_utf8(out).unwrap(), "c\n");
     }
 }
