@@ -1,9 +1,7 @@
-//! Coding-agent adapters. MVP: `cli.generic` only. Does not open a database.
-//!
-//! Capability field exists (`HarnessCaps` / `AgentBackend::caps`); Core ignores it in MVP.
-//! `cli.generic` is the only backend.
+//! Coding-agent adapters. `cli.generic` + `cli.codex`. Does not open a database.
 
 mod cli_generic;
+mod cli_codex;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -12,6 +10,7 @@ use std::pin::Pin;
 use futures::Stream;
 use serde::{Deserialize, Serialize};
 
+pub use cli_codex::CliCodex;
 pub use cli_generic::CliGeneric;
 
 #[derive(Debug, Clone)]
@@ -90,6 +89,18 @@ impl HarnessCaps {
         needs_api_key: false,
         api_key_env: None,
     };
+
+    pub const CLI_CODEX: Self = Self {
+        one_shot: true,
+        long_lived: false,
+        stream_tokens: true,
+        tools: false,
+        session_resume: false,
+        a2a_inbox: false,
+        pty: false,
+        needs_api_key: false,
+        api_key_env: None,
+    };
 }
 
 pub trait AgentBackend: Send + Sync {
@@ -99,4 +110,45 @@ pub trait AgentBackend: Send + Sync {
         HarnessCaps::CLI_GENERIC
     }
     fn start_turn(&self, req: TurnRequest) -> Pin<Box<dyn Stream<Item = TurnEvent> + Send>>;
+    /// Abort this agent's inflight turn. No child → Ok. Default is a no-op
+    /// so host test backends keep compiling.
+    fn cancel_turn(&self, _agent_id: &str) -> Result<(), CancelErr> {
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CancelErr {
+    pub message: String,
+}
+
+#[cfg(test)]
+mod cancel_tests {
+    use super::*;
+    use std::pin::Pin;
+
+    struct NoChild;
+
+    impl AgentBackend for NoChild {
+        fn id(&self) -> &'static str {
+            "test.noop"
+        }
+        fn available(&self) -> Availability {
+            Availability {
+                available: false,
+                detail: "none".into(),
+            }
+        }
+        fn start_turn(
+            &self,
+            _req: TurnRequest,
+        ) -> Pin<Box<dyn Stream<Item = TurnEvent> + Send>> {
+            Box::pin(futures::stream::empty())
+        }
+    }
+
+    #[test]
+    fn cancel_without_child_is_ok() {
+        assert!(NoChild.cancel_turn("no-such-agent").is_ok());
+    }
 }
