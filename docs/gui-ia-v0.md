@@ -1,3 +1,5 @@
+> **v1.0 reader:** this file is the original draft. v1 GUI: one agent per Task, `cli.generic` only, no picker. Also Stop and git panel. See [v1-delta.md](v1-delta.md).
+
 # GUI IA v0 — информационная архитектура `rt-gui`
 
 Для: UI-агент (`rt-gui`, eframe + egui).

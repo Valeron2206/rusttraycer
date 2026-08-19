@@ -1,3 +1,5 @@
+> **v1.0 reader:** this file is the original draft. Added 1.0 methods: agent.cancel, worktree.*, git.status/diff. Envelope unchanged. See [v1-delta.md](v1-delta.md).
+
 # Protocol v0 — client ↔ host
 
 Статус: действующий контракт на провод. 2026-08-17.
