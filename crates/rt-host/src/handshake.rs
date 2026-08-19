@@ -1,4 +1,4 @@
-//! Per-method {major,minor} negotiation. Existing methods stay 1.0; policy.* is 1.1; write/git mutate is 1.2; shell/pty are 1.3; artifacts/comments/clear_transcript are 1.4; a2a/loop are 1.5; agent.switch/profile.*/prefs.get are 1.6; workspace.guides/settings.guide/preset.list/agent.update are 1.7; sync.export/import are 1.8; artifact.export/search.query/worktree.gc/agent.create/shell.create are 1.9.
+//! Per-method {major,minor} negotiation. Existing methods stay 1.0; policy.* is 1.1; write/git mutate is 1.2; shell/pty are 1.3; artifacts/comments/clear_transcript are 1.4; a2a/loop are 1.5; agent.switch/profile.*/prefs.get are 1.6; workspace.guides/settings.guide/preset.list/agent.update are 1.7; sync.export/import are 1.8; artifact.export/search.query/worktree.gc/agent.create/shell.create/account.list/account.create/agent.steer are 1.9.
 
 use std::collections::BTreeMap;
 
@@ -516,5 +516,48 @@ mod tests {
         assert_eq!(acc["agent.create"], MethodVersion { major: 1, minor: 9 });
         assert_eq!(acc["shell.create"], MethodVersion { major: 1, minor: 9 });
         assert_eq!(acc["sync.export"], MethodVersion { major: 1, minor: 8 });
+    }
+
+    #[test]
+    fn account_and_steer_accepted_at_1_9_absent_on_1_8_client() {
+        let mut client = BTreeMap::new();
+        client.insert("account.list".into(), MethodVersion { major: 1, minor: 9 });
+        client.insert(
+            "account.create".into(),
+            MethodVersion { major: 1, minor: 9 },
+        );
+        client.insert("agent.steer".into(), MethodVersion { major: 1, minor: 9 });
+        client.insert("agent.switch".into(), MethodVersion { major: 1, minor: 6 });
+        client.insert("agent.send".into(), MethodVersion { major: 1, minor: 0 });
+        let (acc, rej) = negotiate(&client);
+        assert!(rej.is_empty(), "{rej:?}");
+        assert_eq!(acc["account.list"], MethodVersion { major: 1, minor: 9 });
+        assert_eq!(acc["account.create"], MethodVersion { major: 1, minor: 9 });
+        assert_eq!(acc["agent.steer"], MethodVersion { major: 1, minor: 9 });
+        assert_eq!(acc["agent.switch"], MethodVersion { major: 1, minor: 6 });
+        assert_eq!(
+            host_methods()["account.list"],
+            MethodVersion { major: 1, minor: 9 }
+        );
+        assert_eq!(
+            host_methods()["agent.steer"],
+            MethodVersion { major: 1, minor: 9 }
+        );
+        assert_eq!(
+            host_methods()["agent.switch"],
+            MethodVersion { major: 1, minor: 6 }
+        );
+
+        let mut older = BTreeMap::new();
+        older.insert("agent.send".into(), MethodVersion { major: 1, minor: 0 });
+        older.insert("agent.switch".into(), MethodVersion { major: 1, minor: 6 });
+        older.insert("sync.export".into(), MethodVersion { major: 1, minor: 8 });
+        let (acc, rej) = negotiate(&older);
+        assert!(rej.is_empty(), "{rej:?}");
+        assert!(acc.contains_key("agent.send"));
+        assert!(acc.contains_key("agent.switch"));
+        assert!(!acc.contains_key("account.list"));
+        assert!(!acc.contains_key("account.create"));
+        assert!(!acc.contains_key("agent.steer"));
     }
 }

@@ -272,6 +272,15 @@ async fn dispatch_method(
                     return Err(HostError::InvalidParams("role must be a string".into()));
                 }
             };
+            let account_id = match params.get("accountId") {
+                None | Some(Value::Null) => None,
+                Some(Value::String(s)) => Some(s.clone()),
+                Some(_) => {
+                    return Err(HostError::InvalidParams(
+                        "accountId must be a string".into(),
+                    ));
+                }
+            };
             Ok(serde_json::to_value(svc.agent_create_ex(
                 crate::service::AgentCreateArgs {
                     task_id,
@@ -284,6 +293,7 @@ async fn dispatch_method(
                     effort,
                     fast,
                     role: role.as_deref(),
+                    account_id: account_id.as_deref(),
                 },
             )?)?)
         }
@@ -656,14 +666,22 @@ async fn dispatch_method(
         "agent.switch" => {
             let p: rt_protocol::AgentSwitchParams = serde_json::from_value(params)
                 .map_err(|e| HostError::InvalidParams(e.to_string()))?;
-            Ok(serde_json::to_value(svc.agent_switch(
-                &p.agent_id,
-                p.provider.as_deref(),
-                p.model,
-                p.effort,
-                p.fast,
-                p.profile_id.as_deref(),
-            )?)?)
+            Ok(serde_json::to_value(svc.agent_switch(p)?)?)
+        }
+        "account.list" => Ok(serde_json::to_value(svc.account_list()?)?),
+        "account.create" => {
+            let p: rt_protocol::AccountCreateParams = serde_json::from_value(params)
+                .map_err(|e| HostError::InvalidParams(e.to_string()))?;
+            Ok(serde_json::to_value(
+                svc.account_create(&p.provider, &p.label)?,
+            )?)
+        }
+        "agent.steer" => {
+            let p: rt_protocol::AgentSteerParams = serde_json::from_value(params)
+                .map_err(|e| HostError::InvalidParams(e.to_string()))?;
+            Ok(serde_json::to_value(
+                svc.agent_steer(&p.agent_id, &p.content)?,
+            )?)
         }
         "profile.create" => {
             let p: rt_protocol::ProfileCreateParams = serde_json::from_value(params)

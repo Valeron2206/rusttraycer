@@ -189,7 +189,7 @@ async fn metrics_post_is_not_json_rpc() {
 
 #[tokio::test]
 async fn client_1_8_health_handshake_unchanged() {
-    assert_eq!(TRADABLE_METHODS.len(), 71);
+    assert_eq!(TRADABLE_METHODS.len(), 74);
     assert!(!TRADABLE_METHODS.iter().any(|m| m.contains("metrics")));
     assert!(TRADABLE_METHODS.contains(&"sync.export"));
     assert!(TRADABLE_METHODS.contains(&"sync.import"));

@@ -38,6 +38,7 @@ pub mod error_codes {
     pub const NO_INBOX: &str = "no_inbox";
     pub const LOOP_EXHAUSTED: &str = "loop_exhausted";
     pub const CONFLICT: &str = "conflict";
+    pub const NOT_SUPPORTED: &str = "not_supported";
 }
 
 pub const METHOD_HANDSHAKE: &str = "handshake";
@@ -112,6 +113,9 @@ pub const METHOD_SYNC_EXPORT: &str = "sync.export";
 pub const METHOD_SYNC_IMPORT: &str = "sync.import";
 pub const METHOD_SEARCH_QUERY: &str = "search.query";
 pub const METHOD_WORKTREE_GC: &str = "worktree.gc";
+pub const METHOD_ACCOUNT_LIST: &str = "account.list";
+pub const METHOD_ACCOUNT_CREATE: &str = "account.create";
+pub const METHOD_AGENT_STEER: &str = "agent.steer";
 
 pub const EXPORT_KIND: &str = "rusttraycer.export";
 pub const EXPORT_VERSION: u32 = 1;
@@ -190,6 +194,9 @@ pub const TRADABLE_METHODS: &[&str] = &[
     METHOD_SYNC_IMPORT,
     METHOD_SEARCH_QUERY,
     METHOD_WORKTREE_GC,
+    METHOD_ACCOUNT_LIST,
+    METHOD_ACCOUNT_CREATE,
+    METHOD_AGENT_STEER,
 ];
 
 pub fn host_method_version() -> MethodVersion {
@@ -205,7 +212,8 @@ pub fn host_method_version() -> MethodVersion {
 /// model-ux methods (`agent.switch`, `profile.*`, `prefs.get`) are 1.6;
 /// workspace/guides/preset/`agent.update` methods are 1.7;
 /// `sync.export`/`sync.import` are 1.8; `artifact.export`, `search.query`,
-/// `worktree.gc`, `agent.create`, and `shell.create` are 1.9; all other
+/// `worktree.gc`, `agent.create`, `shell.create`, `account.list`,
+/// `account.create`, and `agent.steer` are 1.9; all other
 /// tradable methods stay 1.0 (`HOST_METHOD_MINOR` is not bumped).
 /// Unknown names return `None`.
 pub fn method_version(name: &str) -> Option<MethodVersion> {
@@ -235,7 +243,10 @@ pub fn method_version(name: &str) -> Option<MethodVersion> {
         | METHOD_SEARCH_QUERY
         | METHOD_WORKTREE_GC
         | METHOD_AGENT_CREATE
-        | METHOD_SHELL_CREATE => Some(MethodVersion { major: 1, minor: 9 }),
+        | METHOD_SHELL_CREATE
+        | METHOD_ACCOUNT_LIST
+        | METHOD_ACCOUNT_CREATE
+        | METHOD_AGENT_STEER => Some(MethodVersion { major: 1, minor: 9 }),
         METHOD_A2A_TRANSCRIPT
         | METHOD_A2A_DELIVER
         | METHOD_LOOP_START
@@ -634,6 +645,7 @@ pub struct HarnessCaps {
     pub session_resume: bool,
     pub a2a_inbox: bool,
     pub pty: bool,
+    pub steer: bool,
     pub needs_api_key: bool,
     pub api_key_env: Option<String>,
 }
@@ -938,6 +950,8 @@ pub struct AgentSwitchParams {
     pub fast: Option<bool>,
     #[serde(default)]
     pub profile_id: Option<String>,
+    #[serde(default)]
+    pub account_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1176,8 +1190,43 @@ pub struct WorktreeGcOk {
     pub items: Vec<WorktreeGcItem>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderAccount {
+    pub id: String,
+    pub provider: String,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountListOk {
+    pub items: Vec<ProviderAccount>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountCreateParams {
+    pub provider: String,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSteerParams {
+    pub agent_id: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSteerOk {
+    pub steered: bool,
+}
+
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     #[test]
@@ -1311,7 +1360,8 @@ mod tests {
         assert_eq!(error_codes::NO_INBOX, "no_inbox");
         assert_eq!(error_codes::LOOP_EXHAUSTED, "loop_exhausted");
         assert_eq!(error_codes::CONFLICT, "conflict");
-        assert_eq!(TRADABLE_METHODS.len(), 71);
+        assert_eq!(error_codes::NOT_SUPPORTED, "not_supported");
+        assert_eq!(TRADABLE_METHODS.len(), 74);
         assert!(TRADABLE_METHODS.contains(&METHOD_POLICY_GET));
         assert!(TRADABLE_METHODS.contains(&METHOD_POLICY_SET));
         assert!(TRADABLE_METHODS.contains(&METHOD_APPROVAL_RESPOND));
@@ -1350,6 +1400,25 @@ mod tests {
         );
         assert!(TRADABLE_METHODS.contains(&METHOD_SEARCH_QUERY));
         assert!(TRADABLE_METHODS.contains(&METHOD_WORKTREE_GC));
+        assert!(TRADABLE_METHODS.contains(&METHOD_ACCOUNT_LIST));
+        assert!(TRADABLE_METHODS.contains(&METHOD_ACCOUNT_CREATE));
+        assert!(TRADABLE_METHODS.contains(&METHOD_AGENT_STEER));
+        assert_eq!(
+            method_version(METHOD_ACCOUNT_LIST),
+            Some(MethodVersion { major: 1, minor: 9 })
+        );
+        assert_eq!(
+            method_version(METHOD_ACCOUNT_CREATE),
+            Some(MethodVersion { major: 1, minor: 9 })
+        );
+        assert_eq!(
+            method_version(METHOD_AGENT_STEER),
+            Some(MethodVersion { major: 1, minor: 9 })
+        );
+        assert_eq!(
+            method_version(METHOD_AGENT_SWITCH),
+            Some(MethodVersion { major: 1, minor: 6 })
+        );
         assert_eq!(
             method_version(METHOD_COMMENT_LIST),
             Some(MethodVersion { major: 1, minor: 4 })
@@ -2076,7 +2145,7 @@ mod tests {
         );
         assert!(TRADABLE_METHODS.contains(&METHOD_AGENT_SWITCH));
         assert!(TRADABLE_METHODS.contains(&METHOD_PREFS_GET));
-        assert_eq!(TRADABLE_METHODS.len(), 71);
+        assert_eq!(TRADABLE_METHODS.len(), 74);
 
         let sw: AgentSwitchParams = serde_json::from_str(
             r#"{"agentId":"a1","provider":"cli.codex","model":"o3","effort":"high","fast":false}"#,
@@ -2183,7 +2252,7 @@ mod tests {
             method_version(METHOD_HOST_PING),
             Some(MethodVersion { major: 1, minor: 0 })
         );
-        assert_eq!(TRADABLE_METHODS.len(), 71);
+        assert_eq!(TRADABLE_METHODS.len(), 74);
         assert!(TRADABLE_METHODS.contains(&METHOD_WORKSPACE_GUIDES_GET));
         assert!(TRADABLE_METHODS.contains(&METHOD_AGENT_UPDATE));
         assert!(!TRADABLE_METHODS
@@ -2318,7 +2387,7 @@ mod tests {
             Some(MethodVersion { major: 1, minor: 0 })
         );
         assert_eq!(host_method_version(), MethodVersion { major: 1, minor: 0 });
-        assert_eq!(TRADABLE_METHODS.len(), 71);
+        assert_eq!(TRADABLE_METHODS.len(), 74);
         assert!(TRADABLE_METHODS.contains(&METHOD_SYNC_EXPORT));
         assert!(TRADABLE_METHODS.contains(&METHOD_SYNC_IMPORT));
         assert_eq!(EXPORT_KIND, "rusttraycer.export");
@@ -2491,5 +2560,47 @@ mod tests {
             serde_json::to_value(WorktreeGcReason::Landed).unwrap(),
             "landed"
         );
+    }
+
+    #[test]
+    fn account_and_steer_types_camel_case() {
+        let item = ProviderAccount {
+            id: "a1".into(),
+            provider: "cli.claude".into(),
+            label: "work".into(),
+        };
+        let v = serde_json::to_value(&item).unwrap();
+        assert_eq!(v["id"], "a1");
+        assert_eq!(v["provider"], "cli.claude");
+        assert_eq!(v["label"], "work");
+        assert!(v.get("token").is_none());
+        assert!(v.get("pat").is_none());
+        let list = AccountListOk {
+            items: vec![item.clone()],
+        };
+        let v = serde_json::to_value(&list).unwrap();
+        assert_eq!(v["items"][0]["label"], "work");
+
+        let create: AccountCreateParams =
+            serde_json::from_str(r#"{"provider":"cli.claude","label":"work"}"#).unwrap();
+        assert_eq!(create.provider, "cli.claude");
+        assert_eq!(create.label, "work");
+
+        let steer: AgentSteerParams =
+            serde_json::from_str(r#"{"agentId":"ag1","content":"nudge"}"#).unwrap();
+        assert_eq!(steer.agent_id, "ag1");
+        assert_eq!(steer.content, "nudge");
+        let sv = serde_json::to_value(&steer).unwrap();
+        assert_eq!(sv["agentId"], "ag1");
+        assert!(sv.get("agent_id").is_none());
+
+        let ok = AgentSteerOk { steered: true };
+        let v = serde_json::to_value(&ok).unwrap();
+        assert_eq!(v["steered"], true);
+
+        let sw: AgentSwitchParams =
+            serde_json::from_str(r#"{"agentId":"a1","accountId":"acc1"}"#).unwrap();
+        assert_eq!(sw.agent_id, "a1");
+        assert_eq!(sw.account_id.as_deref(), Some("acc1"));
     }
 }
