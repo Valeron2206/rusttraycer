@@ -9,7 +9,7 @@ Status: `open` | `tasked` | `closed`. Empty coverage = no live session yet.
 
 | id | category | severity | zone | session | status | note |
 |---|---|---|---|---|---|---|
-| — | — | — | — | — | — | no findings yet |
+| DF-001 | bug | P1 | connect/host | 0104 | open | no pid.json; host.log shutdown 2026-08-19T07:39:38Z; GUI discovery misses host; search/stash/metrics not reached; did not spawn |
 
 ## Coverage — epic → last live session
 
@@ -23,6 +23,10 @@ Status: `open` | `tasked` | `closed`. Empty coverage = no live session yet.
 | A2A-loop | — | — | — |
 | Sync push/pull | — | — | — |
 | Search / steer / stash | — | — | — |
+
+## Sessions
+
+0104 attempted 2026-08-19 YEKT, harness n/a, blocked on host.
 
 ## Parity-watch — cycle 1
 
