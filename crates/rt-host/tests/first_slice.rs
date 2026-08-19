@@ -17,6 +17,7 @@ fn all_methods() -> Value {
         "agent.get",
         "agent.send",
         "agent.get_context",
+        "agent.cancel",
         "files.tree",
         "files.read",
         "worktree.ensure",
@@ -109,6 +110,7 @@ async fn health_handshake_doctor_files() {
     assert!(hello["ok"]["accepted"].get("worktree.list").is_some());
     assert!(hello["ok"]["accepted"].get("git.status").is_some());
     assert!(hello["ok"]["accepted"].get("git.diff").is_some());
+    assert!(hello["ok"]["accepted"].get("agent.cancel").is_some());
 
     let doctor = rpc(&client, &base, Some(&token), "host.doctor", json!({})).await;
     let providers = doctor["ok"]["providers"].as_array().unwrap();

@@ -5,6 +5,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use rt_protocol::CancelOk;
 use rt_runtime::{AgentBackend, TurnRequest, WireMessage, WireRole};
 use rt_storage::{
     Agent, AgentStatus, HarnessId, Message, MessageRole, Store, Task, TaskFilter, TaskStatus,
@@ -513,6 +514,52 @@ impl HostService {
         Ok(user)
     }
 
+    /// Cancel an inflight turn. Idempotent: idle/error/finished -> cancelled false.
+    pub fn cancel(&self, agent_id: &str) -> Result<CancelOk> {
+        if uuid::Uuid::parse_str(agent_id).is_err() {
+            return Err(HostError::InvalidParams("invalid agentId".into()));
+        }
+
+        let _gate = self
+            .turn_gate
+            .lock()
+            .map_err(|_| HostError::Internal("turn_gate poisoned".into()))?;
+
+        let agent = self
+            .store
+            .agent_get(agent_id)?
+            .ok_or_else(|| HostError::NotFound(format!("agent {agent_id}")))?;
+
+        let has_inflight = self.inflight.contains(agent_id)?;
+        if !has_inflight && agent.status != AgentStatus::Running {
+            return Ok(CancelOk {
+                agent_id: agent_id.to_string(),
+                cancelled: false,
+            });
+        }
+
+        if let Some(backend) = self.backends.get(agent.provider.as_str()) {
+            if let Err(e) = backend.cancel_turn(agent_id) {
+                return Err(HostError::Internal(e.message));
+            }
+        }
+
+        // Let run_turn flush any unflushed assistant buffer on stream end.
+        // Do not delete existing Messages.
+        self.store.agent_set_status(agent_id, AgentStatus::Idle)?;
+        let _ = self.inflight.take(agent_id)?;
+        let _ = self.events.send(WsEvent::agent_status(
+            &agent.task_id,
+            agent_id,
+            AgentStatus::Idle,
+        ));
+
+        Ok(CancelOk {
+            agent_id: agent_id.to_string(),
+            cancelled: true,
+        })
+    }
+
     pub fn going_away(&self) {
         let _ = self.events.send(WsEvent::host_going_away(&self.host_id));
     }
@@ -603,6 +650,38 @@ mod tests {
             Box::pin(futures::stream::once(async {
                 TurnEvent::Finished { exit_code: 0 }
             }))
+        }
+    }
+
+    /// First turn finishes after a short delay (survives cancel because
+    /// `cancel_turn` is the default no-op). Later turns stay Running.
+    struct CountingBackend {
+        turns: std::sync::atomic::AtomicUsize,
+    }
+
+    impl AgentBackend for CountingBackend {
+        fn id(&self) -> &'static str {
+            "cli.generic"
+        }
+        fn available(&self) -> Availability {
+            Availability {
+                available: true,
+                detail: "counting".into(),
+            }
+        }
+        fn start_turn(&self, _req: TurnRequest) -> Pin<Box<dyn Stream<Item = TurnEvent> + Send>> {
+            let n = self.turns.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n == 0 {
+                Box::pin(futures::stream::once(async {
+                    tokio::time::sleep(Duration::from_millis(180)).await;
+                    TurnEvent::Finished { exit_code: 0 }
+                }))
+            } else {
+                Box::pin(futures::stream::once(async {
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                    TurnEvent::Finished { exit_code: 0 }
+                }))
+            }
         }
     }
 
@@ -755,6 +834,96 @@ mod tests {
         assert!(
             timed_out,
             "agent did not enter Error after short turn timeout"
+        );
+        svc.inflight.abort_all();
+    }
+
+    #[tokio::test]
+    async fn cancel_inflight_sets_idle_keeps_user_message() {
+        let (dir, svc) = setup_with(Arc::new(SlowBackend));
+        let agent_id = seed_agent(&svc, &dir);
+        let user = svc.send(&agent_id, "hello").unwrap();
+        assert_eq!(user.role, MessageRole::User);
+        let result = svc.cancel(&agent_id).unwrap();
+        assert_eq!(result.agent_id, agent_id);
+        assert!(result.cancelled);
+        let v = serde_json::to_value(&result).unwrap();
+        assert_eq!(v["agentId"], agent_id);
+        assert_eq!(v["cancelled"], true);
+        let agent = svc.agent_get(&agent_id).unwrap();
+        assert_eq!(agent.status, AgentStatus::Idle);
+        let msgs = svc.get_context(&agent_id).unwrap();
+        assert!(msgs
+            .iter()
+            .any(|m| m.role == MessageRole::User && m.content == "hello"));
+        svc.inflight.abort_all();
+    }
+
+    #[tokio::test]
+    async fn cancel_idle_is_false_no_status_change() {
+        let (dir, svc) = setup_with(Arc::new(SlowBackend));
+        let agent_id = seed_agent(&svc, &dir);
+        let before = svc.agent_get(&agent_id).unwrap();
+        assert_eq!(before.status, AgentStatus::Idle);
+        let result = svc.cancel(&agent_id).unwrap();
+        assert!(!result.cancelled);
+        assert_eq!(result.agent_id, agent_id);
+        let after = svc.agent_get(&agent_id).unwrap();
+        assert_eq!(after.status, AgentStatus::Idle);
+        assert!(svc.get_context(&agent_id).unwrap().is_empty());
+        svc.inflight.abort_all();
+    }
+
+    #[tokio::test]
+    async fn send_after_cancel_is_allowed() {
+        let (dir, svc) = setup_with(Arc::new(SlowBackend));
+        let agent_id = seed_agent(&svc, &dir);
+        svc.send(&agent_id, "hello").unwrap();
+        let first = svc.cancel(&agent_id).unwrap();
+        assert!(first.cancelled);
+        let second = svc
+            .send(&agent_id, "again")
+            .expect("send after cancel should be allowed");
+        assert_eq!(second.role, MessageRole::User);
+        assert_eq!(second.content, "again");
+        svc.inflight.abort_all();
+    }
+
+    #[tokio::test]
+    async fn cancel_then_send_old_stream_does_not_clobber_new_turn() {
+        let backend = CountingBackend {
+            turns: std::sync::atomic::AtomicUsize::new(0),
+        };
+        let (dir, svc) = setup_with(Arc::new(backend));
+        let agent_id = seed_agent(&svc, &dir);
+
+        svc.send(&agent_id, "hello").unwrap();
+        assert_eq!(
+            svc.agent_get(&agent_id).unwrap().status,
+            AgentStatus::Running
+        );
+
+        let result = svc.cancel(&agent_id).unwrap();
+        assert!(result.cancelled);
+        assert_eq!(svc.agent_get(&agent_id).unwrap().status, AgentStatus::Idle);
+
+        svc.send(&agent_id, "again").unwrap();
+        assert_eq!(
+            svc.agent_get(&agent_id).unwrap().status,
+            AgentStatus::Running
+        );
+
+        // Old stream still completes (~180ms) because cancel_turn is a no-op.
+        tokio::time::sleep(Duration::from_millis(400)).await;
+
+        assert_eq!(
+            svc.agent_get(&agent_id).unwrap().status,
+            AgentStatus::Running,
+            "old stream must not clobber the new turn"
+        );
+        assert!(
+            svc.inflight.contains(&agent_id).unwrap(),
+            "new turn must still be inflight"
         );
         svc.inflight.abort_all();
     }

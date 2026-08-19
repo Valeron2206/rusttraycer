@@ -210,6 +210,16 @@ async fn dispatch_method(
             let messages = svc.get_context(agent_id)?;
             Ok(json!({ "messages": messages }))
         }
+        "agent.cancel" => {
+            let agent_id = params
+                .get("agentId")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| HostError::InvalidParams("agentId is required".into()))?;
+            if uuid::Uuid::parse_str(agent_id).is_err() {
+                return Err(HostError::InvalidParams("invalid agentId".into()));
+            }
+            Ok(serde_json::to_value(svc.cancel(agent_id)?)?)
+        }
         "files.tree" => {
             let workspace_id = params
                 .get("workspaceId")
