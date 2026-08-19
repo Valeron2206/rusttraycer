@@ -9,7 +9,7 @@ Status: `open` | `tasked` | `closed`. Empty coverage = no live session yet.
 
 | id | category | severity | zone | session | status | note |
 |---|---|---|---|---|---|---|
-| DF-001 | bug | P1 | connect/host | 0104 | open | no pid.json; host.log shutdown 2026-08-19T07:39:38Z; GUI discovery misses host; search/stash/metrics not reached; did not spawn |
+| DF-001 | bug | P1 | connect/host | 0104 | closed | host 0102 at 32957 / df-0102-home stayed up through 0104 retry; search/stash/metrics reached (RPC as GUI client) |
 
 ## Coverage — epic → last live session
 
@@ -22,11 +22,13 @@ Status: `open` | `tasked` | `closed`. Empty coverage = no live session yet.
 | Artifacts | — | — | — |
 | A2A-loop | — | — | — |
 | Sync push/pull | — | — | — |
-| Search / steer / stash | — | — | — |
+| Search / steer / stash | 0104 | n/a (RPC-only) | 2026-08-19 |
 
 ## Sessions
 
 0104 attempted 2026-08-19 YEKT, harness n/a, blocked on host.
+
+0104 retry 2026-08-19 YEKT ~23:30+: host 0102 (`32957`, `df-0102-home`) stayed up. No pixel clicks — no `rt-gui` binary and `cargo run -p rt-gui` not realistic (empty target). Drove same RPCs as GUI: `pid.json` → `GET /health` → handshake(`client=gui`, crate 2.1.1, 1.8 sync + 1.9 search/stash) → `host.ping` → `search.query` → `stash.list`/`stash.add` → `GET /metrics`. Search `q=dogfood` hit 1 open task (0102 dogfood title). Stash empty then 1 draft after add. Metrics: `rusttraycer_up 1`, 1 idle agent, 1 open task (chip would show agents=1, rss/rpc —). DF-001 closed. No new DF. Harness n/a (RPC-only).
 
 ## Parity-watch — cycle 1
 
