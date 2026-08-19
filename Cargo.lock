@@ -3111,6 +3111,7 @@ dependencies = [
  "clap",
  "directories",
  "libc",
+ "rt-runtime",
  "serde",
  "serde_json",
  "tempfile",

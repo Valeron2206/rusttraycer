@@ -1,7 +1,8 @@
-//! Coding-agent adapters. `cli.generic` + `cli.codex`. Does not open a database.
+//! Coding-agent adapters. `cli.generic` + `cli.claude` + `cli.codex`. Does not open a database.
 
-mod cli_generic;
+mod cli_claude;
 mod cli_codex;
+mod cli_generic;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -10,6 +11,7 @@ use std::pin::Pin;
 use futures::Stream;
 use serde::{Deserialize, Serialize};
 
+pub use cli_claude::CliClaude;
 pub use cli_codex::CliCodex;
 pub use cli_generic::CliGeneric;
 
@@ -58,10 +60,19 @@ pub struct TurnRequest {
 
 #[derive(Debug, Clone)]
 pub enum TurnEvent {
-    Token { text: String },
-    Tool { name: String, payload: serde_json::Value },
-    Finished { exit_code: i32 },
-    Failed { message: String },
+    Token {
+        text: String,
+    },
+    Tool {
+        name: String,
+        payload: serde_json::Value,
+    },
+    Finished {
+        exit_code: i32,
+    },
+    Failed {
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,6 +90,18 @@ pub struct HarnessCaps {
 
 impl HarnessCaps {
     pub const CLI_GENERIC: Self = Self {
+        one_shot: true,
+        long_lived: false,
+        stream_tokens: true,
+        tools: false,
+        session_resume: false,
+        a2a_inbox: false,
+        pty: false,
+        needs_api_key: false,
+        api_key_env: None,
+    };
+
+    pub const CLI_CLAUDE: Self = Self {
         one_shot: true,
         long_lived: false,
         stream_tokens: true,
@@ -122,6 +145,33 @@ pub struct CancelErr {
     pub message: String,
 }
 
+/// Local availability probe for doctor (no host / sqlite).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HarnessProbe {
+    pub id: String,
+    pub available: bool,
+    pub detail: String,
+}
+
+fn probe_one(backend: &impl AgentBackend) -> HarnessProbe {
+    let avail = backend.available();
+    HarnessProbe {
+        id: backend.id().to_string(),
+        available: avail.available,
+        detail: avail.detail,
+    }
+}
+
+/// Probe the three shipped adapters via `AgentBackend::available`.
+/// Order: `cli.generic`, `cli.claude`, `cli.codex`.
+pub fn probe_harnesses() -> Vec<HarnessProbe> {
+    vec![
+        probe_one(&CliGeneric::from_env()),
+        probe_one(&CliClaude::from_env()),
+        probe_one(&CliCodex::from_env()),
+    ]
+}
+
 #[cfg(test)]
 mod cancel_tests {
     use super::*;
@@ -139,10 +189,7 @@ mod cancel_tests {
                 detail: "none".into(),
             }
         }
-        fn start_turn(
-            &self,
-            _req: TurnRequest,
-        ) -> Pin<Box<dyn Stream<Item = TurnEvent> + Send>> {
+        fn start_turn(&self, _req: TurnRequest) -> Pin<Box<dyn Stream<Item = TurnEvent> + Send>> {
             Box::pin(futures::stream::empty())
         }
     }
@@ -150,5 +197,17 @@ mod cancel_tests {
     #[test]
     fn cancel_without_child_is_ok() {
         assert!(NoChild.cancel_turn("no-such-agent").is_ok());
+    }
+}
+
+#[cfg(test)]
+mod probe_tests {
+    use super::*;
+
+    #[test]
+    fn probe_harnesses_returns_three_ids_in_order() {
+        let probes = probe_harnesses();
+        let ids: Vec<&str> = probes.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids, ["cli.generic", "cli.claude", "cli.codex"]);
     }
 }
