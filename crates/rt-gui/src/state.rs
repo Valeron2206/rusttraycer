@@ -10,7 +10,7 @@ use serde_json::Value;
 use crate::a2a::{self, InboxItem, LoopView, A2A_UNAVAILABLE, DEFAULT_ITERATIONS};
 use crate::artifacts::{
     self, ArtifactKind, ArtifactStub, CommentThread, ARTIFACTS_UNAVAILABLE, CREATE_KINDS,
-    EXPORT_FORMAT, FILTER_ALL,
+    EXPORT_FORMAT, EXPORT_FORMAT_PDF, FILTER_ALL,
 };
 use crate::discovery::{self, DiscoverError};
 use crate::ladder::{
@@ -2738,11 +2738,7 @@ impl AppState {
         let session = self.session.clone()?;
         match session.artifact_export(&id, EXPORT_FORMAT) {
             Ok(ok) => {
-                let filename = if ok.filename.trim().is_empty() {
-                    format!("{id}.md")
-                } else {
-                    ok.filename
-                };
+                let filename = artifacts::export_suggested_filename(&id, &ok.filename, "md");
                 if ok.format == "pdf" {
                     self.toast = Some("PDF не поддерживается".into());
                     return None;
@@ -2765,6 +2761,46 @@ impl AppState {
         {
             match std::fs::write(&path, markdown) {
                 Ok(()) => self.toast = Some(artifacts::EXPORT_SAVED.into()),
+                Err(err) => self.toast = Some(err.to_string()),
+            }
+        }
+    }
+
+    pub fn export_selected_pdf(&mut self) -> Option<(String, Vec<u8>)> {
+        let id = self.selected_artifact_id.clone()?;
+        if !self.artifacts_host_ok() {
+            self.toast = Some(ARTIFACTS_UNAVAILABLE.into());
+            return None;
+        }
+        let session = self.session.clone()?;
+        match session.artifact_export(&id, EXPORT_FORMAT_PDF) {
+            Ok(ok) => {
+                let filename = artifacts::export_suggested_filename(&id, &ok.filename, "pdf");
+                match artifacts::decode_export_pdf(&ok.bytes, &ok.markdown) {
+                    Ok(bytes) => Some((filename, bytes)),
+                    Err(msg) => {
+                        self.toast = Some(msg);
+                        None
+                    }
+                }
+            }
+            Err(err) => {
+                // 1.8 host: invalid_params / unsupported. Toast only — do not hide MD.
+                self.toast = Some(err.as_label());
+                None
+            }
+        }
+    }
+
+    pub fn save_exported_pdf(&mut self, filename: &str, bytes: &[u8]) {
+        if let Some(path) = rfd::FileDialog::new()
+            .set_title(artifacts::EXPORT_PDF)
+            .set_file_name(filename)
+            .add_filter("PDF", &["pdf"])
+            .save_file()
+        {
+            match std::fs::write(&path, bytes) {
+                Ok(()) => self.toast = Some(artifacts::EXPORT_PDF_SAVED.into()),
                 Err(err) => self.toast = Some(err.to_string()),
             }
         }
@@ -5745,6 +5781,118 @@ mod tests {
         }
     }
 
+    fn artifact_export_mock_ok(params: &Value) -> String {
+        let format = params
+            .get("format")
+            .and_then(|v| v.as_str())
+            .unwrap_or("md");
+        if format == "pdf" {
+            json!({
+                "id": "echo",
+                "ok": {
+                    "format": "pdf",
+                    "markdown": "",
+                    "filename": "art-1.pdf",
+                    "bytes": crate::terminal::encode_b64(b"%PDF-1.4 test")
+                }
+            })
+            .to_string()
+        } else {
+            json!({
+                "id": "echo",
+                "ok": {
+                    "format": format,
+                    "markdown": "# Auth",
+                    "filename": "art-1.md"
+                }
+            })
+            .to_string()
+        }
+    }
+
+    fn start_artifacts_pdf_reject_mock() -> SliceMock {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(Mutex::new(Vec::new()));
+        let hits_t = hits.clone();
+        thread::spawn(move || {
+            for stream in listener.incoming().take(24) {
+                let Ok(mut stream) = stream else { break };
+                let (headers, body) = read_http_request(&mut stream);
+                let (method, params) = if headers.starts_with("GET /health") {
+                    ("GET /health".to_string(), json!({}))
+                } else {
+                    let parsed: Value = serde_json::from_slice(&body).unwrap_or(json!({}));
+                    (
+                        parsed
+                            .get("method")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("other")
+                            .to_string(),
+                        parsed.get("params").cloned().unwrap_or(json!({})),
+                    )
+                };
+                hits_t.lock().unwrap().push(RpcHit {
+                    method: method.clone(),
+                    params: params.clone(),
+                });
+                let body = match method.as_str() {
+                    "GET /health" => json!({"ok": true, "hostId": "host-a"}).to_string(),
+                    "handshake" => {
+                        let mut accepted = serde_json::Map::new();
+                        for name in crate::rpc::ARTIFACT_METHODS {
+                            accepted.insert(name.to_string(), json!({"major": 1, "minor": 4}));
+                        }
+                        json!({
+                            "id": "echo",
+                            "ok": {
+                                "hostId": "host-a",
+                                "hostVersion": "0.1.0",
+                                "sessionToken": "tok-1",
+                                "accepted": accepted,
+                                "rejected": {}
+                            }
+                        })
+                        .to_string()
+                    }
+                    "host.ping" => json!({
+                        "id": "echo",
+                        "ok": { "hostId": "host-a", "now": "t" }
+                    })
+                    .to_string(),
+                    "artifact.export" => {
+                        let format = params
+                            .get("format")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("md");
+                        if format == "pdf" {
+                            json!({
+                                "id": "echo",
+                                "error": {
+                                    "code": "invalid_params",
+                                    "message": "pdf export is not implemented"
+                                }
+                            })
+                            .to_string()
+                        } else {
+                            artifact_export_mock_ok(&params)
+                        }
+                    }
+                    _ => json!({
+                        "id": "echo",
+                        "error": { "code": "unsupported_method", "message": "no" }
+                    })
+                    .to_string(),
+                };
+                write_http_json(&mut stream, &body);
+            }
+        });
+        SliceMock {
+            origin: format!("http://{addr}"),
+            hits,
+        }
+    }
+
     fn start_artifacts_state_mock() -> SliceMock {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
@@ -5855,15 +6003,7 @@ mod tests {
                         "ok": { "items": listed, "truncated": false }
                     })
                     .to_string(),
-                    "artifact.export" => json!({
-                        "id": "echo",
-                        "ok": {
-                            "format": params.get("format").cloned().unwrap_or(json!("md")),
-                            "markdown": "# Auth",
-                            "filename": "art-1.md"
-                        }
-                    })
-                    .to_string(),
+                    "artifact.export" => artifact_export_mock_ok(&params),
                     "comment.create" | "comment.resolve" => {
                         json!({ "id": "echo", "ok": thread }).to_string()
                     }
@@ -5955,6 +6095,59 @@ mod tests {
     }
 
     #[test]
+    fn export_pdf_sends_method_and_format() {
+        let mock = start_artifacts_state_mock();
+        let session = connect(&pid(&mock.origin)).expect("online");
+        let mut state = online_state(session);
+        state.selected_artifact_id = Some("art-1".into());
+        let exported = state.export_selected_pdf().expect("pdf");
+        assert_eq!(exported.0, "art-1.pdf");
+        assert_eq!(exported.1, b"%PDF-1.4 test");
+        let hits = mock.hits.lock().unwrap().clone();
+        let export = hits
+            .iter()
+            .find(|h| h.method == "artifact.export")
+            .expect("export");
+        assert_eq!(export.params["format"], "pdf");
+        assert_eq!(export.params["artifactId"], "art-1");
+        assert!(!hits.iter().any(|h| h.method == "files.write"));
+    }
+
+    #[test]
+    fn export_pdf_without_selection_does_not_call_or_toast() {
+        let mock = start_artifacts_state_mock();
+        let session = connect(&pid(&mock.origin)).expect("online");
+        let mut state = online_state(session);
+        state.selected_artifact_id = None;
+        assert!(state.export_selected_pdf().is_none());
+        assert!(state.toast.is_none());
+        let hits = mock.hits.lock().unwrap().clone();
+        assert!(!hits.iter().any(|h| h.method == "artifact.export"));
+    }
+
+    #[test]
+    fn export_pdf_unsupported_host_toasts_md_still_works() {
+        let mock = start_artifacts_pdf_reject_mock();
+        let session = connect(&pid(&mock.origin)).expect("online");
+        let mut state = online_state(session);
+        state.selected_artifact_id = Some("art-1".into());
+        assert!(state.export_selected_pdf().is_none());
+        let toast = state.toast.clone().expect("toast");
+        assert!(toast.contains("invalid_params"), "{toast}");
+        assert!(!toast.contains("паник"));
+        let md = state.export_selected_markdown().expect("md still works");
+        assert_eq!(md.0, "art-1.md");
+        assert_eq!(md.1, "# Auth");
+        let hits = mock.hits.lock().unwrap().clone();
+        let formats: Vec<String> = hits
+            .iter()
+            .filter(|h| h.method == "artifact.export")
+            .map(|h| h.params["format"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(formats, vec!["pdf", "md"]);
+    }
+
+    #[test]
     fn clear_transcript_requires_confirm_then_keeps_artifacts() {
         let mock = start_artifacts_state_mock();
         let session = connect(&pid(&mock.origin)).expect("online");
@@ -6039,7 +6232,10 @@ mod tests {
         let _ = state.composer_enabled();
         let _ = state.write_ready();
         let _ = state.terminal_host_ok();
+        state.selected_artifact_id = Some("art-1".into());
         state.export_selected_markdown();
+        assert_eq!(state.toast.as_deref(), Some(ARTIFACTS_UNAVAILABLE));
+        state.export_selected_pdf();
         assert_eq!(state.toast.as_deref(), Some(ARTIFACTS_UNAVAILABLE));
     }
 
