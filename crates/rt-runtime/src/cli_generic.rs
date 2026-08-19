@@ -90,20 +90,17 @@ fn parse_generic_args(raw: &str) -> Result<Vec<String>, String> {
     if trimmed.is_empty() {
         return Ok(Vec::new());
     }
-    let value: serde_json::Value = serde_json::from_str(trimmed).map_err(|e| {
-        format!("RUSTTRAYCER_GENERIC_ARGS invalid JSON: {e}")
-    })?;
-    let arr = value.as_array().ok_or_else(|| {
-        "RUSTTRAYCER_GENERIC_ARGS must be a JSON array of strings".to_string()
-    })?;
+    let value: serde_json::Value = serde_json::from_str(trimmed)
+        .map_err(|e| format!("RUSTTRAYCER_GENERIC_ARGS invalid JSON: {e}"))?;
+    let arr = value
+        .as_array()
+        .ok_or_else(|| "RUSTTRAYCER_GENERIC_ARGS must be a JSON array of strings".to_string())?;
     let mut out = Vec::with_capacity(arr.len());
     for (i, v) in arr.iter().enumerate() {
         match v.as_str() {
             Some(s) => out.push(s.to_string()),
             None => {
-                return Err(format!(
-                    "RUSTTRAYCER_GENERIC_ARGS[{i}] is not a string"
-                ));
+                return Err(format!("RUSTTRAYCER_GENERIC_ARGS[{i}] is not a string"));
             }
         }
     }
