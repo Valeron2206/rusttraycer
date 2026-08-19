@@ -1,4 +1,4 @@
-//! Per-method {major,minor} negotiation. Existing methods stay 1.0; policy.* is 1.1; write/git mutate is 1.2; shell/pty are 1.3; artifacts/comments/clear_transcript are 1.4; agent.create + a2a/loop are 1.5; agent.switch/profile.*/prefs.get are 1.6; workspace.guides/settings.guide/preset.list/agent.update are 1.7; sync.export/import are 1.8; artifact.export is 1.9.
+//! Per-method {major,minor} negotiation. Existing methods stay 1.0; policy.* is 1.1; write/git mutate is 1.2; shell/pty are 1.3; artifacts/comments/clear_transcript are 1.4; agent.create + a2a/loop are 1.5; agent.switch/profile.*/prefs.get are 1.6; workspace.guides/settings.guide/preset.list/agent.update are 1.7; sync.export/import are 1.8; artifact.export/search.query/worktree.gc are 1.9.
 
 use std::collections::BTreeMap;
 
@@ -445,5 +445,44 @@ mod tests {
         let (acc, rej) = negotiate(&older);
         assert!(rej.is_empty(), "{rej:?}");
         assert_eq!(acc["artifact.export"], MethodVersion { major: 1, minor: 9 });
+    }
+
+    #[test]
+    fn search_and_gc_accepted_at_1_9_absent_on_1_8_client() {
+        let mut client = BTreeMap::new();
+        client.insert("search.query".into(), MethodVersion { major: 1, minor: 9 });
+        client.insert("worktree.gc".into(), MethodVersion { major: 1, minor: 9 });
+        client.insert(
+            "artifact.export".into(),
+            MethodVersion { major: 1, minor: 9 },
+        );
+        client.insert("sync.export".into(), MethodVersion { major: 1, minor: 8 });
+        let (acc, rej) = negotiate(&client);
+        assert!(rej.is_empty(), "{rej:?}");
+        assert_eq!(acc["search.query"], MethodVersion { major: 1, minor: 9 });
+        assert_eq!(acc["worktree.gc"], MethodVersion { major: 1, minor: 9 });
+        assert_eq!(acc["artifact.export"], MethodVersion { major: 1, minor: 9 });
+        assert_eq!(
+            host_methods()["search.query"],
+            MethodVersion { major: 1, minor: 9 }
+        );
+        assert_eq!(
+            host_methods()["worktree.gc"],
+            MethodVersion { major: 1, minor: 9 }
+        );
+
+        let mut older = BTreeMap::new();
+        older.insert("agent.send".into(), MethodVersion { major: 1, minor: 0 });
+        older.insert(
+            "artifact.export".into(),
+            MethodVersion { major: 1, minor: 4 },
+        );
+        older.insert("sync.export".into(), MethodVersion { major: 1, minor: 8 });
+        let (acc, rej) = negotiate(&older);
+        assert!(rej.is_empty(), "{rej:?}");
+        assert!(acc.contains_key("agent.send"));
+        assert!(acc.contains_key("artifact.export"));
+        assert!(!acc.contains_key("search.query"));
+        assert!(!acc.contains_key("worktree.gc"));
     }
 }
