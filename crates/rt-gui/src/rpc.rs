@@ -349,23 +349,22 @@ fn policy_set_params(
     workspace_id: Option<&str>,
 ) -> Value {
     let workspace_id = workspace_id.filter(|id| !id.is_empty());
-    let scope = if scope == "workspace" && workspace_id.is_none() {
-        "agent"
-    } else {
-        scope
-    };
-    let mut params = json!({
-        "agentId": agent_id,
-        "mode": mode,
-        "scope": scope,
-        "yolo": yolo,
-    });
     if scope == "workspace" {
         if let Some(id) = workspace_id {
-            params["workspaceId"] = json!(id);
+            return json!({
+                "workspaceId": id,
+                "mode": mode,
+                "scope": "workspace",
+                "yolo": yolo,
+            });
         }
     }
-    params
+    json!({
+        "agentId": agent_id,
+        "mode": mode,
+        "scope": if scope == "workspace" { "agent" } else { scope },
+        "yolo": yolo,
+    })
 }
 
 fn rpc_origin(rpc_url: &str) -> String {
@@ -3797,7 +3796,7 @@ mod tests {
     #[test]
     fn policy_set_workspace_scope_sends_workspace_id_or_falls_back() {
         let with_id = policy_set_params("ag-1", "ask", "workspace", false, Some("ws-1"));
-        assert_eq!(with_id["agentId"], "ag-1");
+        assert!(with_id.get("agentId").is_none());
         assert_eq!(with_id["mode"], "ask");
         assert_eq!(with_id["scope"], "workspace");
         assert_eq!(with_id["yolo"], false);
