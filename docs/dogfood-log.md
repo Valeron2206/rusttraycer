@@ -21,7 +21,7 @@ Status: `open` | `tasked` | `closed`. Empty coverage = no live session yet.
 
 | Epic / surface | Last session | Harness | Date (YEKT) |
 |---|---|---|---|
-| Ladder ask | 0118 CLI RPC (policy.set ask; send GENERIC_CMD). 0109 UI pane clipped. | cli.generic | 2026-08-20 |
+| Ladder ask | 0118 CLI RPC (policy.set ask; send GENERIC_CMD; files.write → approvalId + allow-once). 0109 UI pane clipped. | cli.generic | 2026-08-20 |
 | Ladder Yolo | 0112 | cli.generic | 2026-08-20 |
 | Write + commit | 0112 (env identity) | cli.generic | 2026-08-20 |
 | Terminal + resume | 0108 (create+input ok; resume DF-004) | cli.generic | 2026-08-20 |
@@ -130,8 +130,9 @@ Passed:
 - `policy.set` workspace `mode=ask` `yolo=false` → `policy.get` same
 - `host.doctor` generic `available=false` / `RUSTTRAYCER_GENERIC_CMD unset` (DF-003)
 - `agent.send` content `df-0118 ladder ask ping` → `internal: RUSTTRAYCER_GENERIC_CMD unset`. No `approvalId`. Ask mode checks backend availability before creating a pending approval, so the toast is DF-003, not a new DF.
+- `files.write` of `docs/dogfood-log.md` under ask → pending `approvalId` `01a01d41-aeb6-7481-9c25-e2ba01e9b493`; `approval.respond` allow-once applied the write. Then `git.stage` + `git.commit` RPC (env identity).
 
-Log via `files.write` + `git.stage` + `git.commit` RPC (env identity). No origin push. No `git config`. 0108/0111/0115/0117 tips not moved.
+No origin push. No `git config`. 0108/0111/0115/0117 tips not moved.
 
 **Новых находок нет.** DF-003 toast on send, as specified.
 
