@@ -12,6 +12,7 @@ Status: `open` | `tasked` | `closed`. Empty coverage = no live session yet.
 | DF-001 | bug | P1 | connect/host | 0104 | closed | host 0102 at 32957 / df-0102-home stayed up through 0104 retry; search/stash/metrics reached (RPC as GUI client) |
 | DF-002 | bug | P1 | git.commit | 0102-session1 | closed | resolved: commit works with env identity, no git config. 0105 (`93ed298`) host accepts GIT_AUTHOR_NAME/EMAIL + GIT_COMMITTER_*; retested 0105-int on :40481. First commit 87476362. |
 | DF-003 | friction | P2 | doctor / harness | 0102-session1 | open | `rt-cli doctor` reports `cli.generic` unavailable when `RUSTTRAYCER_GENERIC_CMD` is unset. `agent.create` with `provider=cli.generic` still succeeds. Directive says generic is always available. Reconfirmed 0102-cont and 0112 `host.doctor`: still `available=false` / `RUSTTRAYCER_GENERIC_CMD unset`. |
+| DF-004 | friction | P1 | terminal/resume | 0108 | open | After host restart, live Shell PTY is gone (`shell.list` empty, `pty.write` → `pty_dead`, `pty.open` old shellId → `not_found`). No `shell.resume` method. `cli.generic` + `interface=terminal` → `not_pty` (`sessionResume=false`). Vendor resume (`RUSTTRAYCER_PROVIDER_SESSION_ID`) is only on `cli.claude`/`cli.codex`; both bins absent. Terminal+resume coverage cannot complete on generic. |
 | DF-005 | bug | P1 | canvas/agents | 0109 | tasked | left Агенты pane has no ScrollArea; policy «Спросить» and «Создать агента» clipped at 1280x800. Fix in 0109. |
 | DF-006 | bug | P2 | search | 0109 | tasked | Enter only on lost_focus (no-op while focused); results Window has no .open/Escape dismiss. Fix in 0109. |
 | DF-007 | bug | P2 | stash | 0109 | tasked | В stash left composer uncleared; apply_stash appended. Live concat `0109 stash draft`+old body. Fix in 0109. |
@@ -23,10 +24,10 @@ Status: `open` | `tasked` | `closed`. Empty coverage = no live session yet.
 | Ladder ask | 0109 | n/a (pane clipped) | 2026-08-20 |
 | Ladder Yolo | 0112 | cli.generic | 2026-08-20 |
 | Write + commit | 0112 (env identity) | cli.generic | 2026-08-20 |
-| Terminal + resume | — | — | — |
+| Terminal + resume | 0108 (create+input ok; resume DF-004) | cli.generic | 2026-08-20 |
 | Artifacts | 0112 | cli.generic | 2026-08-20 |
 | A2A-loop | — | — | — |
-| Sync push/pull | 0102-session1 | cli.generic | 2026-08-19 |
+| Sync push/pull | 0102-session1 + 0108 (push this task) | cli.generic | 2026-08-20 |
 | Search / steer / stash | 0109 | cli.generic (send blocked) | 2026-08-20 |
 
 ## Sessions
@@ -92,6 +93,30 @@ Passed:
 - `git.stage` + `git.commit` (env identity; no git config)
 
 No new DF. DF-003 reconfirmed, not closed. No origin push. Session checkout `task/0112-v3-df-session-artifacts-yolo` stays at `ec709c5` unless noted; product commit is the session commit.
+
+
+### Session 0108 — 2026-08-20 YEKT — Integration / STAR 0108 (terminal + resume)
+
+Harness: **cli.generic** (used). Handshake client=`cli`, crate 2.1.1. Host reused `df-0102-home` (`hostId` `01a01b47-e863-71d3-bd2d-e885cf484d7a`), first on `:40481`, then `rt-cli stop` + `rt-cli start` (same home, same `GIT_AUTHOR_*` / `GIT_COMMITTER_*`, no `git config`). New bind `:41299`. `cli.claude` / `cli.codex` bins still absent.
+
+Passed:
+- Task + `worktree.ensure` (product minted `rt/c26ebd40` under host data dir; session checkout `task/0108-v3-df-session-pty` at `/workspace/wt-0108-v3-df-session-pty`)
+- `shell.create` with `taskId` (C32–C36): live PTY `ptyId` `01a01d24-5099-7313-bc39-21b2ec894280`, cwd session workspace
+- `pty.write` input `echo df-0108-pty` — marker written, unique string observed
+- `sync.push` backup to peer `:38805` (`/workspace/df-0102-peer`) **before** restart: this task only (`taskIds` filter). Full-host push conflicted with existing 0102 task on peer. 1 task / 1 agent imported. Secret not required.
+- host restart: `rt-cli stop` + `start`, same home, same hostId, port `:40481` → `:41299`
+
+Resume failed (DF-004, not faked):
+- `shell.list` empty after restart
+- `pty.write` old `ptyId` → `pty_dead`
+- `pty.open` old `shellId` → `not_found`
+- `shell.resume` → `unsupported_method`
+- `agent.create interface=terminal provider=cli.generic` → `not_pty`
+- chat agent `providerSessionId` remains null
+
+Log written via `files.write` (ladder Yolo). `git.stage` + `git.commit` via RPC (env identity). No origin push. No `git config`.
+
+Findings: DF-004 (P1, new). DF-003 still open (reconfirmed).
 
 ## Parity-watch — cycle 1
 
