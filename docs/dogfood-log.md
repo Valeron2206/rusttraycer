@@ -11,7 +11,7 @@ Status: `open` | `tasked` | `closed`. Empty coverage = no live session yet.
 |---|---|---|---|---|---|---|
 | DF-001 | bug | P1 | connect/host | 0104 | closed | host 0102 at 32957 / df-0102-home stayed up through 0104 retry; search/stash/metrics reached (RPC as GUI client) |
 | DF-002 | bug | P1 | git.commit | 0102-session1 | closed | resolved: commit works with env identity, no git config. 0105 (`93ed298`) host accepts GIT_AUTHOR_NAME/EMAIL + GIT_COMMITTER_*; retested 0105-int on :40481. First commit 87476362. |
-| DF-003 | friction | P2 | doctor / harness | 0102-session1 | open | `rt-cli doctor` reports `cli.generic` unavailable when `RUSTTRAYCER_GENERIC_CMD` is unset. `agent.create` with `provider=cli.generic` still succeeds. Directive says generic is always available. Reconfirmed 0102-cont and 0112 `host.doctor`: still `available=false` / `RUSTTRAYCER_GENERIC_CMD unset`. |
+| DF-003 | friction | P2 | doctor / harness | 0107 | closed | resolved STAR 0107 (`0ae0da8`): doctor.available=true for cli.generic without cmd; detail may still mention RUSTTRAYCER_GENERIC_CMD unset. Closed in-tree; live host :45927 still old binary until rebuild. |
 | DF-004 | friction | P1 | terminal/resume | 0108 / 0119 | closed | resolved 0113 (`d9024cf`): list+resume+write after restart. 0119 :39001→:36965; 0119b on 141087b :34009→:45927. |
 | DF-005 | bug | P1 | canvas/agents | 0109 | tasked | left Агенты pane has no ScrollArea; policy «Спросить» and «Создать агента» clipped at 1280x800. Fix in 0109. |
 | DF-006 | bug | P2 | search | 0109 | tasked | Enter only on lost_focus (no-op while focused); results Window has no .open/Escape dismiss. Fix in 0109. |

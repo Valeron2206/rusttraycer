@@ -133,7 +133,7 @@ impl AgentBackend for CliGeneric {
     fn available(&self) -> Availability {
         match &self.command {
             None => Availability {
-                available: false,
+                available: true,
                 detail: "RUSTTRAYCER_GENERIC_CMD unset".into(),
             },
             Some(cmd) => match resolve_binary(cmd) {
@@ -416,10 +416,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unset_or_empty_cmd_unavailable_and_start_fails() {
+    async fn unset_or_empty_cmd_available_but_start_fails() {
         let empty = CliGeneric::new("");
-        assert!(!empty.available().available);
-        assert_eq!(empty.available().detail, "RUSTTRAYCER_GENERIC_CMD unset");
+        assert!(empty.available().available);
+        assert!(
+            empty
+                .available()
+                .detail
+                .contains("RUSTTRAYCER_GENERIC_CMD unset"),
+            "{}",
+            empty.available().detail
+        );
         let events = collect(&empty).await;
         assert!(matches!(
             events.as_slice(),
@@ -432,8 +439,15 @@ mod tests {
             args_error: None,
             timeout: DEFAULT_TIMEOUT,
         };
-        assert!(!unset.available().available);
-        assert_eq!(unset.available().detail, "RUSTTRAYCER_GENERIC_CMD unset");
+        assert!(unset.available().available);
+        assert!(
+            unset
+                .available()
+                .detail
+                .contains("RUSTTRAYCER_GENERIC_CMD unset"),
+            "{}",
+            unset.available().detail
+        );
         let events = collect(&unset).await;
         assert!(matches!(events.last(), Some(TurnEvent::Failed { .. })));
     }
@@ -595,8 +609,15 @@ sys.stdout.flush()
         let _cmd = EnvRestore::unset("RUSTTRAYCER_GENERIC_CMD");
         let _args = EnvRestore::unset("RUSTTRAYCER_GENERIC_ARGS");
         let unset = CliGeneric::from_env();
-        assert!(!unset.available().available);
-        assert_eq!(unset.available().detail, "RUSTTRAYCER_GENERIC_CMD unset");
+        assert!(unset.available().available);
+        assert!(
+            unset
+                .available()
+                .detail
+                .contains("RUSTTRAYCER_GENERIC_CMD unset"),
+            "{}",
+            unset.available().detail
+        );
 
         drop(_cmd);
         let _cmd = EnvRestore::set("RUSTTRAYCER_GENERIC_CMD", "/bin/true");

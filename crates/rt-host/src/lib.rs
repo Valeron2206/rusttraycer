@@ -142,7 +142,7 @@ impl From<rt_storage::StorageError> for HostError {
     }
 }
 
-/// Doctor probe: env set? Does not spawn a child.
+/// Doctor probe for generic. Always-on when cmd is unset. Does not spawn a child.
 pub fn generic_cmd_probe() -> rt_runtime::Availability {
     match std::env::var("RUSTTRAYCER_GENERIC_CMD") {
         Ok(s) if !s.trim().is_empty() => rt_runtime::Availability {
@@ -150,7 +150,7 @@ pub fn generic_cmd_probe() -> rt_runtime::Availability {
             detail: format!("RUSTTRAYCER_GENERIC_CMD={}", s.trim()),
         },
         _ => rt_runtime::Availability {
-            available: false,
+            available: true,
             detail: "RUSTTRAYCER_GENERIC_CMD unset".into(),
         },
     }
@@ -531,14 +531,15 @@ mod tests {
         );
     }
 
+    static GENERIC_CMD_PROBE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn generic_cmd_probe_set_and_unset() {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _g = LOCK.lock().unwrap();
+        let _g = GENERIC_CMD_PROBE_LOCK.lock().unwrap();
         let prev = std::env::var("RUSTTRAYCER_GENERIC_CMD").ok();
         std::env::remove_var("RUSTTRAYCER_GENERIC_CMD");
         let down = generic_cmd_probe();
-        assert!(!down.available);
+        assert!(down.available);
         assert!(down.detail.contains("unset"));
         std::env::set_var("RUSTTRAYCER_GENERIC_CMD", "  echo  ");
         let up = generic_cmd_probe();
@@ -548,5 +549,23 @@ mod tests {
             Some(v) => std::env::set_var("RUSTTRAYCER_GENERIC_CMD", v),
             None => std::env::remove_var("RUSTTRAYCER_GENERIC_CMD"),
         }
+    }
+
+    #[test]
+    fn generic_cmd_probe_available_when_unset_df003() {
+        let _g = GENERIC_CMD_PROBE_LOCK.lock().unwrap();
+        let prev = std::env::var("RUSTTRAYCER_GENERIC_CMD").ok();
+        std::env::remove_var("RUSTTRAYCER_GENERIC_CMD");
+        let probe = generic_cmd_probe();
+        match prev {
+            Some(v) => std::env::set_var("RUSTTRAYCER_GENERIC_CMD", v),
+            None => std::env::remove_var("RUSTTRAYCER_GENERIC_CMD"),
+        }
+        assert!(probe.available, "detail={}", probe.detail);
+        assert!(
+            probe.detail.contains("RUSTTRAYCER_GENERIC_CMD unset"),
+            "detail={}",
+            probe.detail
+        );
     }
 }

@@ -3170,6 +3170,32 @@ mod tests {
         (dir, svc)
     }
 
+    #[test]
+    fn doctor_generic_available_when_cmd_unset() {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _g = LOCK.lock().unwrap();
+        let prev = std::env::var("RUSTTRAYCER_GENERIC_CMD").ok();
+        std::env::remove_var("RUSTTRAYCER_GENERIC_CMD");
+        let backend = rt_runtime::CliGeneric::from_env();
+        let (_dir, svc) = setup_with(Arc::new(backend));
+        let doc = svc.doctor().expect("doctor");
+        match prev {
+            Some(v) => std::env::set_var("RUSTTRAYCER_GENERIC_CMD", v),
+            None => std::env::remove_var("RUSTTRAYCER_GENERIC_CMD"),
+        }
+        let generic = doc
+            .providers
+            .iter()
+            .find(|p| p.id == "cli.generic")
+            .expect("cli.generic");
+        assert!(generic.available, "detail={}", generic.detail);
+        assert!(
+            generic.detail.contains("unset"),
+            "detail={}",
+            generic.detail
+        );
+    }
+
     struct InstantBackend;
 
     impl AgentBackend for InstantBackend {

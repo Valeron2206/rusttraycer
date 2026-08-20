@@ -875,6 +875,27 @@ done
     }
 
     #[test]
+    fn doctor_generic_available_when_cmd_unset() {
+        let _lock = lock_env();
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = EnvGuard::set("RUSTTRAYCER_HOME", tmp.path());
+        let _cmd = EnvGuard::remove("RUSTTRAYCER_GENERIC_CMD");
+
+        let report = doctor().unwrap();
+        let generic = report
+            .harnesses
+            .iter()
+            .find(|h| h.id == "cli.generic")
+            .expect("cli.generic");
+        assert!(generic.available, "detail={}", generic.detail);
+        assert!(
+            generic.detail.contains("unset"),
+            "detail={}",
+            generic.detail
+        );
+    }
+
+    #[test]
     fn port_from_rpc_url_parses_host_port() {
         assert_eq!(port_from_rpc_url("http://127.0.0.1:47800"), Some(47800));
         assert_eq!(port_from_rpc_url("http://127.0.0.1:9"), Some(9));
