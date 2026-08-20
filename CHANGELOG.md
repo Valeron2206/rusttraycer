@@ -5,6 +5,19 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.2] — Unreleased
+
+Draft. Tag, crate bump, and assets after cycle DoD. Protocol 1.9. Storage 0001–0010. Workspace version stays **2.1.1** until the tag.
+
+### Fixed
+
+- `git.commit` accepts `GIT_AUTHOR_*` / `GIT_COMMITTER_*` from the host process env (DF-002). No `git config`.
+
+### Docs
+
+- Directive v3 + dogfood-log. Cycle-1 parity-watch: Latest desktop is still **desktop-v1.1.10**. `desktop-v1.2.0-rc.1` is recorded, not a `Cxx` trigger.
+- Cycle-1 hygiene ([c1-hygiene.md](docs/c1-hygiene.md)): `cargo audit` 0 vulnerabilities.
+
 ## [2.1.1] — 2026-08-19
 
 Docs and license only. Protocol 1.9. Tag `v2.1.0` stays at `e151919`.

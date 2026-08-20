@@ -116,3 +116,11 @@ Triage: Cxx only when changelog or a non-rc `desktop-v*` ships a capability (010
 Watch (do not open Cxx until `desktop-v1.2.0` or a changelog heading): Devices & Sessions + OTP; communication graph; remote-host / multi-host; monitors & notifying shells; chat-sync v2 / chat sharing (likely C69/C75); HuggingFace harness (C66); usage analytics (C68); Diffs 1.3.1 in-place edit; `agent.fork@1.0`; MCP/plugins/skills settings; read-only terminal access for agents.
 
 **Нет дельты.** No new `Cxx`. Matrix stays 0 `missing`/`partial`.
+
+### Hygiene + draft 2.1.2 — 2026-08-20 YEKT (Architect, STAR 0116)
+
+`cargo audit`: 0 vulnerabilities (2 unmaintained warnings via eframe/egui 0.31). Note: [c1-hygiene.md](c1-hygiene.md). No lockfile change.
+
+Parity recheck (same sources as 0110): Latest desktop still **desktop-v1.1.10**. `desktop-v1.2.0-rc.1` still prerelease. **Нет дельты.** No new `Cxx`.
+
+CHANGELOG `[2.1.2] — Unreleased` drafted. README install stays `v2.1.1`. Tag / crate bump / assets after DoD.
