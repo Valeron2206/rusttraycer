@@ -76,3 +76,21 @@ Sources: https://github.com/traycerai/traycer/releases · https://docs.traycer.a
 | `host-v1.1.11` | Host-only tag (2026-08-07). Not `desktop-v*`. | not a matrix trigger |
 
 **Нет дельты.** No new `Cxx`. Matrix stays 0 `missing`/`partial`.
+
+### Mid-cycle — 2026-08-20 YEKT (Architect, STAR 0110)
+
+Sources: https://github.com/traycerai/traycer/releases · https://docs.traycer.ai/changelog.md
+
+| Source | Latest | vs matrix 1.1.10 |
+|---|---|---|
+| `desktop-v*` (GitHub, marked Latest) | **desktop-v1.1.10** (2026-08-06) | same |
+| `desktop-v1.2.0-rc.1` | prerelease (2026-08-19 21:36 UTC). Desktop tag exists; GitHub Latest is still 1.1.10. | not a matrix trigger |
+| docs.traycer.ai/changelog | still 1.1.10 notes; no 1.2.0 heading | same |
+| `host-v1.1.11` | Host-only tag (2026-08-07). No `desktop-v1.1.11`. | not a matrix trigger |
+| `host-v1.2.0-rc.1` / `cli-v1.2.0-rc.1` | prerelease, paired with desktop rc | not a matrix trigger |
+
+Triage: Cxx only when changelog or a non-rc `desktop-v*` ships a capability (0101 rule; host-only / prerelease stay in the report). Opening `missing` against an RC would start the one-cycle clock before the product exists.
+
+Watch (do not open Cxx until `desktop-v1.2.0` or a changelog heading): Devices & Sessions + OTP; communication graph; remote-host / multi-host; monitors & notifying shells; chat-sync v2 / chat sharing (likely C69/C75); HuggingFace harness (C66); usage analytics (C68); Diffs 1.3.1 in-place edit; `agent.fork@1.0`; MCP/plugins/skills settings; read-only terminal access for agents.
+
+**Нет дельты.** No new `Cxx`. Matrix stays 0 `missing`/`partial`.
