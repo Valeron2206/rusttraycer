@@ -13,9 +13,9 @@ Status: `open` | `tasked` | `closed`. Empty coverage = no live session yet.
 | DF-002 | bug | P1 | git.commit | 0102-session1 | closed | resolved: commit works with env identity, no git config. 0105 (`93ed298`) host accepts GIT_AUTHOR_NAME/EMAIL + GIT_COMMITTER_*; retested 0105-int on :40481. First commit 87476362. |
 | DF-003 | friction | P2 | doctor / harness | 0107 | closed | resolved STAR 0107 (`0ae0da8`): doctor.available=true for cli.generic without cmd; detail may still mention RUSTTRAYCER_GENERIC_CMD unset. Closed in-tree; live host :45927 still old binary until rebuild. |
 | DF-004 | friction | P1 | terminal/resume | 0108 / 0119 | closed | resolved 0113 (`d9024cf`): list+resume+write after restart. 0119 :39001→:36965; 0119b on 141087b :34009→:45927. |
-| DF-005 | bug | P1 | canvas/agents | 0109 | tasked | left Агенты pane has no ScrollArea; policy «Спросить» and «Создать агента» clipped at 1280x800. Fix in 0109. |
-| DF-006 | bug | P2 | search | 0109 | tasked | Enter only on lost_focus (no-op while focused); results Window has no .open/Escape dismiss. Fix in 0109. |
-| DF-007 | bug | P2 | stash | 0109 | tasked | В stash left composer uncleared; apply_stash appended. Live concat `0109 stash draft`+old body. Fix in 0109. |
+| DF-005 | bug | P1 | canvas/agents | 0109 / 0114 | closed | ScrollArea in 0109 (`fc00314`). Live 0114: scroll fix works, «Спросить» reachable. Closed STAR 0121. |
+| DF-006 | bug | P2 | search | 0109 | closed | Enter-while-focused + Escape/outside dismiss in 0109 (`fc00314`). Closed STAR 0121. |
+| DF-007 | bug | P2 | stash | 0109 | closed | Composer clear + apply-replace in 0109 (`fc00314`). Closed STAR 0121. |
 | DF-008 | bug | P1 | ladder/policy.set | 0114 | closed | xor fix `380b042` / merge `f77fc57`. Live retest 0114 on :45927 — workspace scope sends workspaceId xor agentId, ok. No commit this retest. |
 
 ## Coverage — epic → last live session
@@ -303,3 +303,9 @@ Harness: only **cli.generic** available. `cli.claude` / `cli.codex` bins absent 
 | README + CHANGELOG match shipped | **holds** — README install still v2.1.1 until tag (lesson 0100) |
 
 **Цикл 1 не закрыт.** Blockers: DF-005 P1 still tasked; v2.1.2 tag + assets after remaining P1 and DoD.
+
+### STAR 0121 — 2026-08-20 YEKT (Architect)
+
+DF-005/006/007 → closed. Fixes in 0109 merge `fc00314`. DF-005 scroll live 0114. Base `1b85b15` (0120). No tag, crate/README 2.1.1, CHANGELOG 2.1.2 Unreleased, host not touched.
+
+§5 after 0121: P0 none; P1 all closed (001/002/004/005/008); P2 003/006/007 closed. Sessions/coverage/parity unchanged (11, 8/8, 0 missing). **Цикл 1 не закрыт** — 2.1.2 Unreleased, tag + assets after CI.
