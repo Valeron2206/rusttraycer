@@ -5,17 +5,21 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [2.1.2] — Unreleased
+## [2.1.2] — 2026-08-20
 
-Draft. Tag, crate bump, and assets after cycle DoD. Protocol 1.9. Storage 0001–0010. Workspace version stays **2.1.1** until the tag.
+Cycle 1 dogfood patch. Protocol 1.9. Storage 0001–0011 (`0011_shells.sql`). Workspace crate version 2.1.2. Tag `v2.1.2` after CI (Chief). `v2.1.1` stays put.
 
 ### Fixed
 
 - `git.commit` accepts `GIT_AUTHOR_*` / `GIT_COMMITTER_*` from the host process env (DF-002). No `git config`.
+- `host.doctor` reports `cli.generic` available without `RUSTTRAYCER_GENERIC_CMD` (DF-003).
+- `shell.resume` restores a PTY after host restart (DF-004).
+- Agents pane `ScrollArea`; search Enter/Escape; stash composer clear + apply-replace (DF-005/006/007).
+- `policy.set` workspace scope sends `workspaceId` xor `agentId` (DF-008).
 
 ### Docs
 
-- Directive v3 + dogfood-log. Cycle-1 parity-watch: Latest desktop is still **desktop-v1.1.10**. `desktop-v1.2.0-rc.1` is recorded, not a `Cxx` trigger.
+- Directive v3 + dogfood-log. Cycle-1 sessions: 11. Coverage 8/8. Parity-watch: Latest desktop still **desktop-v1.1.10**. `desktop-v1.2.0-rc.1` recorded, not a `Cxx` trigger.
 - Cycle-1 hygiene ([c1-hygiene.md](docs/c1-hygiene.md)): `cargo audit` 0 vulnerabilities.
 
 ## [2.1.1] — 2026-08-19
@@ -98,6 +102,8 @@ First production release. Linux x86_64 only ([ADR-001](docs/adr/0001-target-plat
 - `GET /metrics`. GUI picker / N agents in the canvas (host already allows both).
 
 [1.0.0]: https://github.com/Valeron2206/rusttraycer/releases/tag/v1.0.0
+
+[2.1.2]: https://github.com/Valeron2206/rusttraycer/releases/tag/v2.1.2
 
 [2.1.1]: https://github.com/Valeron2206/rusttraycer/releases/tag/v2.1.1
 

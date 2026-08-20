@@ -2,7 +2,7 @@
 
 STAR 0116. Law: [directive-v3.md](directive-v3.md) §4. Checked **2026-08-20 YEKT** on `origin/main` `bd9b061`.
 
-Not a tag. Crate version stays 2.1.1. Assets after DoD.
+Crate version 2.1.2 (STAR 0122). Tag + assets after CI (Chief).
 
 ## cargo audit
 

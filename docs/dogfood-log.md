@@ -309,3 +309,7 @@ Harness: only **cli.generic** available. `cli.claude` / `cli.codex` bins absent 
 DF-005/006/007 → closed. Fixes in 0109 merge `fc00314`. DF-005 scroll live 0114. Base `1b85b15` (0120). No tag, crate/README 2.1.1, CHANGELOG 2.1.2 Unreleased, host not touched.
 
 §5 after 0121: P0 none; P1 all closed (001/002/004/005/008); P2 003/006/007 closed. Sessions/coverage/parity unchanged (11, 8/8, 0 missing). **Цикл 1 не закрыт** — 2.1.2 Unreleased, tag + assets after CI.
+
+### STAR 0122 — 2026-08-20 YEKT (Architect)
+
+Patch bump **2.1.2**. Crate + README install + CHANGELOG dated 2026-08-20. No tag (Chief after APPROVE+CI). Origin not pushed. Host not touched. Base `619dd0d`.

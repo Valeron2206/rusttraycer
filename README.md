@@ -4,11 +4,9 @@ Pure-Rust desktop analog of [Traycer](https://traycer.ai): a local **host** daem
 
 Loop: start host → add a folder → create a Task → create an agent → chat → transcript survives GUI (and host) restart.
 
-**v2.1.1 supported package:** Linux x86_64 (AppImage + `.deb` + tarball). **macOS aarch64** is build-from-source (CI compile). Windows is out of scope (ADR-0006).
+**v2.1.2 supported package:** Linux x86_64 (AppImage + `.deb` + tarball). **macOS aarch64** is build-from-source (CI compile). Windows is out of scope (ADR-0006).
 
-Patch **v2.1.2** is drafted in [CHANGELOG](CHANGELOG.md) (`Unreleased`). Install paths and this line stay on `v2.1.1` until the tag and assets land.
-
-Protocol **1.9**. Storage migrations **0001–0010**.
+Protocol **1.9**. Storage migrations **0001–0011**.
 
 Shipped (parity matrix): host + GUI + CLI; permission ladder (ask default); write/git without secrets in `host.db`; Agent Terminal + Shell + mux (including terminals without a Task, workspace required); artifacts (Markdown + PDF); A2A + loops; search; multi-account labels; mid-turn steer; self-hosted `rt-sync`; PR view; prompt stash; resource monitor / hooks / drag-to-tile; worktree cleanup; nested `AGENTS.md`; user presets; `logs --follow`.
 
@@ -18,13 +16,13 @@ Not a matrix gap (not oos-by-ADR): Intel Mac, signed/notarized macOS, `.rpm`, di
 
 ## Install from GitHub Release
 
-Release assets are a Linux x86_64 `tar.gz`, AppImage, `.deb`, plus `SHA256SUMS` (tag `v2.1.1` → filename with `v`). After the tag is published:
+Release assets are a Linux x86_64 `tar.gz`, AppImage, `.deb`, plus `SHA256SUMS` (tag `v2.1.2` → filename with `v`). After the tag is published:
 
 ```bash
-# download rusttraycer-v2.1.1-linux-x86_64.tar.gz and SHA256SUMS from the GitHub Release, then:
+# download rusttraycer-v2.1.2-linux-x86_64.tar.gz and SHA256SUMS from the GitHub Release, then:
 sha256sum -c SHA256SUMS
-tar -xzf rusttraycer-v2.1.1-linux-x86_64.tar.gz
-sudo install -m 0755 rusttraycer-v2.1.1-linux-x86_64/rt-host rusttraycer-v2.1.1-linux-x86_64/rt-cli rusttraycer-v2.1.1-linux-x86_64/rt-gui /usr/local/bin/
+tar -xzf rusttraycer-v2.1.2-linux-x86_64.tar.gz
+sudo install -m 0755 rusttraycer-v2.1.2-linux-x86_64/rt-host rusttraycer-v2.1.2-linux-x86_64/rt-cli rusttraycer-v2.1.2-linux-x86_64/rt-gui /usr/local/bin/
 ```
 
 Binaries: `rt-host`, `rt-cli`, `rt-gui`. The GUI never starts the host.
@@ -81,7 +79,7 @@ Then in the GUI: add a folder → Task → pick a harness from `host.doctor` (ge
 |---|---|
 | `rt-protocol` | Wire types, RPC, handshake `{major,minor}` (1.0–1.9) |
 | `rt-host` | Daemon: HTTP/WS on `127.0.0.1`, supervisor, git/worktree, PTY/mux, artifacts, A2A, search, steer, accounts, stash, `rt-sync`, `pr.get` |
-| `rt-storage` | `host.db` (rusqlite, migrations 0001–0010) |
+| `rt-storage` | `host.db` (rusqlite, migrations through 0011) |
 | `rt-runtime` | Adapters: `cli.generic`, `cli.claude`, `cli.codex` |
 | `rt-cli` | `start` / `stop` / `doctor` / `status` / `logs --follow` / `reset-db` / `sync` |
 | `rt-gui` | eframe + egui: tasks, harness picker, N agents, ladder, search, PR view, stash, steer, sync URL, user presets, git panel, Stop |
@@ -94,7 +92,7 @@ What shipped vs drafts: [`docs/v2-delta.md`](docs/v2-delta.md). v2.1 close: [`do
 |---|---|
 | [directive-v2.md](docs/directive-v2.md) | Release goals / DoD |
 | [directive-v3.md](docs/directive-v3.md) | Dogfooding + parity-watch (active) |
-| [c1-hygiene.md](docs/c1-hygiene.md) | Cycle 1 audit + dep review (draft v2.1.2) |
+| [c1-hygiene.md](docs/c1-hygiene.md) | Cycle 1 audit + dep review |
 | [parity-matrix.md](docs/parity-matrix.md) | Traycer Desktop → RustTraycer statuses |
 | [adr/0001-target-platforms.md](docs/adr/0001-target-platforms.md) | Linux x86_64 package; macOS aarch64 = source/CI |
 | [adr/0002-agent-cancel.md](docs/adr/0002-agent-cancel.md) | Cancel contract |
