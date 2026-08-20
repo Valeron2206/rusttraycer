@@ -7,10 +7,10 @@ use std::time::Duration;
 
 use futures::{SinkExt, Stream, StreamExt};
 use rt_runtime::{AgentBackend, Availability, HarnessCaps, TurnEvent, TurnRequest};
-use serde_json::{Value, json};
-use tokio_tungstenite::tungstenite::Message as WsMsg;
+use serde_json::{json, Value};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::header::HeaderValue;
+use tokio_tungstenite::tungstenite::Message as WsMsg;
 
 struct GenericBackend;
 
