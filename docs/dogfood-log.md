@@ -1,6 +1,6 @@
 # Dogfood log
 
-Law: [directive-v3.md](directive-v3.md). Cycle 1: **2026-08-19 → 2026-08-26 YEKT**.
+Law: [directive-v3.md](directive-v3.md). Cycle 1: **2026-08-19 → 2026-08-20 YEKT** (closed STAR 0125; planned through 2026-08-26).
 
 Ids: `DF-NNN` (001…). Category: `bug` | `friction` | `idea`. Severity: `P0` | `P1` | `P2`.
 Status: `open` | `tasked` | `closed`. Empty coverage = no live session yet.
@@ -264,7 +264,7 @@ Watch (do not open Cxx until `desktop-v1.2.0` or a changelog heading): Devices &
 
 Parity recheck (same sources as 0110): Latest desktop still **desktop-v1.1.10**. `desktop-v1.2.0-rc.1` still prerelease. **Нет дельты.** No new `Cxx`.
 
-CHANGELOG `[2.1.2] — Unreleased` drafted. README install stays `v2.1.1`. Tag / crate bump / assets after DoD.
+CHANGELOG `[2.1.2] — Unreleased` drafted here. Superseded: crate/README bumped in 0122; tag `v2.1.2` on `3659ba7` with assets (STAR 0125).
 
 ## Cycle 1 DoD — STAR 0120 (2026-08-20 YEKT)
 
@@ -297,19 +297,62 @@ Harness: only **cli.generic** available. `cli.claude` / `cli.codex` bins absent 
 | DoD | Status |
 |---|---|
 | ≥10 sessions + available harness + coverage | **met** (11; generic only) |
-| P0 closed; P1 closed; P2 triaged | **not met** — P0 none. P1: DF-001/002/004/008 closed; **DF-005 still tasked** (0109 fix in tree `fc00314`, not closed here). P2: DF-003 closed; DF-006/007 tasked (triaged). |
+| P0 closed; P1 closed; P2 triaged | **met** (STAR 0121) — P0 none. P1: 001/002/004/005/008 closed. P2: 003/006/007 closed. |
 | parity-matrix 0 missing/partial older than cycle | **met** (0 missing/partial) |
-| CI green + patch/minor with assets | **not met** — 2.1.2 Unreleased ([c1-hygiene.md](c1-hygiene.md)); crate 2.1.1; no tag/assets |
-| README + CHANGELOG match shipped | **holds** — README install still v2.1.1 until tag (lesson 0100) |
+| CI green + patch/minor with assets | **met** (STAR 0125) — `v2.1.2` on `3659ba7`; AppImage + tar.gz + deb + SHA256SUMS |
+| README + CHANGELOG match shipped | **met** (0122 + 0125) — install and notes are v2.1.2 / storage 0001–0011 |
 
-**Цикл 1 не закрыт.** Blockers: DF-005 P1 still tasked; v2.1.2 tag + assets after remaining P1 and DoD.
+Closed STAR 0125. Mid-cycle blockers (DF-005, no tag) no longer apply.
 
 ### STAR 0121 — 2026-08-20 YEKT (Architect)
 
-DF-005/006/007 → closed. Fixes in 0109 merge `fc00314`. DF-005 scroll live 0114. Base `1b85b15` (0120). No tag, crate/README 2.1.1, CHANGELOG 2.1.2 Unreleased, host not touched.
+DF-005/006/007 → closed. Fixes in 0109 merge `fc00314`. DF-005 scroll live 0114. Base `1b85b15` (0120). Host not touched. Later: crate/README 2.1.2 (0122); tag `v2.1.2` (Chief, STAR 0125).
 
-§5 after 0121: P0 none; P1 all closed (001/002/004/005/008); P2 003/006/007 closed. Sessions/coverage/parity unchanged (11, 8/8, 0 missing). **Цикл 1 не закрыт** — 2.1.2 Unreleased, tag + assets after CI.
+§5 after 0121: P0 none; P1 all closed (001/002/004/005/008); P2 003/006/007 closed. Sessions/coverage/parity unchanged (11, 8/8, 0 missing). Cycle closed STAR 0125 after `v2.1.2` tag + assets.
 
 ### STAR 0122 — 2026-08-20 YEKT (Architect)
 
-Patch bump **2.1.2**. Crate + README install + CHANGELOG dated 2026-08-20. No tag (Chief after APPROVE+CI). Origin not pushed. Host not touched. Base `619dd0d`.
+Patch bump **2.1.2**. Crate + README install + CHANGELOG dated 2026-08-20. Host not touched. Base `619dd0d`. Tag `v2.1.2` later on `3659ba7` (Chief; assets on the GitHub Release).
+
+## [CYCLE 1] — closed 2026-08-20 YEKT (STAR 0125)
+
+Law: [directive-v3.md](directive-v3.md) §5 / §6. Base `3659ba7` = origin/main. No crate bump, no tag, no origin push, host not touched.
+
+### Sessions
+
+**11** (list in STAR 0120). Harness: **cli.generic** only (`cli.claude` / `cli.codex` bins absent, logged). Coverage 8/8.
+
+### Findings
+
+Found **8**. Open: 0.
+
+| Severity | Found | Closed | Still open |
+|---|---|---|---|
+| P0 | 0 | 0 | 0 |
+| P1 | 5 (001, 002, 004, 005, 008) | 5 | 0 |
+| P2 | 3 (003, 006, 007) | 3 | 0 |
+
+### Release
+
+- Tag **`v2.1.2`** on `3659ba79644ee065ece558515e764a8174fe7e9e` ([release](https://github.com/Valeron2206/rusttraycer/releases/tag/v2.1.2)).
+- Assets: `rusttraycer-v2.1.2-linux-x86_64.AppImage`, `rusttraycer-v2.1.2-linux-x86_64.tar.gz`, `rusttraycer_2.1.2_amd64.deb`, `SHA256SUMS`.
+- CI `3659ba7` green (check / macos / audit / e2e-master / gui-smoke). Run `32333163724`. Release workflow `32333870238` green.
+- Peels unchanged: `v2.0.0`=`ded044c`, `v2.1.0`=`e151919`, `v2.1.1`=`5802e53`.
+
+### Matrix
+
+0 `missing` / `partial`. Latest desktop still **desktop-v1.1.10**. `desktop-v1.2.0-rc.1` recorded, not a `Cxx` trigger.
+
+### §5 checklist (close)
+
+- [x] ≥10 sessions, available harness used, coverage updated
+- [x] P0 none; all P1 closed; P2 closed (triaged)
+- [x] parity-matrix: 0 `missing`/`partial` older than the cycle
+- [x] CI green; patch `v2.1.2` shipped with assets
+- [x] README and CHANGELOG match shipped 2.1.2 (storage 0001–0011)
+
+### Cycle 2 proposal
+
+**2026-08-21 → 2026-08-27 YEKT** (7 days).
+
+Watch only: do not open `Cxx` until a non-rc `desktop-v1.2.0` or a changelog heading. Same list as 0110 (Devices & Sessions + OTP; communication graph; remote-host / multi-host; monitors & notifying shells; chat-sync v2 / sharing; HuggingFace C66; usage analytics C68; Diffs 1.3.1 in-place edit; `agent.fork@1.0`; MCP/plugins/skills; read-only terminal access).
