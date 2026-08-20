@@ -12,19 +12,22 @@ Status: `open` | `tasked` | `closed`. Empty coverage = no live session yet.
 | DF-001 | bug | P1 | connect/host | 0104 | closed | host 0102 at 32957 / df-0102-home stayed up through 0104 retry; search/stash/metrics reached (RPC as GUI client) |
 | DF-002 | bug | P1 | git.commit | 0102-session1 | closed | resolved: commit works with env identity, no git config. 0105 (`93ed298`) host accepts GIT_AUTHOR_NAME/EMAIL + GIT_COMMITTER_*; retested 0105-int on :40481. First commit 87476362. |
 | DF-003 | friction | P2 | doctor / harness | 0102-session1 | open | `rt-cli doctor` reports `cli.generic` unavailable when `RUSTTRAYCER_GENERIC_CMD` is unset. `agent.create` with `provider=cli.generic` still succeeds. Directive says generic is always available. Reconfirmed 0102-cont: `host.doctor` + `rt-cli doctor` still `available=false` / `RUSTTRAYCER_GENERIC_CMD unset`. |
+| DF-005 | bug | P1 | canvas/agents | 0109 | tasked | left Агенты pane has no ScrollArea; policy «Спросить» and «Создать агента» clipped at 1280x800. Fix in 0109. |
+| DF-006 | bug | P2 | search | 0109 | tasked | Enter only on lost_focus (no-op while focused); results Window has no .open/Escape dismiss. Fix in 0109. |
+| DF-007 | bug | P2 | stash | 0109 | tasked | В stash left composer uncleared; apply_stash appended. Live concat `0109 stash draft`+old body. Fix in 0109. |
 
 ## Coverage — epic → last live session
 
 | Epic / surface | Last session | Harness | Date (YEKT) |
 |---|---|---|---|
-| Ladder ask | — | — | — |
+| Ladder ask | 0109 | n/a (pane clipped) | 2026-08-20 |
 | Ladder Yolo | 0102-session1 | cli.generic | 2026-08-19 |
 | Write + commit | 0102-session1 + 0105-int (commit via env identity) | cli.generic | 2026-08-19 |
 | Terminal + resume | — | — | — |
 | Artifacts | — | — | — |
 | A2A-loop | — | — | — |
 | Sync push/pull | 0102-session1 | cli.generic | 2026-08-19 |
-| Search / steer / stash | 0109 | n/a (live window chrome; input needs computer-use) | 2026-08-20 |
+| Search / steer / stash | 0109 | cli.generic (send blocked) | 2026-08-20 |
 
 ## Sessions
 
@@ -32,9 +35,9 @@ Status: `open` | `tasked` | `closed`. Empty coverage = no live session yet.
 
 0104 retry 2026-08-19 YEKT ~23:30+: host 0102 (`32957`, `df-0102-home`) stayed up. No pixel clicks — no `rt-gui` binary and `cargo run -p rt-gui` not realistic (empty target). Drove same RPCs as GUI: `pid.json` → `GET /health` → handshake(`client=gui`, crate 2.1.1, 1.8 sync + 1.9 search/stash) → `host.ping` → `search.query` → `stash.list`/`stash.add` → `GET /metrics`. Search `q=dogfood` hit 1 open task (0102 dogfood title). Stash empty then 1 draft after add. Metrics: `rusttraycer_up 1`, 1 idle agent, 1 open task (chip would show agents=1, rss/rpc —). DF-001 closed. No new DF. Harness n/a (RPC-only).
 
-0109 2026-08-20 YEKT ~08:10+: live native rt-gui window vs 0104 RPC-only. Built cargo build -p rt-gui (debug). Binary /workspace/rusttraycer/target/debug/rt-gui. First launch panicked on missing libxkbcommon-x11.so (box env, not product); installed the system package and relaunched. DISPLAY=:5 RUSTTRAYCER_HOME=/workspace/df-0102-home. Dispatch bind :40481 went away mid-session; waited, did not spawn. Same hostId 01a01b47-e863-71d3-bd2d-e885cf484d7a returned on :41299 (pid.json, pid 130299). GUI discovered pid.json and connected: handshake, host.ping, host.doctor, task.list at 03:12:44Z. Window title RustTraycer (WM_CLASS rt-gui), 1280x719+0+24, map state viewable, left running (pid 140455).
+0109 2026-08-20 YEKT ~08:10–08:22: live window vs 0104 RPC. Built cargo build -p rt-gui. Binary /workspace/rusttraycer/target/debug/rt-gui. First launch panicked missing libxkbcommon-x11.so (box env). DISPLAY=:5 RUSTTRAYCER_HOME=/workspace/df-0102-home. :40481 died mid-session; waited, did not spawn. Same hostId 01a01b47-e863-71d3-bd2d-e885cf484d7a on :41299 (pid.json 130299). GUI connected via pid.json.
 
-Visible chrome (screenshot only): Задачи selected; Терминалы; Host; search label Поиск hint задача, папка, артефакт; metrics chip метрики 7/--- (GET /metrics: rusttraycer_up 1, 7 idle / 0 running agents); status онлайн green. Open tasks include 0111, 0112, 0108, 0103, 0102. Stash palette and steer on a running cli.generic agent were not exercised (no authorized desktop driver). Ladder ask not set. No running agent (metrics running=0). No product GUI bug. No new DF. DF-001 not reopened. Harness cli.generic unused. Not pushed.
+Live clicks: Search `dogfood` → 4 tasks (0111, 0108, 0103, 0102) + artifact 0112. Metrics chip `метрики 7/—/—` then `10/—/—`; click is no-op (decorative, not a DF). Opened 0108 canvas; toast `not_found: worktree 01a01d24-436c-72e0-8986-cf9bf9f0042a` (host, not UI DF). Yolo banner on (0112 task, not toggled). Stash «Черновики» opened; 2 items (new 0109 draft + 0104 draft). Ladder ask not set — DF-005 pane clip. Create agent unreachable same bug. Provider combo all `(недоступен)`. Send and Ctrl+Enter toast `internal: RUSTTRAYCER_GENERIC_CMD unset` (DF-003 family, no running agent, steer not proven). DF-001 not reopened. Fixes: DF-005/006/007 in this branch. Not pushed.
 
 
 ### Session 1 — 2026-08-19 YEKT — Integration / STAR 0102 (host + worktree + sync backup)

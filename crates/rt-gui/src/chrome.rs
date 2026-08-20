@@ -38,8 +38,12 @@ pub fn show(ctx: &egui::Context, state: &mut AppState) {
                 if resp.changed() {
                     state.mark_search_edited();
                 }
-                if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                    state.submit_search();
+                if resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    if state.search_ran && !state.search_items.is_empty() {
+                        state.activate_search_result(0);
+                    } else {
+                        state.submit_search();
+                    }
                 }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

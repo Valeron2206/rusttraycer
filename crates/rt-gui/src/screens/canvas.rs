@@ -112,7 +112,12 @@ pub fn show(ctx: &egui::Context, state: &mut AppState) {
         .default_width(280.0)
         .min_width(220.0)
         .show(ctx, |ui| {
-            show_agents(ui, state);
+            egui::ScrollArea::vertical()
+                .id_salt("agents_sidebar_scroll")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    show_agents(ui, state);
+                });
         });
 
     let left_width = state.split.left_width;
@@ -374,7 +379,11 @@ fn show_approval_card(ctx: &egui::Context, state: &mut AppState) {
 }
 
 fn show_agents(ui: &mut egui::Ui, state: &mut AppState) {
-    ui.heading("Агенты");
+    egui::ScrollArea::vertical()
+        .id_salt("agents_pane")
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            ui.heading("Агенты");
     ui.add_space(4.0);
     show_workspace_guides(ui, state);
     ui.add_space(6.0);
@@ -525,6 +534,7 @@ fn show_agents(ui: &mut egui::Ui, state: &mut AppState) {
     ui.add_space(8.0);
     ui.separator();
     show_loop(ui, state);
+        });
 }
 
 fn show_inbox(ui: &mut egui::Ui, state: &mut AppState) {
@@ -1514,6 +1524,7 @@ fn show_chat(ui: &mut egui::Ui, state: &mut AppState) {
     ui.add_enabled_ui(can_type, |ui| {
         ui.add(
             egui::TextEdit::multiline(&mut state.composer_text)
+                .id_salt("composer_text")
                 .desired_width(f32::INFINITY)
                 .desired_rows(3)
                 .hint_text("Написать сообщение…"),
@@ -2030,13 +2041,14 @@ pub fn show_stash_palette(ctx: &egui::Context, state: &mut AppState) {
             }
             ui.add(
                 egui::TextEdit::multiline(&mut state.stash_draft)
+                    .id_salt("stash_draft")
                     .desired_width(ui.available_width())
                     .desired_rows(3)
                     .hint_text(crate::stash::STASH_HINT),
             );
             ui.horizontal(|ui| {
                 if ui.button(STASH_ADD).clicked() {
-                    state.add_composer_to_stash();
+                    state.add_stash_draft();
                 }
             });
             ui.separator();

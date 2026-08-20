@@ -62,12 +62,14 @@ fn show_search_results(ctx: &egui::Context, state: &mut AppState) {
     if !state.search_ran && state.search_items.is_empty() {
         return;
     }
+    let mut open = true;
     let mut clicked = None;
     egui::Window::new(SEARCH_LABEL)
         .collapsible(false)
         .resizable(true)
         .default_width(360.0)
         .anchor(egui::Align2::LEFT_TOP, [220.0, 48.0])
+        .open(&mut open)
         .show(ctx, |ui| {
             if state.search_items.is_empty() {
                 ui.weak(SEARCH_EMPTY);
@@ -86,5 +88,8 @@ fn show_search_results(ctx: &egui::Context, state: &mut AppState) {
         });
     if let Some(idx) = clicked {
         state.activate_search_result(idx);
+    }
+    if !open || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        state.dismiss_search();
     }
 }
