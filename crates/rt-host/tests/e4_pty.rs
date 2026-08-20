@@ -7,10 +7,10 @@ use std::time::Duration;
 
 use futures::{SinkExt, Stream, StreamExt};
 use rt_runtime::{AgentBackend, Availability, HarnessCaps, TurnEvent, TurnRequest};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
+use tokio_tungstenite::tungstenite::Message as WsMsg;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::header::HeaderValue;
-use tokio_tungstenite::tungstenite::Message as WsMsg;
 
 struct GenericBackend;
 
@@ -278,13 +278,33 @@ async fn wait_event(ws: &mut TestWs, event: &str) -> Value {
     }
 }
 
-async fn wait_pty_data_containing(ws: &mut TestWs, pty_id: &str, needle: &str) -> Value {
+fn decode_pty_data(v: &Value) -> String {
     use base64::Engine;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
-    loop {
+    let data = v["data"].as_str().unwrap_or("");
+    let raw = base64::engine::general_purpose::STANDARD
+        .decode(data)
+        .unwrap_or_default();
+    String::from_utf8_lossy(&raw).into_owned()
+}
+
+async fn wait_two_pty_marks(
+    ws: &mut TestWs,
+    pty_a: &str,
+    needle_a: &str,
+    pty_b: &str,
+    needle_b: &str,
+) -> (Value, Value) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    let mut got_a = None;
+    let mut got_b = None;
+    while got_a.is_none() || got_b.is_none() {
         let left = deadline.saturating_duration_since(tokio::time::Instant::now());
         if left.is_zero() {
-            panic!("timed out waiting for pty.data {needle} on {pty_id}");
+            panic!(
+                "timed out waiting for pty marks a={needle_a} on {pty_a} b={needle_b} on {pty_b} (got_a={} got_b={})",
+                got_a.is_some(),
+                got_b.is_some()
+            );
         }
         let msg = tokio::time::timeout(left, ws.next())
             .await
@@ -296,17 +316,15 @@ async fn wait_pty_data_containing(ws: &mut TestWs, pty_id: &str, needle: &str) -
         if v["event"] != "pty.data" {
             continue;
         }
-        if v["ptyId"] != pty_id {
-            continue;
+        let raw = decode_pty_data(&v);
+        if got_a.is_none() && v["ptyId"] == pty_a && raw.contains(needle_a) {
+            got_a = Some(v.clone());
         }
-        let data = v["data"].as_str().unwrap_or("");
-        let raw = base64::engine::general_purpose::STANDARD
-            .decode(data)
-            .unwrap_or_default();
-        if String::from_utf8_lossy(&raw).contains(needle) {
-            return v;
+        if got_b.is_none() && v["ptyId"] == pty_b && raw.contains(needle_b) {
+            got_b = Some(v);
         }
     }
+    (got_a.unwrap(), got_b.unwrap())
 }
 
 fn b64(s: &str) -> String {
@@ -510,10 +528,18 @@ async fn two_ptys_data_does_not_mix_pty_id() {
     )
     .await;
 
-    let a = wait_pty_data_containing(&mut ws, &agent_pty, "AGENT-MARK").await;
-    let b = wait_pty_data_containing(&mut ws, &shell_pty, "SHELL-MARK").await;
+    // Sequential wait_pty_data_containing drops the other PTY's frames.
+    // On CI both cats can echo before the first wait returns → flake at :291.
+    let (a, b) =
+        wait_two_pty_marks(&mut ws, &agent_pty, "AGENT-MARK", &shell_pty, "SHELL-MARK").await;
     assert_eq!(a["ptyId"], agent_pty);
     assert_eq!(b["ptyId"], shell_pty);
+    let a_raw = decode_pty_data(&a);
+    let b_raw = decode_pty_data(&b);
+    assert!(a_raw.contains("AGENT-MARK"), "{a_raw:?}");
+    assert!(b_raw.contains("SHELL-MARK"), "{b_raw:?}");
+    assert!(!a_raw.contains("SHELL-MARK"), "agent pty mixed: {a_raw:?}");
+    assert!(!b_raw.contains("AGENT-MARK"), "shell pty mixed: {b_raw:?}");
 
     let _ = tx.send(());
     let _ = join.await;
