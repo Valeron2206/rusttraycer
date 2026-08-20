@@ -1,4 +1,4 @@
-//! In-memory live PTY table. Scrollback dies with the process. No sqlite.
+//! In-memory live PTY table. Scrollback dies with the process. Roster is sqlite (0011).
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -162,45 +162,6 @@ impl Mux {
         g.by_entity
             .remove(&(live.session.kind, live.session.entity_id.clone()));
         Ok(Some(live.session))
-    }
-
-    pub fn list_shells(&self, task_id: &str) -> Result<Vec<PtySession>, String> {
-        self.list_shells_matching(|s| !task_id.is_empty() && s.task_id == task_id)
-    }
-
-    pub fn list_shells_for_workspace(&self, workspace_id: &str) -> Result<Vec<PtySession>, String> {
-        self.list_shells_matching(|s| {
-            s.task_id.is_empty() && !workspace_id.is_empty() && s.workspace_id == workspace_id
-        })
-    }
-
-    fn list_shells_matching(
-        &self,
-        pred: impl Fn(&PtySession) -> bool,
-    ) -> Result<Vec<PtySession>, String> {
-        let mut g = self.lock()?;
-        let mut dead = Vec::new();
-        let mut out = Vec::new();
-        for (id, live) in g.by_id.iter() {
-            if live.session.kind != PtyKind::Shell {
-                continue;
-            }
-            if !live.handle.is_alive() {
-                dead.push(id.clone());
-                continue;
-            }
-            if pred(&live.session) {
-                out.push(live.session.clone());
-            }
-        }
-        for id in dead {
-            if let Some(live) = g.by_id.remove(&id) {
-                g.by_entity
-                    .remove(&(live.session.kind, live.session.entity_id));
-            }
-        }
-        out.sort_by(|a, b| a.pty_id.cmp(&b.pty_id));
-        Ok(out)
     }
 }
 

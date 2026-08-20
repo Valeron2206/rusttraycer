@@ -79,6 +79,7 @@ pub const METHOD_GIT_PUSH: &str = "git.push";
 pub const METHOD_SHELL_CREATE: &str = "shell.create";
 pub const METHOD_SHELL_LIST: &str = "shell.list";
 pub const METHOD_SHELL_CLOSE: &str = "shell.close";
+pub const METHOD_SHELL_RESUME: &str = "shell.resume";
 pub const METHOD_PTY_OPEN: &str = "pty.open";
 pub const METHOD_PTY_WRITE: &str = "pty.write";
 pub const METHOD_PTY_RESIZE: &str = "pty.resize";
@@ -169,6 +170,7 @@ pub const TRADABLE_METHODS: &[&str] = &[
     METHOD_SHELL_CREATE,
     METHOD_SHELL_LIST,
     METHOD_SHELL_CLOSE,
+    METHOD_SHELL_RESUME,
     METHOD_PTY_OPEN,
     METHOD_PTY_WRITE,
     METHOD_PTY_RESIZE,
@@ -234,7 +236,7 @@ pub fn host_method_version() -> MethodVersion {
 /// `worktree.gc`, `agent.create`, `shell.create`, `account.list`,
 /// `account.create`, `agent.steer`, `pr.get`, `stash.list`/`stash.add`/
 /// `stash.delete`, `sync.push`/`sync.pull`, and `preset.create`/
-/// `preset.update`/`preset.delete` are 1.9; all other
+/// `preset.update`/`preset.delete` are 1.9; `shell.resume` is 1.10; all other
 /// tradable methods stay 1.0 (`HOST_METHOD_MINOR` is not bumped).
 /// Unknown names return `None`.
 pub fn method_version(name: &str) -> Option<MethodVersion> {
@@ -249,6 +251,10 @@ pub fn method_version(name: &str) -> Option<MethodVersion> {
         | METHOD_GIT_UNSTAGE | METHOD_GIT_RESTORE | METHOD_GIT_COMMIT | METHOD_GIT_PUSH => {
             Some(MethodVersion { major: 1, minor: 2 })
         }
+        METHOD_SHELL_RESUME => Some(MethodVersion {
+            major: 1,
+            minor: 10,
+        }),
         METHOD_SHELL_LIST | METHOD_SHELL_CLOSE | METHOD_PTY_OPEN | METHOD_PTY_WRITE
         | METHOD_PTY_RESIZE | METHOD_PTY_CLOSE => Some(MethodVersion { major: 1, minor: 3 }),
         METHOD_ARTIFACT_CREATE
@@ -659,6 +665,14 @@ pub struct ShellCreateOk {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ShellListItem {
+    pub shell_id: String,
+    pub pty_id: String,
+    pub cwd: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShellResumeOk {
     pub shell_id: String,
     pub pty_id: String,
     pub cwd: String,
@@ -1542,7 +1556,7 @@ mod tests {
         assert_eq!(error_codes::CONFLICT, "conflict");
         assert_eq!(error_codes::NOT_SUPPORTED, "not_supported");
         assert_eq!(error_codes::AUTH_REQUIRED, "auth_required");
-        assert_eq!(TRADABLE_METHODS.len(), 83);
+        assert_eq!(TRADABLE_METHODS.len(), 84);
         assert!(TRADABLE_METHODS.contains(&METHOD_POLICY_GET));
         assert!(TRADABLE_METHODS.contains(&METHOD_POLICY_SET));
         assert!(TRADABLE_METHODS.contains(&METHOD_APPROVAL_RESPOND));
@@ -1680,6 +1694,13 @@ mod tests {
         assert_eq!(
             method_version(METHOD_SHELL_CLOSE),
             Some(MethodVersion { major: 1, minor: 3 })
+        );
+        assert_eq!(
+            method_version(METHOD_SHELL_RESUME),
+            Some(MethodVersion {
+                major: 1,
+                minor: 10
+            })
         );
         assert_eq!(
             method_version(METHOD_PTY_OPEN),
@@ -2071,6 +2092,19 @@ mod tests {
         assert_eq!(v["shellId"], "s1");
         assert_eq!(v["ptyId"], "p2");
 
+        let resumed = ShellResumeOk {
+            shell_id: "s1".into(),
+            pty_id: "p3".into(),
+            cwd: "/ws".into(),
+        };
+        let v = serde_json::to_value(&resumed).unwrap();
+        assert_eq!(v["shellId"], "s1");
+        assert_eq!(v["ptyId"], "p3");
+        assert_eq!(v["cwd"], "/ws");
+        assert!(v.get("shell_id").is_none());
+        let resumed2: ShellResumeOk = serde_json::from_value(v).unwrap();
+        assert_eq!(resumed2.pty_id, "p3");
+
         let agent = Agent {
             id: "a".into(),
             task_id: "t1".into(),
@@ -2349,7 +2383,7 @@ mod tests {
         );
         assert!(TRADABLE_METHODS.contains(&METHOD_AGENT_SWITCH));
         assert!(TRADABLE_METHODS.contains(&METHOD_PREFS_GET));
-        assert_eq!(TRADABLE_METHODS.len(), 83);
+        assert_eq!(TRADABLE_METHODS.len(), 84);
 
         let sw: AgentSwitchParams = serde_json::from_str(
             r#"{"agentId":"a1","provider":"cli.codex","model":"o3","effort":"high","fast":false}"#,
@@ -2456,7 +2490,7 @@ mod tests {
             method_version(METHOD_HOST_PING),
             Some(MethodVersion { major: 1, minor: 0 })
         );
-        assert_eq!(TRADABLE_METHODS.len(), 83);
+        assert_eq!(TRADABLE_METHODS.len(), 84);
         assert!(TRADABLE_METHODS.contains(&METHOD_WORKSPACE_GUIDES_GET));
         assert!(TRADABLE_METHODS.contains(&METHOD_AGENT_UPDATE));
         assert!(!TRADABLE_METHODS
@@ -2594,7 +2628,7 @@ mod tests {
             Some(MethodVersion { major: 1, minor: 0 })
         );
         assert_eq!(host_method_version(), MethodVersion { major: 1, minor: 0 });
-        assert_eq!(TRADABLE_METHODS.len(), 83);
+        assert_eq!(TRADABLE_METHODS.len(), 84);
         assert!(TRADABLE_METHODS.contains(&METHOD_SYNC_EXPORT));
         assert!(TRADABLE_METHODS.contains(&METHOD_SYNC_IMPORT));
         assert_eq!(EXPORT_KIND, "rusttraycer.export");
@@ -3012,7 +3046,7 @@ mod tests {
             method_version(METHOD_PRESET_LIST),
             Some(MethodVersion { major: 1, minor: 7 })
         );
-        assert_eq!(TRADABLE_METHODS.len(), 83);
+        assert_eq!(TRADABLE_METHODS.len(), 84);
 
         let push: SyncPushParams = serde_json::from_str(
             r#"{"peerUrl":"http://127.0.0.1:9","taskIds":["t1"],"workspaceId":"w1"}"#,
