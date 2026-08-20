@@ -16,13 +16,13 @@ Status: `open` | `tasked` | `closed`. Empty coverage = no live session yet.
 | DF-005 | bug | P1 | canvas/agents | 0109 | tasked | left Агенты pane has no ScrollArea; policy «Спросить» and «Создать агента» clipped at 1280x800. Fix in 0109. |
 | DF-006 | bug | P2 | search | 0109 | tasked | Enter only on lost_focus (no-op while focused); results Window has no .open/Escape dismiss. Fix in 0109. |
 | DF-007 | bug | P2 | stash | 0109 | tasked | В stash left composer uncleared; apply_stash appended. Live concat `0109 stash draft`+old body. Fix in 0109. |
-| DF-008 | bug | P1 | ladder/policy.set | 0114 | tasked | policy.set echoed host scope=workspace without workspaceId; «Спросить» rejected. Fix in 0114. |
+| DF-008 | bug | P1 | ladder/policy.set | 0114 | closed | xor fix `380b042` / merge `f77fc57`. Live retest 0114 on :45927 — workspace scope sends workspaceId xor agentId, ok. No commit this retest. |
 
 ## Coverage — epic → last live session
 
 | Epic / surface | Last session | Harness | Date (YEKT) |
 |---|---|---|---|
-| Ladder ask | 0118 CLI RPC (write+approval) + 0114 GUI xor fix (DF-008) | cli.generic | 2026-08-20 |
+| Ladder ask | 0118 CLI RPC (write+approval) + 0114 GUI xor live :45927 (DF-008 closed) | cli.generic | 2026-08-20 |
 | Ladder Yolo | 0112 | cli.generic | 2026-08-20 |
 | Write + commit | 0112 (env identity) | cli.generic | 2026-08-20 |
 | Terminal + resume | 0119 create+write+restart+list+resume+write (DF-004 closed) | cli.generic | 2026-08-20 |
@@ -43,6 +43,7 @@ Live clicks: Search `dogfood` → 4 tasks (0111, 0108, 0103, 0102) + artifact 01
 
 0114 2026-08-20 YEKT ~08:33–08:38: rebuilt rt-gui from 0109 tip, relaunched GUI only (pid 205402), host :41299 untouched. Scroll fix works. Ask click failed DF-008. Send+Ctrl+Enter DF-003. Yolo banner observed, not toggled. No new STAR for 005/006/007. DF-001 not reopened.
 0114 Reviewer rejected dual agentId+workspaceId on policy.set; workspace scope now sends workspaceId xor agentId.
+0114 live retest 2026-08-20 YEKT on host :45927 (xor ok). No commit. DF-008 closed.
 
 ### Session 1 — 2026-08-19 YEKT — Integration / STAR 0102 (host + worktree + sync backup)
 
@@ -264,3 +265,41 @@ Watch (do not open Cxx until `desktop-v1.2.0` or a changelog heading): Devices &
 Parity recheck (same sources as 0110): Latest desktop still **desktop-v1.1.10**. `desktop-v1.2.0-rc.1` still prerelease. **Нет дельты.** No new `Cxx`.
 
 CHANGELOG `[2.1.2] — Unreleased` drafted. README install stays `v2.1.1`. Tag / crate bump / assets after DoD.
+
+## Cycle 1 DoD — STAR 0120 (2026-08-20 YEKT)
+
+Law: [directive-v3.md](directive-v3.md) §5. Base `d0a6b15`. No tag, no origin push, host not touched.
+
+### Session count
+
+Counted (through host, own Task/worktree or live GUI): **11**
+
+| # | Session | Kind |
+|---|---|---|
+| 1 | 0102 session 1 | host + worktree + sync.push |
+| 2 | 0105-int | git.commit env identity |
+| 3 | 0108 | terminal (resume later 0119) |
+| 4 | 0109 | live GUI window |
+| 5 | 0111 | A2A-loop + sync.pull |
+| 6 | 0112 | artifacts + yolo |
+| 7 | 0114 | GUI ask / xor (live :45927) |
+| 8 | 0115 | live PTY |
+| 9 | 0117 | live A2A-loop |
+| 10 | 0118 | ladder ask (write under approval) |
+| 11 | 0119 | PTY persist + resume (0119b = retest, not extra) |
+
+Not counted: 0104 attempted (blocked); 0104 retry (RPC-only, no Task/wt); 0102 continuation (same session); 0119b (retest); 0110/0116 (docs).
+
+Harness: only **cli.generic** available. `cli.claude` / `cli.codex` bins absent (logged). Coverage table: all 8 rows filled.
+
+### §5 checklist
+
+| DoD | Status |
+|---|---|
+| ≥10 sessions + available harness + coverage | **met** (11; generic only) |
+| P0 closed; P1 closed; P2 triaged | **not met** — P0 none. P1: DF-001/002/004/008 closed; **DF-005 still tasked** (0109 fix in tree `fc00314`, not closed here). P2: DF-003 closed; DF-006/007 tasked (triaged). |
+| parity-matrix 0 missing/partial older than cycle | **met** (0 missing/partial) |
+| CI green + patch/minor with assets | **not met** — 2.1.2 Unreleased ([c1-hygiene.md](c1-hygiene.md)); crate 2.1.1; no tag/assets |
+| README + CHANGELOG match shipped | **holds** — README install still v2.1.1 until tag (lesson 0100) |
+
+**Цикл 1 не закрыт.** Blockers: DF-005 P1 still tasked; v2.1.2 tag + assets after remaining P1 and DoD.
