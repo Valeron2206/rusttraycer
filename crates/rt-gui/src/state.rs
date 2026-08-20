@@ -4260,6 +4260,21 @@ impl AppState {
         self.search_edited_at = None;
     }
 
+    pub fn search_popup_open(&self) -> bool {
+        self.search_ran || !self.search_items.is_empty()
+    }
+
+    pub fn on_search_enter(&mut self) {
+        if self.search_ran && !self.search_items.is_empty() {
+            self.activate_search_result(0);
+            return;
+        }
+        self.submit_search();
+        if !self.search_items.is_empty() {
+            self.activate_search_result(0);
+        }
+    }
+
     pub fn request_worktree_gc(&mut self) {
         if !self.can_rpc() {
             return;
@@ -4803,12 +4818,15 @@ impl AppState {
     }
 
     pub fn add_composer_to_stash(&mut self) {
-        let body = if self.stash_draft.trim().is_empty() {
-            self.composer_text.clone()
+        self.add_stash_body(&self.composer_text.clone());
+    }
+
+    pub fn add_stash_draft(&mut self) {
+        if self.stash_draft.trim().is_empty() {
+            self.add_composer_to_stash();
         } else {
-            self.stash_draft.clone()
-        };
-        self.add_stash_body(&body);
+            self.add_stash_body(&self.stash_draft.clone());
+        }
     }
 
     pub fn add_stash_body(&mut self, body: &str) {
@@ -10080,6 +10098,46 @@ mod tests {
         });
         state.apply_stash_to_composer("s1");
         assert_eq!(state.composer_text, "draft");
+    }
+
+    #[test]
+    fn search_enter_activates_first_result_and_dismisses() {
+        let mut state = AppState::new();
+        state.demo = true;
+        state.search_q = "dogfood".into();
+        state.search_ran = true;
+        state.search_items.push(SearchItem {
+            kind: "task".into(),
+            id: "t-0108".into(),
+            title: "0108".into(),
+            hint: String::new(),
+        });
+        state.tasks.push(TaskStub {
+            id: "t-0108".into(),
+            title: "0108".into(),
+            status: TaskStatus::Open,
+            updated_at: String::new(),
+        });
+        assert!(state.search_popup_open());
+        state.on_search_enter();
+        assert_eq!(state.selected_task_id.as_deref(), Some("t-0108"));
+        assert_eq!(state.screen, Screen::Canvas);
+        assert!(!state.search_popup_open());
+        assert_eq!(state.search_q, "dogfood");
+    }
+
+    #[test]
+    fn stash_add_clears_composer_apply_does_not_concat() {
+        let mut state = AppState::new();
+        state.composer_text = "0109 stash draft".into();
+        state.stash_items.push(StashItem {
+            id: "s1".into(),
+            body: "0109 stash draft".into(),
+        });
+        state.composer_text = "0109 dogfood: sleep 20 then reply ok".into();
+        state.apply_stash_to_composer("s1");
+        assert_eq!(state.composer_text, "0109 stash draft");
+        assert!(!state.composer_text.contains("0109 stash draft0109 dogfood"));
     }
 
     #[test]

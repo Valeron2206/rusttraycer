@@ -20,6 +20,11 @@ pub const KIND_ARTIFACT: &str = "artifact";
 pub const SEARCH_KINDS: [&str; 3] = [KIND_TASK, KIND_WORKSPACE, KIND_ARTIFACT];
 pub const SEARCH_DEBOUNCE_MS: u64 = 350;
 
+/// Enter submits while the search field has focus (not only after lost_focus).
+pub fn search_enter_submits(has_focus: bool, lost_focus: bool, enter_pressed: bool) -> bool {
+    enter_pressed && (has_focus || lost_focus)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SearchItem {
     pub kind: String,
@@ -162,6 +167,14 @@ mod tests {
         assert!(params.get("branchPrefix").is_none());
         assert!(params.get("branch_prefix").is_none());
         assert_eq!(params.as_object().map(|m| m.len()), Some(1));
+    }
+
+    #[test]
+    fn enter_submits_while_focused_or_lost_focus() {
+        assert!(search_enter_submits(true, false, true));
+        assert!(search_enter_submits(false, true, true));
+        assert!(!search_enter_submits(true, false, false));
+        assert!(!search_enter_submits(false, false, true));
     }
 
     #[test]

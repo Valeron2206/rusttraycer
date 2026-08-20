@@ -1,6 +1,6 @@
 use crate::ladder::YOLO_BANNER;
 use crate::metrics::METRICS_LABEL;
-use crate::search_ux::{SEARCH_HINT, SEARCH_LABEL};
+use crate::search_ux::{search_enter_submits, SEARCH_HINT, SEARCH_LABEL};
 use crate::state::{AppState, HostStatus, Screen};
 
 pub fn show(ctx: &egui::Context, state: &mut AppState) {
@@ -38,12 +38,12 @@ pub fn show(ctx: &egui::Context, state: &mut AppState) {
                 if resp.changed() {
                     state.mark_search_edited();
                 }
-                if resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                    if state.search_ran && !state.search_items.is_empty() {
-                        state.activate_search_result(0);
-                    } else {
-                        state.submit_search();
-                    }
+                let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                if search_enter_submits(resp.has_focus(), resp.lost_focus(), enter) {
+                    state.on_search_enter();
+                }
+                if ui.input(|i| i.key_pressed(egui::Key::Escape)) && state.search_popup_open() {
+                    state.dismiss_search();
                 }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

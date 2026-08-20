@@ -379,11 +379,7 @@ fn show_approval_card(ctx: &egui::Context, state: &mut AppState) {
 }
 
 fn show_agents(ui: &mut egui::Ui, state: &mut AppState) {
-    egui::ScrollArea::vertical()
-        .id_salt("agents_pane")
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            ui.heading("Агенты");
+    ui.heading("Агенты");
     ui.add_space(4.0);
     show_workspace_guides(ui, state);
     ui.add_space(6.0);
@@ -534,7 +530,6 @@ fn show_agents(ui: &mut egui::Ui, state: &mut AppState) {
     ui.add_space(8.0);
     ui.separator();
     show_loop(ui, state);
-        });
 }
 
 fn show_inbox(ui: &mut egui::Ui, state: &mut AppState) {
@@ -2081,5 +2076,44 @@ pub fn show_stash_palette(ctx: &egui::Context, state: &mut AppState) {
     }
     if !open {
         state.close_stash_palette();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::AppState;
+
+    #[test]
+    fn agents_pane_scrolls_policy_and_create_together() {
+        let src = include_str!("canvas.rs");
+        let side = src.find("canvas_sidebar").expect("agents side panel");
+        let rest = &src[side..];
+        let scroll_at = rest
+            .find("ScrollArea::vertical()")
+            .expect("agents column must use ScrollArea::vertical");
+        let call_at = rest.find("show_agents(").expect("show_agents in sidebar");
+        assert!(
+            scroll_at < call_at,
+            "show_agents must be wrapped in the sidebar ScrollArea"
+        );
+        let start = src.find("fn show_agents(").expect("show_agents helper");
+        let body = &src[start..];
+        let end = body.find("fn show_inbox").expect("inbox follows agents");
+        let agents = &body[..end];
+        assert!(
+            agents.contains("show_policy_controls"),
+            "policy controls live in agents pane"
+        );
+        assert!(
+            agents.contains("Создать агента"),
+            "create-agent lives in agents pane"
+        );
+        let state = AppState::new();
+        assert!(
+            !state.can_create_agent(),
+            "create-agent is gated on rpc/task/provider, not a clip flag"
+        );
+        assert_eq!(POLICY_LABEL, "Разрешения");
     }
 }
