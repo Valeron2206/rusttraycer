@@ -6,6 +6,8 @@ Loop: start host → add a folder → create a Task → create an agent → chat
 
 **v2.1.1 supported package:** Linux x86_64 (AppImage + `.deb` + tarball). **macOS aarch64** is build-from-source (CI compile). Windows is out of scope (ADR-0006).
 
+Patch **v2.1.2** is drafted in [CHANGELOG](CHANGELOG.md) (`Unreleased`). Install paths and this line stay on `v2.1.1` until the tag and assets land.
+
 Protocol **1.9**. Storage migrations **0001–0010**.
 
 Shipped (parity matrix): host + GUI + CLI; permission ladder (ask default); write/git without secrets in `host.db`; Agent Terminal + Shell + mux (including terminals without a Task, workspace required); artifacts (Markdown + PDF); A2A + loops; search; multi-account labels; mid-turn steer; self-hosted `rt-sync`; PR view; prompt stash; resource monitor / hooks / drag-to-tile; worktree cleanup; nested `AGENTS.md`; user presets; `logs --follow`.
@@ -92,6 +94,7 @@ What shipped vs drafts: [`docs/v2-delta.md`](docs/v2-delta.md). v2.1 close: [`do
 |---|---|
 | [directive-v2.md](docs/directive-v2.md) | Release goals / DoD |
 | [directive-v3.md](docs/directive-v3.md) | Dogfooding + parity-watch (active) |
+| [c1-hygiene.md](docs/c1-hygiene.md) | Cycle 1 audit + dep review (draft v2.1.2) |
 | [parity-matrix.md](docs/parity-matrix.md) | Traycer Desktop → RustTraycer statuses |
 | [adr/0001-target-platforms.md](docs/adr/0001-target-platforms.md) | Linux x86_64 package; macOS aarch64 = source/CI |
 | [adr/0002-agent-cancel.md](docs/adr/0002-agent-cancel.md) | Cancel contract |
