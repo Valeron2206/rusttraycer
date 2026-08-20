@@ -638,6 +638,13 @@ async fn dispatch_method(
                 .ok_or_else(|| HostError::InvalidParams("shellId is required".into()))?;
             svc.shell_close(shell_id)
         }
+        "shell.resume" => {
+            let shell_id = params
+                .get("shellId")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| HostError::InvalidParams("shellId is required".into()))?;
+            svc.shell_resume(shell_id)
+        }
         "artifact.create" => {
             let p: rt_protocol::ArtifactCreateParams = serde_json::from_value(params)
                 .map_err(|e| HostError::InvalidParams(e.to_string()))?;

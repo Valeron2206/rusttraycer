@@ -2390,18 +2390,39 @@ rusttraycer_tasks{{status="archived"}} {archived}
         let (program, args) = pty::shell_pty_command();
         let shell_id = rt_storage::new_id();
         let bound_task = task_id.unwrap_or("");
-        let session = self.spawn_into_mux(&SpawnInto {
+        let cwd_s = cwd.to_string_lossy().into_owned();
+        self.store.shell_insert(rt_storage::ShellInsert {
+            id: &shell_id,
+            workspace_id,
+            task_id,
+            cwd: &cwd_s,
+            cols,
+            rows,
+            last_pty_id: "",
+        })?;
+        let session = match self.spawn_into_mux(&SpawnInto {
             kind: PtyKind::Shell,
             entity_id: &shell_id,
             task_id: bound_task,
             workspace_id,
-            cwd: cwd.to_string_lossy().as_ref(),
+            cwd: &cwd_s,
             program,
             args,
             cols,
             rows,
             env: Vec::new(),
-        })?;
+        }) {
+            Ok(session) => session,
+            Err(e) => {
+                if let Err(del) = self.store.shell_delete(&shell_id) {
+                    tracing::warn!(error = %del, "shell.create rollback");
+                }
+                return Err(e);
+            }
+        };
+        if let Err(e) = self.store.shell_set_last_pty_id(&shell_id, &session.pty_id) {
+            tracing::warn!(error = %e, "shell.create last_pty_id");
+        }
         Ok(serde_json::to_value(rt_protocol::ShellCreateOk {
             shell_id,
             pty_id: session.pty_id,
@@ -2416,20 +2437,18 @@ rusttraycer_tasks{{status="archived"}} {archived}
     ) -> Result<serde_json::Value> {
         let task_id = task_id.filter(|s| !s.is_empty());
         let workspace_id = workspace_id.filter(|s| !s.is_empty());
-        let items = match (task_id, workspace_id) {
+        let rows = match (task_id, workspace_id) {
             (Some(task_id), _) => {
                 if self.store.task_get(task_id)?.is_none() {
                     return Err(HostError::NotFound(format!("task {task_id}")));
                 }
-                self.mux.list_shells(task_id).map_err(HostError::Internal)?
+                self.store.shell_list_for_task(task_id)?
             }
             (None, Some(workspace_id)) => {
                 if self.store.workspace_get(workspace_id)?.is_none() {
                     return Err(HostError::NotFound(format!("workspace {workspace_id}")));
                 }
-                self.mux
-                    .list_shells_for_workspace(workspace_id)
-                    .map_err(HostError::Internal)?
+                self.store.shell_list_for_workspace(workspace_id)?
             }
             (None, None) => {
                 return Err(HostError::InvalidParams(
@@ -2437,26 +2456,87 @@ rusttraycer_tasks{{status="archived"}} {archived}
                 ));
             }
         };
-        let items: Vec<rt_protocol::ShellListItem> = items
+        let items: Vec<rt_protocol::ShellListItem> = rows
             .into_iter()
-            .map(|s| rt_protocol::ShellListItem {
-                shell_id: s.entity_id,
-                pty_id: s.pty_id,
-                cwd: s.cwd,
+            .map(|row| {
+                let pty_id = self
+                    .mux
+                    .live_for_entity(PtyKind::Shell, &row.id)
+                    .ok()
+                    .flatten()
+                    .map(|s| s.pty_id)
+                    .unwrap_or(row.last_pty_id);
+                rt_protocol::ShellListItem {
+                    shell_id: row.id,
+                    pty_id,
+                    cwd: row.cwd,
+                }
             })
             .collect();
         Ok(serde_json::json!({ "items": items }))
     }
 
     pub fn shell_close(&self, shell_id: &str) -> Result<serde_json::Value> {
+        let stored = self.store.shell_get(shell_id)?;
         let session = self
             .mux
             .kill_entity(PtyKind::Shell, shell_id)
             .map_err(HostError::Internal)?;
-        if session.is_none() {
+        if stored.is_none() && session.is_none() {
             return Err(HostError::NotFound(format!("shell {shell_id}")));
         }
+        if stored.is_some() {
+            if let Err(e) = self.store.shell_delete(shell_id) {
+                if e.code() != "not_found" {
+                    return Err(e.into());
+                }
+            }
+        }
         Ok(serde_json::json!({}))
+    }
+
+    pub fn shell_resume(&self, shell_id: &str) -> Result<serde_json::Value> {
+        if shell_id.is_empty() {
+            return Err(HostError::InvalidParams("shellId is required".into()));
+        }
+        let row = self
+            .store
+            .shell_get(shell_id)?
+            .ok_or_else(|| HostError::NotFound(format!("shell {shell_id}")))?;
+        if let Some(live) = self
+            .mux
+            .live_for_entity(PtyKind::Shell, shell_id)
+            .map_err(HostError::Internal)?
+        {
+            return Ok(serde_json::to_value(rt_protocol::ShellResumeOk {
+                shell_id: row.id,
+                pty_id: live.pty_id,
+                cwd: live.cwd,
+            })?);
+        }
+        Self::check_pty_size(row.cols, row.rows)?;
+        let (program, args) = pty::shell_pty_command();
+        let bound_task = row.task_id.as_deref().unwrap_or("");
+        let session = self.spawn_into_mux(&SpawnInto {
+            kind: PtyKind::Shell,
+            entity_id: &row.id,
+            task_id: bound_task,
+            workspace_id: &row.workspace_id,
+            cwd: &row.cwd,
+            program,
+            args,
+            cols: row.cols,
+            rows: row.rows,
+            env: Vec::new(),
+        })?;
+        if let Err(e) = self.store.shell_set_last_pty_id(&row.id, &session.pty_id) {
+            tracing::warn!(error = %e, "shell.resume last_pty_id");
+        }
+        Ok(serde_json::to_value(rt_protocol::ShellResumeOk {
+            shell_id: row.id,
+            pty_id: session.pty_id,
+            cwd: session.cwd,
+        })?)
     }
 
     pub fn artifact_create(

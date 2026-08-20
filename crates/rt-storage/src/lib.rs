@@ -17,6 +17,7 @@ const MIGRATION_0007: &str = include_str!("../migrations/0007_model_ux.sql");
 const MIGRATION_0008: &str = include_str!("../migrations/0008_workspace.sql");
 const MIGRATION_0009: &str = include_str!("../migrations/0009_v21.sql");
 const MIGRATION_0010: &str = include_str!("../migrations/0010_c37.sql");
+const MIGRATION_0011: &str = include_str!("../migrations/0011_shells.sql");
 
 /// RFC3339 UTC timestamp (millis, Z suffix).
 pub fn now_rfc3339() -> String {
@@ -277,6 +278,32 @@ pub struct PromptStash {
 
 pub const STASH_IMAGE_PATH_PREFIX: &str = "rt-image-path:";
 pub const MAX_STASH_BODY_BYTES: usize = 65536;
+
+/// Durable user-shell roster (`shell.create`). Live PTY is mux-only.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Shell {
+    pub id: String,
+    pub workspace_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    pub cwd: String,
+    pub cols: u16,
+    pub rows: u16,
+    pub last_pty_id: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ShellInsert<'a> {
+    pub id: &'a str,
+    pub workspace_id: &'a str,
+    pub task_id: Option<&'a str>,
+    pub cwd: &'a str,
+    pub cols: u16,
+    pub rows: u16,
+    pub last_pty_id: &'a str,
+}
 pub const MAX_PRESET_NAME_CHARS: usize = 200;
 
 /// User-defined task preset. Built-ins live in the host guides module, not here.
@@ -686,6 +713,7 @@ impl Store {
                 conn.execute_batch(MIGRATION_0008)?;
                 conn.execute_batch(MIGRATION_0009)?;
                 conn.execute_batch(MIGRATION_0010)?;
+                conn.execute_batch(MIGRATION_0011)?;
                 Ok(())
             }
             Some("2") => {
@@ -697,6 +725,7 @@ impl Store {
                 conn.execute_batch(MIGRATION_0008)?;
                 conn.execute_batch(MIGRATION_0009)?;
                 conn.execute_batch(MIGRATION_0010)?;
+                conn.execute_batch(MIGRATION_0011)?;
                 Ok(())
             }
             Some("3") => {
@@ -707,6 +736,7 @@ impl Store {
                 conn.execute_batch(MIGRATION_0008)?;
                 conn.execute_batch(MIGRATION_0009)?;
                 conn.execute_batch(MIGRATION_0010)?;
+                conn.execute_batch(MIGRATION_0011)?;
                 Ok(())
             }
             Some("4") => {
@@ -716,6 +746,7 @@ impl Store {
                 conn.execute_batch(MIGRATION_0008)?;
                 conn.execute_batch(MIGRATION_0009)?;
                 conn.execute_batch(MIGRATION_0010)?;
+                conn.execute_batch(MIGRATION_0011)?;
                 Ok(())
             }
             Some("5") => {
@@ -724,6 +755,7 @@ impl Store {
                 conn.execute_batch(MIGRATION_0008)?;
                 conn.execute_batch(MIGRATION_0009)?;
                 conn.execute_batch(MIGRATION_0010)?;
+                conn.execute_batch(MIGRATION_0011)?;
                 Ok(())
             }
             Some("6") => {
@@ -731,24 +763,32 @@ impl Store {
                 conn.execute_batch(MIGRATION_0008)?;
                 conn.execute_batch(MIGRATION_0009)?;
                 conn.execute_batch(MIGRATION_0010)?;
+                conn.execute_batch(MIGRATION_0011)?;
                 Ok(())
             }
             Some("7") => {
                 conn.execute_batch(MIGRATION_0008)?;
                 conn.execute_batch(MIGRATION_0009)?;
                 conn.execute_batch(MIGRATION_0010)?;
+                conn.execute_batch(MIGRATION_0011)?;
                 Ok(())
             }
             Some("8") => {
                 conn.execute_batch(MIGRATION_0009)?;
                 conn.execute_batch(MIGRATION_0010)?;
+                conn.execute_batch(MIGRATION_0011)?;
                 Ok(())
             }
             Some("9") => {
                 conn.execute_batch(MIGRATION_0010)?;
+                conn.execute_batch(MIGRATION_0011)?;
                 Ok(())
             }
-            Some("10") => Ok(()),
+            Some("10") => {
+                conn.execute_batch(MIGRATION_0011)?;
+                Ok(())
+            }
+            Some("11") => Ok(()),
             Some(other) => Err(StorageError::UnsupportedSchema(other.to_string())),
             None => {
                 conn.execute_batch(MIGRATION_0001)?;
@@ -761,6 +801,7 @@ impl Store {
                 conn.execute_batch(MIGRATION_0008)?;
                 conn.execute_batch(MIGRATION_0009)?;
                 conn.execute_batch(MIGRATION_0010)?;
+                conn.execute_batch(MIGRATION_0011)?;
                 Ok(())
             }
         }
@@ -1413,6 +1454,109 @@ impl Store {
         let n = {
             let conn = self.lock()?;
             conn.execute("DELETE FROM prompt_stash WHERE id = ?1", [id])?
+        };
+        if n == 0 {
+            return Err(StorageError::NotFound);
+        }
+        Ok(())
+    }
+
+    pub fn shell_insert(&self, input: ShellInsert<'_>) -> Result<Shell> {
+        if input.id.is_empty() {
+            return Err(StorageError::InvalidParams("shell id is required".into()));
+        }
+        if input.workspace_id.is_empty() {
+            return Err(StorageError::InvalidParams(
+                "workspaceId is required".into(),
+            ));
+        }
+        let created_at = now_rfc3339();
+        let task_id = input.task_id.filter(|s| !s.is_empty());
+        {
+            let conn = self.lock()?;
+            conn.execute(
+                "INSERT INTO shells (id, workspace_id, task_id, cwd, cols, rows, last_pty_id, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    input.id,
+                    input.workspace_id,
+                    task_id,
+                    input.cwd,
+                    i64::from(input.cols),
+                    i64::from(input.rows),
+                    input.last_pty_id,
+                    created_at
+                ],
+            )?;
+        }
+        Ok(Shell {
+            id: input.id.to_string(),
+            workspace_id: input.workspace_id.to_string(),
+            task_id: task_id.map(str::to_string),
+            cwd: input.cwd.to_string(),
+            cols: input.cols,
+            rows: input.rows,
+            last_pty_id: input.last_pty_id.to_string(),
+            created_at,
+        })
+    }
+
+    pub fn shell_get(&self, id: &str) -> Result<Option<Shell>> {
+        let conn = self.lock()?;
+        conn.query_row(
+            "SELECT id, workspace_id, task_id, cwd, cols, rows, last_pty_id, created_at
+             FROM shells WHERE id = ?1",
+            [id],
+            map_shell_row,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    pub fn shell_list_for_task(&self, task_id: &str) -> Result<Vec<Shell>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, workspace_id, task_id, cwd, cols, rows, last_pty_id, created_at
+             FROM shells WHERE task_id = ?1
+             ORDER BY created_at ASC, id ASC",
+        )?;
+        let rows = stmt.query_map([task_id], map_shell_row)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    /// Workspace-bound shells created without a task (C37).
+    pub fn shell_list_for_workspace(&self, workspace_id: &str) -> Result<Vec<Shell>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, workspace_id, task_id, cwd, cols, rows, last_pty_id, created_at
+             FROM shells
+             WHERE workspace_id = ?1 AND (task_id IS NULL OR task_id = '')
+             ORDER BY created_at ASC, id ASC",
+        )?;
+        let rows = stmt.query_map([workspace_id], map_shell_row)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    pub fn shell_set_last_pty_id(&self, id: &str, last_pty_id: &str) -> Result<()> {
+        let n = {
+            let conn = self.lock()?;
+            conn.execute(
+                "UPDATE shells SET last_pty_id = ?2 WHERE id = ?1",
+                params![id, last_pty_id],
+            )?
+        };
+        if n == 0 {
+            return Err(StorageError::NotFound);
+        }
+        Ok(())
+    }
+
+    pub fn shell_delete(&self, id: &str) -> Result<()> {
+        let n = {
+            let conn = self.lock()?;
+            conn.execute("DELETE FROM shells WHERE id = ?1", [id])?
         };
         if n == 0 {
             return Err(StorageError::NotFound);
@@ -3391,6 +3535,21 @@ fn agent_from_tuple(t: AgentTuple) -> Result<Agent> {
     })
 }
 
+fn map_shell_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Shell> {
+    let cols: i64 = r.get(4)?;
+    let rows: i64 = r.get(5)?;
+    Ok(Shell {
+        id: r.get(0)?,
+        workspace_id: r.get(1)?,
+        task_id: r.get(2)?,
+        cwd: r.get(3)?,
+        cols: u16::try_from(cols).unwrap_or(80),
+        rows: u16::try_from(rows).unwrap_or(24),
+        last_pty_id: r.get(6)?,
+        created_at: r.get(7)?,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3532,7 +3691,7 @@ mod tests {
         {
             let conn = store.lock().unwrap();
             conn.execute(
-                "UPDATE schema_meta SET value = '11' WHERE key = 'schema'",
+                "UPDATE schema_meta SET value = '12' WHERE key = 'schema'",
                 [],
             )
             .unwrap();
@@ -3541,7 +3700,7 @@ mod tests {
         let err = Store::open(&db).unwrap_err();
         assert_eq!(err.code(), "internal");
         match &err {
-            StorageError::UnsupportedSchema(v) => assert_eq!(v, "11"),
+            StorageError::UnsupportedSchema(v) => assert_eq!(v, "12"),
             other => panic!("expected UnsupportedSchema, got {other:?}"),
         }
     }
@@ -3610,7 +3769,7 @@ mod tests {
     }
 
     #[test]
-    fn fresh_db_is_schema_ten() {
+    fn fresh_db_is_schema_eleven() {
         let (_tmp, store) = open_store();
         let conn = rusqlite::Connection::open(store.path()).unwrap();
         let schema: String = conn
@@ -3620,7 +3779,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(schema, "10");
+        assert_eq!(schema, "11");
         let n: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'artifacts'",
@@ -3674,6 +3833,7 @@ mod tests {
             "user_presets",
             "prompt_stash",
             "worktree_settings",
+            "shells",
         ] {
             let n: i64 = conn
                 .query_row(
@@ -3727,7 +3887,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(schema, "10");
+        assert_eq!(schema, "11");
         let n: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'worktrees'",
@@ -4059,7 +4219,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(schema, "10");
+        assert_eq!(schema, "11");
         let n: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'policies'",
@@ -4068,14 +4228,22 @@ mod tests {
             )
             .unwrap();
         assert_eq!(n, 1);
-        let n: i64 = conn
+        let shells: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('shells', 'pty_sessions')",
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'shells'",
                 [],
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(n, 0);
+        assert_eq!(shells, 1);
+        let pty: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'pty_sessions'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(pty, 0);
     }
 
     #[test]
@@ -4271,15 +4439,23 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(schema, "10");
-        let n: i64 = conn
+        assert_eq!(schema, "11");
+        let shells: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('shells', 'pty_sessions')",
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'shells'",
                 [],
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(n, 0);
+        assert_eq!(shells, 1);
+        let pty: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'pty_sessions'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(pty, 0);
     }
 
     #[test]
@@ -4374,7 +4550,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(schema, "10");
+        assert_eq!(schema, "11");
         let n: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'artifacts'",
@@ -4617,7 +4793,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(schema, "10");
+        assert_eq!(schema, "11");
         let n: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'loops'",
@@ -4771,7 +4947,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(schema, "10");
+        assert_eq!(schema, "11");
         let n: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'model_profiles'",
@@ -4933,7 +5109,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(schema, "10");
+        assert_eq!(schema, "11");
         let role_col: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM pragma_table_info('agents') WHERE name = 'role'",
@@ -5068,7 +5244,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(schema, "10");
+        assert_eq!(schema, "11");
         let n: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'worktree_settings'",
@@ -5137,7 +5313,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(schema, "10");
+        assert_eq!(schema, "11");
         let nullable: i64 = conn
             .query_row(
                 "SELECT \"notnull\" FROM pragma_table_info('agents') WHERE name = 'task_id'",
@@ -5154,6 +5330,118 @@ mod tests {
             )
             .unwrap();
         assert_eq!(ws_col, 1);
+    }
+
+    #[test]
+    fn migration_0011_matches_contract() {
+        assert!(MIGRATION_0011.contains("CREATE TABLE shells"));
+        assert!(MIGRATION_0011.contains("workspace_id  TEXT NOT NULL REFERENCES workspaces(id)"));
+        assert!(MIGRATION_0011.contains("task_id       TEXT REFERENCES tasks(id)"));
+        assert!(MIGRATION_0011
+            .contains("INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('schema', '11')"));
+        assert!(!MIGRATION_0011.contains("ON DELETE CASCADE"));
+        assert!(!MIGRATION_0011.contains("CASCADE"));
+        let low = MIGRATION_0011.to_ascii_lowercase();
+        assert!(!low.contains("token"));
+        assert!(!low.contains("secret"));
+        assert!(!low.contains("api_key"));
+        assert!(!MIGRATION_0010.contains("CREATE TABLE shells"));
+        assert!(!MIGRATION_0010.contains("schema', '11'"));
+    }
+
+    #[test]
+    fn migrate_from_ten_applies_0011() {
+        let dir = tempdir().unwrap();
+        let db = dir.path().join("host.db");
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute_batch(MIGRATION_0001).unwrap();
+            conn.execute_batch(MIGRATION_0002).unwrap();
+            conn.execute_batch(MIGRATION_0003).unwrap();
+            conn.execute_batch(MIGRATION_0004).unwrap();
+            conn.execute_batch(MIGRATION_0005).unwrap();
+            conn.execute_batch(MIGRATION_0006).unwrap();
+            conn.execute_batch(MIGRATION_0007).unwrap();
+            conn.execute_batch(MIGRATION_0008).unwrap();
+            conn.execute_batch(MIGRATION_0009).unwrap();
+            conn.execute_batch(MIGRATION_0010).unwrap();
+            let schema: String = conn
+                .query_row(
+                    "SELECT value FROM schema_meta WHERE key = 'schema'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(schema, "10");
+        }
+        let store = Store::open(&db).unwrap();
+        let conn = rusqlite::Connection::open(store.path()).unwrap();
+        let schema: String = conn
+            .query_row(
+                "SELECT value FROM schema_meta WHERE key = 'schema'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(schema, "11");
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'shells'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn shell_insert_list_delete_roundtrip() {
+        let (_tmp, store) = open_store();
+        store.host_insert_if_absent(&new_id(), "h").unwrap();
+        let ws = store.workspace_add("/sh", "sh").unwrap();
+        let task = store.task_create("t", &ws.id).unwrap();
+        let sid = new_id();
+        store
+            .shell_insert(ShellInsert {
+                id: &sid,
+                workspace_id: &ws.id,
+                task_id: Some(&task.id),
+                cwd: "/sh",
+                cols: 80,
+                rows: 24,
+                last_pty_id: "pty-old",
+            })
+            .unwrap();
+        let got = store.shell_get(&sid).unwrap().expect("row");
+        assert_eq!(got.workspace_id, ws.id);
+        assert_eq!(got.task_id.as_deref(), Some(task.id.as_str()));
+        assert_eq!(got.last_pty_id, "pty-old");
+        assert_eq!(store.shell_list_for_task(&task.id).unwrap().len(), 1);
+        assert!(store.shell_list_for_workspace(&ws.id).unwrap().is_empty());
+        let free = new_id();
+        store
+            .shell_insert(ShellInsert {
+                id: &free,
+                workspace_id: &ws.id,
+                task_id: None,
+                cwd: "/sh",
+                cols: 120,
+                rows: 40,
+                last_pty_id: "",
+            })
+            .unwrap();
+        assert_eq!(store.shell_list_for_workspace(&ws.id).unwrap().len(), 1);
+        store.shell_set_last_pty_id(&free, "pty-new").unwrap();
+        assert_eq!(
+            store.shell_get(&free).unwrap().unwrap().last_pty_id,
+            "pty-new"
+        );
+        store.shell_delete(&sid).unwrap();
+        assert!(store.shell_get(&sid).unwrap().is_none());
+        assert_eq!(
+            store.shell_delete("missing").unwrap_err().code(),
+            "not_found"
+        );
     }
 
     #[test]

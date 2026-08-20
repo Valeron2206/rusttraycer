@@ -1,4 +1,4 @@
-//! Per-method {major,minor} negotiation. Existing methods stay 1.0; policy.* is 1.1; write/git mutate is 1.2; shell/pty are 1.3; artifacts/comments/clear_transcript are 1.4; a2a/loop are 1.5; agent.switch/profile.*/prefs.get are 1.6; workspace.guides/settings.guide/preset.list/agent.update are 1.7; sync.export/import are 1.8; artifact.export/search.query/worktree.gc/agent.create/shell.create/account.list/account.create/agent.steer/pr.get/stash.list/stash.add/stash.delete/sync.push/sync.pull/preset.create/preset.update/preset.delete are 1.9.
+//! Per-method {major,minor} negotiation. Existing methods stay 1.0; policy.* is 1.1; write/git mutate is 1.2; shell/pty are 1.3; artifacts/comments/clear_transcript are 1.4; a2a/loop are 1.5; agent.switch/profile.*/prefs.get are 1.6; workspace.guides/settings.guide/preset.list/agent.update are 1.7; sync.export/import are 1.8; artifact.export/search.query/worktree.gc/agent.create/shell.create/account.list/account.create/agent.steer/pr.get/stash.list/stash.add/stash.delete/sync.push/sync.pull/preset.create/preset.update/preset.delete are 1.9; shell.resume is 1.10.
 
 use std::collections::BTreeMap;
 
@@ -516,6 +516,47 @@ mod tests {
         assert_eq!(acc["agent.create"], MethodVersion { major: 1, minor: 9 });
         assert_eq!(acc["shell.create"], MethodVersion { major: 1, minor: 9 });
         assert_eq!(acc["sync.export"], MethodVersion { major: 1, minor: 8 });
+    }
+
+    #[test]
+    fn shell_resume_accepted_at_1_10_absent_on_older_client() {
+        let mut client = BTreeMap::new();
+        client.insert(
+            "shell.resume".into(),
+            MethodVersion {
+                major: 1,
+                minor: 10,
+            },
+        );
+        client.insert("shell.create".into(), MethodVersion { major: 1, minor: 9 });
+        client.insert("shell.list".into(), MethodVersion { major: 1, minor: 3 });
+        client.insert("pty.write".into(), MethodVersion { major: 1, minor: 3 });
+        let (acc, rej) = negotiate(&client);
+        assert!(rej.is_empty(), "{rej:?}");
+        assert_eq!(
+            acc["shell.resume"],
+            MethodVersion {
+                major: 1,
+                minor: 10
+            }
+        );
+        assert_eq!(acc["shell.create"], MethodVersion { major: 1, minor: 9 });
+        assert_eq!(
+            host_methods()["shell.resume"],
+            MethodVersion {
+                major: 1,
+                minor: 10
+            }
+        );
+
+        let mut older = BTreeMap::new();
+        older.insert("shell.create".into(), MethodVersion { major: 1, minor: 3 });
+        older.insert("shell.list".into(), MethodVersion { major: 1, minor: 3 });
+        older.insert("pty.write".into(), MethodVersion { major: 1, minor: 3 });
+        let (acc, rej) = negotiate(&older);
+        assert!(rej.is_empty(), "{rej:?}");
+        assert_eq!(acc["shell.create"], MethodVersion { major: 1, minor: 9 });
+        assert!(!acc.contains_key("shell.resume"));
     }
 
     #[test]

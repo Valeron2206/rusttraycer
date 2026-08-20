@@ -147,6 +147,15 @@ fn f3_methods() -> Value {
     m
 }
 
+fn f10_methods() -> Value {
+    let mut m = f3_methods();
+    if let Value::Object(map) = &mut m {
+        map.insert("shell.create".into(), json!({ "major": 1, "minor": 9 }));
+        map.insert("shell.resume".into(), json!({ "major": 1, "minor": 10 }));
+    }
+    m
+}
+
 fn pty_backends() -> HashMap<String, Arc<dyn AgentBackend>> {
     let mut m: HashMap<String, Arc<dyn AgentBackend>> = HashMap::new();
     m.insert("cli.generic".into(), Arc::new(GenericBackend));
@@ -708,39 +717,74 @@ async fn restart_chat_messages_live_pty_dead_terminal_resumes() {
 }
 
 #[tokio::test]
-async fn shell_absent_from_list_after_restart_new_create_is_new_pty() {
+async fn shell_list_survives_restart_and_resume_reopens_pty() {
+    // DF-004: persist user shells (shell.create). After restart, list is not
+    // empty; ptyId is last-known when the mux is dead; shell.resume {shellId}
+    // mints a new live ptyId; pty.write then succeeds.
     set_pty_cmd();
     let dir = tempfile::tempdir().unwrap();
     let data = dir.path().to_path_buf();
-    let (old_pty, ws_id, task_id) = {
+    let (old_pty, shell_id, ws_id) = {
         let (addr, tx, join, _) = rt_host::spawn_test_host(&data, Some(pty_backends()))
             .await
             .unwrap();
         let base = format!("http://{addr}");
         let client = reqwest::Client::new();
-        let (token, _) = handshake(&client, &base, f3_methods()).await;
+        let (token, hs) = handshake(&client, &base, f10_methods()).await;
+        assert_eq!(hs["ok"]["accepted"]["shell.resume"]["minor"], 10, "{hs}");
+        assert_eq!(hs["ok"]["accepted"]["shell.create"]["minor"], 9, "{hs}");
         let proj = data.join("proj");
-        let (ws_id, task_id) = seed_task(&client, &base, &token, &proj).await;
+        std::fs::create_dir_all(&proj).unwrap();
+        let ws = rpc(
+            &client,
+            &base,
+            Some(&token),
+            "workspace.add",
+            json!({ "path": proj.to_str().unwrap() }),
+        )
+        .await;
+        let ws_id = rpc_id(&ws, "id");
         let sh = rpc(
             &client,
             &base,
             Some(&token),
             "shell.create",
             json!({
-                "taskId": task_id,
                 "workspaceId": ws_id,
                 "cols": 80,
                 "rows": 24
             }),
         )
         .await;
+        assert!(sh.get("error").is_none(), "{sh}");
+        let shell_id = rpc_id(&sh, "shellId");
         let old_pty = rpc_id(&sh, "ptyId");
+        let again = rpc(
+            &client,
+            &base,
+            Some(&token),
+            "shell.resume",
+            json!({ "shellId": shell_id }),
+        )
+        .await;
+        assert!(again.get("error").is_none(), "{again}");
+        assert_eq!(again["ok"]["shellId"], shell_id);
+        assert_eq!(again["ok"]["ptyId"], old_pty, "live resume is idempotent");
+        let wrote = rpc(
+            &client,
+            &base,
+            Some(&token),
+            "pty.write",
+            json!({ "ptyId": old_pty, "data": b64("echo DF004\n") }),
+        )
+        .await;
+        assert!(wrote.get("error").is_none(), "{wrote}");
         let listed = rpc(
             &client,
             &base,
             Some(&token),
             "shell.list",
-            json!({ "taskId": task_id }),
+            json!({ "workspaceId": ws_id }),
         )
         .await;
         assert_eq!(
@@ -748,9 +792,10 @@ async fn shell_absent_from_list_after_restart_new_create_is_new_pty() {
             1,
             "{listed}"
         );
+        assert_eq!(listed["ok"]["items"][0]["shellId"], shell_id);
         let _ = tx.send(());
         let _ = join.await;
-        (old_pty, ws_id, task_id)
+        (old_pty, shell_id, ws_id)
     };
 
     let (addr, tx, join, _) = rt_host::spawn_test_host(&data, Some(pty_backends()))
@@ -758,35 +803,68 @@ async fn shell_absent_from_list_after_restart_new_create_is_new_pty() {
         .unwrap();
     let base = format!("http://{addr}");
     let client = reqwest::Client::new();
-    let (token, _) = handshake(&client, &base, f3_methods()).await;
+    let (token, _) = handshake(&client, &base, f10_methods()).await;
     let listed = rpc(
         &client,
         &base,
         Some(&token),
         "shell.list",
-        json!({ "taskId": task_id }),
+        json!({ "workspaceId": ws_id }),
     )
     .await;
-    assert_eq!(
-        listed["ok"]["items"].as_array().unwrap().len(),
-        0,
-        "shells are live-only: {listed}"
+    let items = listed["ok"]["items"].as_array().unwrap();
+    assert!(
+        !items.is_empty(),
+        "shell.list must survive restart: {listed}"
     );
-    let sh = rpc(
+    assert_eq!(items[0]["shellId"], shell_id, "{listed}");
+    assert_eq!(
+        items[0]["ptyId"], old_pty,
+        "after restart ptyId is last-known (dead mux): {listed}",
+    );
+    let unknown = rpc(
         &client,
         &base,
         Some(&token),
-        "shell.create",
-        json!({
-            "taskId": task_id,
-            "workspaceId": ws_id,
-            "cols": 80,
-            "rows": 24
-        }),
+        "shell.resume",
+        json!({ "shellId": "no-such-shell" }),
     )
     .await;
-    let new_pty = rpc_id(&sh, "ptyId");
+    assert_eq!(unknown["error"]["code"], "not_found", "{unknown}");
+    let resumed = rpc(
+        &client,
+        &base,
+        Some(&token),
+        "shell.resume",
+        json!({ "shellId": shell_id }),
+    )
+    .await;
+    assert!(resumed.get("error").is_none(), "{resumed}");
+    assert_eq!(resumed["ok"]["shellId"], shell_id);
+    let new_pty = rpc_id(&resumed, "ptyId");
     assert_ne!(new_pty, old_pty);
+    assert!(!new_pty.is_empty());
+    let wrote = rpc(
+        &client,
+        &base,
+        Some(&token),
+        "pty.write",
+        json!({ "ptyId": new_pty, "data": b64("echo DF004\n") }),
+    )
+    .await;
+    assert!(
+        wrote.get("error").is_none(),
+        "pty.write after resume must not be pty_dead: {wrote}"
+    );
+    let dead = rpc(
+        &client,
+        &base,
+        Some(&token),
+        "pty.write",
+        json!({ "ptyId": old_pty, "data": b64("x\n") }),
+    )
+    .await;
+    assert_eq!(dead["error"]["code"], "pty_dead", "{dead}");
 
     let _ = tx.send(());
     let _ = join.await;
