@@ -12,7 +12,7 @@ Status: `open` | `tasked` | `closed`. Empty coverage = no live session yet.
 | DF-001 | bug | P1 | connect/host | 0104 | closed | host 0102 at 32957 / df-0102-home stayed up through 0104 retry; search/stash/metrics reached (RPC as GUI client) |
 | DF-002 | bug | P1 | git.commit | 0102-session1 | closed | resolved: commit works with env identity, no git config. 0105 (`93ed298`) host accepts GIT_AUTHOR_NAME/EMAIL + GIT_COMMITTER_*; retested 0105-int on :40481. First commit 87476362. |
 | DF-003 | friction | P2 | doctor / harness | 0102-session1 | open | `rt-cli doctor` reports `cli.generic` unavailable when `RUSTTRAYCER_GENERIC_CMD` is unset. `agent.create` with `provider=cli.generic` still succeeds. Directive says generic is always available. Reconfirmed 0102-cont and 0112 `host.doctor`: still `available=false` / `RUSTTRAYCER_GENERIC_CMD unset`. |
-| DF-004 | friction | P1 | terminal/resume | 0108 / 0119 | closed | resolved 0113 (`d9024cf`): after rebuild+restart, `shell.list` by taskId still shows the shell; `shell.resume` returns new ptyId; `pty.write` works. 0119 retest :39001→:36965. |
+| DF-004 | friction | P1 | terminal/resume | 0108 / 0119 | closed | resolved 0113 (`d9024cf`): list+resume+write after restart. 0119 :39001→:36965; 0119b on 141087b :34009→:45927. |
 | DF-005 | bug | P1 | canvas/agents | 0109 | tasked | left Агенты pane has no ScrollArea; policy «Спросить» and «Создать агента» clipped at 1280x800. Fix in 0109. |
 | DF-006 | bug | P2 | search | 0109 | tasked | Enter only on lost_focus (no-op while focused); results Window has no .open/Escape dismiss. Fix in 0109. |
 | DF-007 | bug | P2 | stash | 0109 | tasked | В stash left composer uncleared; apply_stash appended. Live concat `0109 stash draft`+old body. Fix in 0109. |
@@ -175,6 +175,22 @@ Passed:
 
 DF-004 closed (live retest). DF-003 not retested as new. 0108/0111/0115/0117/0118 tips not moved.
 
+
+
+### Session 0119 — 2026-08-20 YEKT — Integration / STAR 0119 (PTY resume on 141087b)
+
+Harness: **cli.generic**. Handshake `client=cli`, `shell.resume` 1.10. Rebuilt `rt-host` from `/workspace/wt-phase0` (0115 merge `141087b` ancestor). `rt-cli stop`+`start` same `df-0102-home` / hostId `01a01b47-e863-71d3-bd2d-e885cf484d7a`. Bind after rebuild `:34009`. Mid-session restart `:45927`. 0118 tip `defbded` not moved. No origin.
+
+Passed:
+- session checkout `task/0119-v3-df-session-resume` at `141087b`
+- create `shellId` `01a01d45-9833-7832-9620-b15050669c97` `ptyId` `01a01d45-9833-7832-9620-b16f5472ca5c`
+- write `echo df-0119b-pre` → `/tmp/df-0119b-pre.marker`
+- restart same home
+- `shell.list` by taskId still has the shell
+- `shell.resume` new `ptyId` `01a01d45-faf2-7df3-8051-92d99ed2d77f`
+- write `echo df-0119b-post` → `/tmp/df-0119b-post.marker`
+
+DF-004 closed. One sha.
 
 ## Parity-watch — cycle 1
 
