@@ -27,8 +27,8 @@ Status: `open` | `tasked` | `closed`. Empty coverage = no live session yet.
 | Write + commit | 0112 (env identity) | cli.generic | 2026-08-20 |
 | Terminal + resume | 0119 create+write+restart+list+resume+write (DF-004 closed) | cli.generic | 2026-08-20 |
 | Artifacts | 0112 | cli.generic | 2026-08-20 |
-| A2A-loop | 0117 (loop.start maxIterations=2 stopped error GENERIC_CMD; not a new DF) | cli.generic | 2026-08-20 |
-| Sync push/pull | 0102-session1 + 0108 (push this task) | cli.generic | 2026-08-20 |
+| A2A-loop | 0111 + 0117 (loop stopped GENERIC_CMD; not a new DF) | cli.generic | 2026-08-20 |
+| Sync push/pull | 0102-session1 + 0108 push + 0111 pull | cli.generic | 2026-08-20 |
 | Search / steer / stash | 0114 | cli.generic (steer attempted, DF-003) | 2026-08-20 |
 
 ## Sessions
@@ -211,6 +211,18 @@ Passed:
 No origin push. No `git config`. 0108/0111/0115/0117 tips not moved.
 
 **Новых находок нет.** DF-003 toast on send, as specified.
+
+### Session 0111 — 2026-08-20 YEKT — Integration / STAR 0111 (A2A-loop + sync.pull)
+
+Harness: **cli.generic**. Handshake `client=cli` crate 2.1.1. No `git config`. No origin push. Host not restarted by 0111 (0108 rebound `:41299`).
+
+Host `http://127.0.0.1:41299` (`df-0102-home`, pid 130299). Product worktree `rt/a066c672`. Session checkout `task/0111-v3-df-session-a2a-sync`.
+
+A2A: `agent.create` parent generic + child generic (`parentId`) + child claude (`parentId`) ok. `a2a.deliver` generic -> `no_inbox` (caps). `a2a.deliver` claude -> ok (inbox without claude binary). `loop.start` maxIterations=1 on generic pair returned loopId; `loop.get` immediately `status=stopped` `reason=error` iteration=0 turns=0 (host.log: loop send failed `RUSTTRAYCER_GENERIC_CMD unset`). Not infinite. maxIterations not reached because generic turn cannot start (DF-003). Not `not_supported`. Did not fake a loop.
+
+Sync: `sync.pull` all-tasks from peer `:38805` -> `conflict` (0108 task already on this host). `sync.pull` `taskIds` of a new peer-only task -> ok `tasks=1` agents=0. Secret not sent (env not required).
+
+**Новых находок нет.** DF-003 still open (reconfirmed in A2A-loop). No origin / no git config.
 
 
 ## Parity-watch — cycle 1
