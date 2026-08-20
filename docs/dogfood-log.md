@@ -26,7 +26,7 @@ Status: `open` | `tasked` | `closed`. Empty coverage = no live session yet.
 | Write + commit | 0112 (env identity) | cli.generic | 2026-08-20 |
 | Terminal + resume | 0115 (live PTY create+input; resume 0113 tasked, live retest 0119) | cli.generic | 2026-08-20 |
 | Artifacts | 0112 | cli.generic | 2026-08-20 |
-| A2A-loop | — | — | — |
+| A2A-loop | 0117 (loop.start maxIterations=2 stopped error GENERIC_CMD; not a new DF) | cli.generic | 2026-08-20 |
 | Sync push/pull | 0102-session1 + 0108 (push this task) | cli.generic | 2026-08-20 |
 | Search / steer / stash | 0109 | cli.generic (send blocked) | 2026-08-20 |
 
@@ -141,6 +141,23 @@ Passed:
 Resume not attempted (0113 not merged). No host restart. 0111 worktree/branch not touched. No origin push.
 
 **Новых находок нет.** DF-003 still open (reconfirmed). DF-004 (0108 P1 terminal/resume) is not on this base and was not re-opened here.
+
+### Session 0117 — 2026-08-20 YEKT — Integration / STAR 0117 (live A2A-loop)
+
+Harness: **cli.generic**. Handshake `client=cli` crate 2.1.1. Host reused `df-0102-home` (`hostId` `01a01b47-e863-71d3-bd2d-e885cf484d7a`) on `:41299`. This session did not stop or restart the host. Resume not attempted.
+
+Passed:
+- `workspace.add` `/workspace/wt-0117-v3-df-session-a2a` (session checkout `task/0117-v3-df-session-a2a` at `bd9b061`)
+- `task.create` `STAR 0117 live A2A-loop` (`01a01d3e-3d72-7761-8f99-d0af51a7fe3a`)
+- `agent.create` parent generic `01a01d3e-3d73-7803-8449-4001af31a9d9` + child generic `parentId` + child claude `parentId`
+- `worktree.ensure` product branch `rt/af31a9d9`
+- `a2a.deliver` parent→generic → `no_inbox` (caps; known)
+- `a2a.deliver` parent→claude → ok `messageId` `01a01d3e-b8d1-70b0-85c4-d5449504c224`
+- `loop.start` maxIterations=2 `loopId` `01a01d3e-b8d3-7970-be65-4a6e15e4ca08`; `loop.get` immediately `status=stopped` `reason=error` iteration=0 turns=0. host.log: `loop send failed ... RUSTTRAYCER_GENERIC_CMD unset`. Not infinite. Limit not reached. Not faked.
+
+Log written via `files.write`. `git.stage` + `git.commit` via RPC (env identity). No origin push. No `git config`. 0108 `62357c6` / 0111 `79a1c67` / 0115 `5661824` not moved.
+
+**Новых находок нет.** Loop died on GENERIC_CMD (DF-003), not a new DF per 0117 STAR. DF-003 still open.
 
 
 ## Parity-watch — cycle 1
