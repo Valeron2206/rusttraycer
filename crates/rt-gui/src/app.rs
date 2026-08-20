@@ -59,15 +59,21 @@ impl eframe::App for RtGuiApp {
 }
 
 fn show_search_results(ctx: &egui::Context, state: &mut AppState) {
-    if !state.search_ran && state.search_items.is_empty() {
+    if !state.search_popup_open() {
         return;
     }
+    if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        state.dismiss_search();
+        return;
+    }
+    let mut open = true;
     let mut clicked = None;
-    egui::Window::new(SEARCH_LABEL)
+    let inner = egui::Window::new(SEARCH_LABEL)
         .collapsible(false)
         .resizable(true)
         .default_width(360.0)
         .anchor(egui::Align2::LEFT_TOP, [220.0, 48.0])
+        .open(&mut open)
         .show(ctx, |ui| {
             if state.search_items.is_empty() {
                 ui.weak(SEARCH_EMPTY);
@@ -86,5 +92,24 @@ fn show_search_results(ctx: &egui::Context, state: &mut AppState) {
         });
     if let Some(idx) = clicked {
         state.activate_search_result(idx);
+        return;
+    }
+    if !open {
+        state.dismiss_search();
+        return;
+    }
+    let Some(inner) = inner else {
+        return;
+    };
+    let pointer = ctx.input(|i| i.pointer.interact_pos());
+    let pressed = ctx.input(|i| i.pointer.primary_pressed());
+    if pressed {
+        if let Some(pos) = pointer {
+            let on_popup = inner.response.rect.contains(pos);
+            let on_chrome = pos.y <= 40.0;
+            if !on_popup && !on_chrome {
+                state.dismiss_search();
+            }
+        }
     }
 }

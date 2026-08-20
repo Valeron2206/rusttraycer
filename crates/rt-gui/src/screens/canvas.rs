@@ -112,7 +112,12 @@ pub fn show(ctx: &egui::Context, state: &mut AppState) {
         .default_width(280.0)
         .min_width(220.0)
         .show(ctx, |ui| {
-            show_agents(ui, state);
+            egui::ScrollArea::vertical()
+                .id_salt("agents_sidebar_scroll")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    show_agents(ui, state);
+                });
         });
 
     let left_width = state.split.left_width;
@@ -1514,6 +1519,7 @@ fn show_chat(ui: &mut egui::Ui, state: &mut AppState) {
     ui.add_enabled_ui(can_type, |ui| {
         ui.add(
             egui::TextEdit::multiline(&mut state.composer_text)
+                .id_salt("composer_text")
                 .desired_width(f32::INFINITY)
                 .desired_rows(3)
                 .hint_text("Написать сообщение…"),
@@ -2030,13 +2036,14 @@ pub fn show_stash_palette(ctx: &egui::Context, state: &mut AppState) {
             }
             ui.add(
                 egui::TextEdit::multiline(&mut state.stash_draft)
+                    .id_salt("stash_draft")
                     .desired_width(ui.available_width())
                     .desired_rows(3)
                     .hint_text(crate::stash::STASH_HINT),
             );
             ui.horizontal(|ui| {
                 if ui.button(STASH_ADD).clicked() {
-                    state.add_composer_to_stash();
+                    state.add_stash_draft();
                 }
             });
             ui.separator();
@@ -2069,5 +2076,44 @@ pub fn show_stash_palette(ctx: &egui::Context, state: &mut AppState) {
     }
     if !open {
         state.close_stash_palette();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::AppState;
+
+    #[test]
+    fn agents_pane_scrolls_policy_and_create_together() {
+        let src = include_str!("canvas.rs");
+        let side = src.find("canvas_sidebar").expect("agents side panel");
+        let rest = &src[side..];
+        let scroll_at = rest
+            .find("ScrollArea::vertical()")
+            .expect("agents column must use ScrollArea::vertical");
+        let call_at = rest.find("show_agents(").expect("show_agents in sidebar");
+        assert!(
+            scroll_at < call_at,
+            "show_agents must be wrapped in the sidebar ScrollArea"
+        );
+        let start = src.find("fn show_agents(").expect("show_agents helper");
+        let body = &src[start..];
+        let end = body.find("fn show_inbox").expect("inbox follows agents");
+        let agents = &body[..end];
+        assert!(
+            agents.contains("show_policy_controls"),
+            "policy controls live in agents pane"
+        );
+        assert!(
+            agents.contains("Создать агента"),
+            "create-agent lives in agents pane"
+        );
+        let state = AppState::new();
+        assert!(
+            !state.can_create_agent(),
+            "create-agent is gated on rpc/task/provider, not a clip flag"
+        );
+        assert_eq!(POLICY_LABEL, "Разрешения");
     }
 }

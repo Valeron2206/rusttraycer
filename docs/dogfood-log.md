@@ -12,25 +12,33 @@ Status: `open` | `tasked` | `closed`. Empty coverage = no live session yet.
 | DF-001 | bug | P1 | connect/host | 0104 | closed | host 0102 at 32957 / df-0102-home stayed up through 0104 retry; search/stash/metrics reached (RPC as GUI client) |
 | DF-002 | bug | P1 | git.commit | 0102-session1 | closed | resolved: commit works with env identity, no git config. 0105 (`93ed298`) host accepts GIT_AUTHOR_NAME/EMAIL + GIT_COMMITTER_*; retested 0105-int on :40481. First commit 87476362. |
 | DF-003 | friction | P2 | doctor / harness | 0102-session1 | open | `rt-cli doctor` reports `cli.generic` unavailable when `RUSTTRAYCER_GENERIC_CMD` is unset. `agent.create` with `provider=cli.generic` still succeeds. Directive says generic is always available. Reconfirmed 0102-cont and 0112 `host.doctor`: still `available=false` / `RUSTTRAYCER_GENERIC_CMD unset`. |
+| DF-005 | bug | P1 | canvas/agents | 0109 | tasked | left Агенты pane has no ScrollArea; policy «Спросить» and «Создать агента» clipped at 1280x800. Fix in 0109. |
+| DF-006 | bug | P2 | search | 0109 | tasked | Enter only on lost_focus (no-op while focused); results Window has no .open/Escape dismiss. Fix in 0109. |
+| DF-007 | bug | P2 | stash | 0109 | tasked | В stash left composer uncleared; apply_stash appended. Live concat `0109 stash draft`+old body. Fix in 0109. |
 
 ## Coverage — epic → last live session
 
 | Epic / surface | Last session | Harness | Date (YEKT) |
 |---|---|---|---|
-| Ladder ask | — | — | — |
+| Ladder ask | 0109 | n/a (pane clipped) | 2026-08-20 |
 | Ladder Yolo | 0112 | cli.generic | 2026-08-20 |
 | Write + commit | 0112 (env identity) | cli.generic | 2026-08-20 |
 | Terminal + resume | — | — | — |
 | Artifacts | 0112 | cli.generic | 2026-08-20 |
 | A2A-loop | — | — | — |
 | Sync push/pull | 0102-session1 | cli.generic | 2026-08-19 |
-| Search / steer / stash | 0104 | n/a (RPC-only) | 2026-08-19 |
+| Search / steer / stash | 0109 | cli.generic (send blocked) | 2026-08-20 |
 
 ## Sessions
 
 0104 attempted 2026-08-19 YEKT, harness n/a, blocked on host.
 
 0104 retry 2026-08-19 YEKT ~23:30+: host 0102 (`32957`, `df-0102-home`) stayed up. No pixel clicks — no `rt-gui` binary and `cargo run -p rt-gui` not realistic (empty target). Drove same RPCs as GUI: `pid.json` → `GET /health` → handshake(`client=gui`, crate 2.1.1, 1.8 sync + 1.9 search/stash) → `host.ping` → `search.query` → `stash.list`/`stash.add` → `GET /metrics`. Search `q=dogfood` hit 1 open task (0102 dogfood title). Stash empty then 1 draft after add. Metrics: `rusttraycer_up 1`, 1 idle agent, 1 open task (chip would show agents=1, rss/rpc —). DF-001 closed. No new DF. Harness n/a (RPC-only).
+
+0109 2026-08-20 YEKT ~08:10–08:22: live window vs 0104 RPC. Harness cli.generic attempted. Built cargo build -p rt-gui. Binary /workspace/rusttraycer/target/debug/rt-gui. First launch panicked missing libxkbcommon-x11.so (box env). DISPLAY=:5 RUSTTRAYCER_HOME=/workspace/df-0102-home. :40481 died mid-session; waited, did not spawn. Same hostId 01a01b47-e863-71d3-bd2d-e885cf484d7a on :41299 (pid.json 130299). GUI connected via pid.json. Window left running.
+
+Live clicks: Search `dogfood` → 4 tasks (0111, 0108, 0103, 0102) + artifact 0112. Enter did not navigate; Escape/outside click left the dropdown pinned until q cleared (DF-006). Metrics chip `метрики 7/—/—` then `10/—/—`; click is no-op (decorative, not a DF; 0093 did not promise a popover). Opened 0108 canvas; toast `not_found: worktree 01a01d24-436c-72e0-8986-cf9bf9f0042a` (host, not UI DF). Yolo banner on (0112 / task-level, not toggled). Stash «Черновики» opened; 2 items (new 0109 draft + 0104 draft); no 1.9 degrade toast. «В stash» with `0109 stash draft` concatenated composer to `0109 stash draft0109 dogfood: sleep 20 then reply ok` and stored that (DF-007). Ladder ask not set — DF-005 pane no-scroll; policy «Спросить» and «Создать агента» below the fold at 1280x800. Provider combo all `(недоступен)`. Send and Ctrl+Enter toast `internal: RUSTTRAYCER_GENERIC_CMD unset` (DF-003 family, no running agent, steer not proven — not a new UI DF). DF-001 not reopened. Code fixes this session: one ScrollArea on agents sidebar; search Enter while focused navigates first hit; Escape + click-outside dismiss; composer clears after stash add; apply-from-palette replaces instead of append. Not pushed.
+
 
 ### Session 1 — 2026-08-19 YEKT — Integration / STAR 0102 (host + worktree + sync backup)
 
