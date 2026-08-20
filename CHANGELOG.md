@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [2.1.2] — 2026-08-20
 
-Cycle 1 dogfood patch. Protocol 1.9. Storage 0001–0010. Workspace crate version 2.1.2. Tag `v2.1.2` after CI (Chief). `v2.1.1` stays put.
+Cycle 1 dogfood patch. Protocol 1.9. Storage 0001–0011 (`0011_shells.sql`). Workspace crate version 2.1.2. Tag `v2.1.2` after CI (Chief). `v2.1.1` stays put.
 
 ### Fixed
 

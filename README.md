@@ -6,7 +6,7 @@ Loop: start host → add a folder → create a Task → create an agent → chat
 
 **v2.1.2 supported package:** Linux x86_64 (AppImage + `.deb` + tarball). **macOS aarch64** is build-from-source (CI compile). Windows is out of scope (ADR-0006).
 
-Protocol **1.9**. Storage migrations **0001–0010**.
+Protocol **1.9**. Storage migrations **0001–0011**.
 
 Shipped (parity matrix): host + GUI + CLI; permission ladder (ask default); write/git without secrets in `host.db`; Agent Terminal + Shell + mux (including terminals without a Task, workspace required); artifacts (Markdown + PDF); A2A + loops; search; multi-account labels; mid-turn steer; self-hosted `rt-sync`; PR view; prompt stash; resource monitor / hooks / drag-to-tile; worktree cleanup; nested `AGENTS.md`; user presets; `logs --follow`.
 
@@ -79,7 +79,7 @@ Then in the GUI: add a folder → Task → pick a harness from `host.doctor` (ge
 |---|---|
 | `rt-protocol` | Wire types, RPC, handshake `{major,minor}` (1.0–1.9) |
 | `rt-host` | Daemon: HTTP/WS on `127.0.0.1`, supervisor, git/worktree, PTY/mux, artifacts, A2A, search, steer, accounts, stash, `rt-sync`, `pr.get` |
-| `rt-storage` | `host.db` (rusqlite, migrations 0001–0010) |
+| `rt-storage` | `host.db` (rusqlite, migrations through 0011) |
 | `rt-runtime` | Adapters: `cli.generic`, `cli.claude`, `cli.codex` |
 | `rt-cli` | `start` / `stop` / `doctor` / `status` / `logs --follow` / `reset-db` / `sync` |
 | `rt-gui` | eframe + egui: tasks, harness picker, N agents, ladder, search, PR view, stash, steer, sync URL, user presets, git panel, Stop |
