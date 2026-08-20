@@ -21,7 +21,7 @@ Status: `open` | `tasked` | `closed`. Empty coverage = no live session yet.
 
 | Epic / surface | Last session | Harness | Date (YEKT) |
 |---|---|---|---|
-| Ladder ask | 0109 | n/a (pane clipped) | 2026-08-20 |
+| Ladder ask | 0118 CLI RPC (policy.set ask; send GENERIC_CMD; files.write → approvalId + allow-once). 0109 UI pane clipped. | cli.generic | 2026-08-20 |
 | Ladder Yolo | 0112 | cli.generic | 2026-08-20 |
 | Write + commit | 0112 (env identity) | cli.generic | 2026-08-20 |
 | Terminal + resume | 0119 create+write+restart+list+resume+write (DF-004 closed) | cli.generic | 2026-08-20 |
@@ -191,6 +191,24 @@ Passed:
 - write `echo df-0119b-post` → `/tmp/df-0119b-post.marker`
 
 DF-004 closed. One sha.
+
+### Session 0118 — 2026-08-20 YEKT — Integration / STAR 0118 (ladder ask via CLI RPC)
+
+Harness: **cli.generic**. Handshake `client=cli` crate 2.1.1 (accepted `agent.send` 1.0 + `policy.*` 1.1 so send used the ladder). Host reused `df-0102-home` (`hostId` `01a01b47-e863-71d3-bd2d-e885cf484d7a`) on `:41299`. This session did not stop or restart the host. Resume not attempted.
+
+Passed:
+- `workspace.add` `/workspace/wt-0118-v3-df-session-ask` (session checkout `task/0118-v3-df-session-ask` at `42895f2`)
+- `task.create` `STAR 0118 ladder ask` (`01a01d41-23fb-72d0-b0be-e10264f1dced`)
+- `agent.create` provider `cli.generic` `01a01d41-23fd-7571-a01c-71b66650dc53` + `worktree.ensure` `rt/6650dc53`
+- `policy.set` workspace `mode=ask` `yolo=false` → `policy.get` same
+- `host.doctor` generic `available=false` / `RUSTTRAYCER_GENERIC_CMD unset` (DF-003)
+- `agent.send` content `df-0118 ladder ask ping` → `internal: RUSTTRAYCER_GENERIC_CMD unset`. No `approvalId`. Ask mode checks backend availability before creating a pending approval, so the toast is DF-003, not a new DF.
+- `files.write` of `docs/dogfood-log.md` under ask → pending `approvalId` `01a01d41-aeb6-7481-9c25-e2ba01e9b493`; `approval.respond` allow-once applied the write. Then `git.stage` + `git.commit` RPC (env identity).
+
+No origin push. No `git config`. 0108/0111/0115/0117 tips not moved.
+
+**Новых находок нет.** DF-003 toast on send, as specified.
+
 
 ## Parity-watch — cycle 1
 
