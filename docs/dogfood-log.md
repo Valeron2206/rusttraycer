@@ -22,8 +22,8 @@ Status: `open` | `tasked` | `closed`. Empty coverage = no live session yet.
 | Write + commit | 0102-session1 + 0105-int (commit via env identity) | cli.generic | 2026-08-19 |
 | Terminal + resume | — | — | — |
 | Artifacts | — | — | — |
-| A2A-loop | — | — | — |
-| Sync push/pull | 0102-session1 | cli.generic | 2026-08-19 |
+| A2A-loop | 0111 | cli.generic | 2026-08-20 |
+| Sync push/pull | 0102-session1 push + 0111 pull | cli.generic | 2026-08-20 |
 | Search / steer / stash | 0104 | n/a (RPC-only) | 2026-08-19 |
 
 ## Sessions
@@ -62,6 +62,19 @@ Host also has a second workspace from STAR 0103 (`wt-0103-v3-df-session-core`, b
 ### Session 0105-int — 2026-08-19 YEKT — Integration / STAR 0105 (git.commit env identity)
 
 Host restarted on same home `df-0102-home` after phase0-merge `93ed298`. New bind `:40481`. Identity in host process env only (`GIT_AUTHOR_*` / `GIT_COMMITTER_*`). No `git config`. Handshake client=`cli`. `git.stage` + `git.commit` on session workspace `task/0102-v3-df-session1-host` returned 200 / sha `87476362`. DF-002 closed (resolved: commit works with env identity, no git config). Product wt `rt/3fd5ef18` left clean. No origin push.
+
+
+### Session 0111 — 2026-08-20 YEKT — Integration / STAR 0111 (A2A-loop + sync.pull)
+
+Harness: **cli.generic**. Handshake `client=cli` crate 2.1.1. No `git config`. No origin push. Host not restarted by 0111 (0108 rebound `:41299`).
+
+Host `http://127.0.0.1:41299` (`df-0102-home`, pid 130299). Product worktree `rt/a066c672`. Session checkout `task/0111-v3-df-session-a2a-sync`.
+
+A2A: `agent.create` parent generic + child generic (`parentId`) + child claude (`parentId`) ok. `a2a.deliver` generic -> `no_inbox` (caps). `a2a.deliver` claude -> ok (inbox without claude binary). `loop.start` maxIterations=1 on generic pair returned loopId; `loop.get` immediately `status=stopped` `reason=error` iteration=0 turns=0 (host.log: loop send failed `RUSTTRAYCER_GENERIC_CMD unset`). Not infinite. maxIterations not reached because generic turn cannot start (DF-003). Not `not_supported`. Did not fake a loop.
+
+Sync: `sync.pull` all-tasks from peer `:38805` -> `conflict` (0108 task already on this host). `sync.pull` `taskIds` of a new peer-only task -> ok `tasks=1` agents=0. Secret not sent (env not required).
+
+**Новых находок нет.** DF-003 still open (reconfirmed in A2A-loop). No origin / no git config.
 
 ## Parity-watch — cycle 1
 
