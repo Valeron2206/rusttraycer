@@ -12,7 +12,7 @@ Status: `open` | `tasked` | `closed`. Empty coverage = no live session yet.
 | DF-001 | bug | P1 | connect/host | 0104 | closed | host 0102 at 32957 / df-0102-home stayed up through 0104 retry; search/stash/metrics reached (RPC as GUI client) |
 | DF-002 | bug | P1 | git.commit | 0102-session1 | closed | resolved: commit works with env identity, no git config. 0105 (`93ed298`) host accepts GIT_AUTHOR_NAME/EMAIL + GIT_COMMITTER_*; retested 0105-int on :40481. First commit 87476362. |
 | DF-003 | friction | P2 | doctor / harness | 0102-session1 | open | `rt-cli doctor` reports `cli.generic` unavailable when `RUSTTRAYCER_GENERIC_CMD` is unset. `agent.create` with `provider=cli.generic` still succeeds. Directive says generic is always available. Reconfirmed 0102-cont and 0112 `host.doctor`: still `available=false` / `RUSTTRAYCER_GENERIC_CMD unset`. |
-| DF-004 | friction | P1 | terminal/resume | 0108 | tasked | After host restart, live Shell PTY gone (`shell.list` empty, `pty_dead`, no `shell.resume`). 0113 implements persist `shell.list` + `shell.resume` (migration 0011). Open until live retest. |
+| DF-004 | friction | P1 | terminal/resume | 0108 / 0119 | closed | resolved 0113 (`d9024cf`): after rebuild+restart, `shell.list` by taskId still shows the shell; `shell.resume` returns new ptyId; `pty.write` works. 0119 retest :39001→:36965. |
 | DF-005 | bug | P1 | canvas/agents | 0109 | tasked | left Агенты pane has no ScrollArea; policy «Спросить» and «Создать агента» clipped at 1280x800. Fix in 0109. |
 | DF-006 | bug | P2 | search | 0109 | tasked | Enter only on lost_focus (no-op while focused); results Window has no .open/Escape dismiss. Fix in 0109. |
 | DF-007 | bug | P2 | stash | 0109 | tasked | В stash left composer uncleared; apply_stash appended. Live concat `0109 stash draft`+old body. Fix in 0109. |
@@ -24,7 +24,7 @@ Status: `open` | `tasked` | `closed`. Empty coverage = no live session yet.
 | Ladder ask | 0109 | n/a (pane clipped) | 2026-08-20 |
 | Ladder Yolo | 0112 | cli.generic | 2026-08-20 |
 | Write + commit | 0112 (env identity) | cli.generic | 2026-08-20 |
-| Terminal + resume | 0108 (create+input ok; resume DF-004) | cli.generic | 2026-08-20 |
+| Terminal + resume | 0119 create+write+restart+list+resume+write (DF-004 closed) | cli.generic | 2026-08-20 |
 | Artifacts | 0112 | cli.generic | 2026-08-20 |
 | A2A-loop | — | — | — |
 | Sync push/pull | 0102-session1 + 0108 (push this task) | cli.generic | 2026-08-20 |
@@ -117,6 +117,23 @@ Resume failed (DF-004, not faked):
 Log written via `files.write` (ladder Yolo). `git.stage` + `git.commit` via RPC (env identity). No origin push. No `git config`.
 
 Findings: DF-004 (P1, new). DF-003 still open (reconfirmed).
+
+
+### Session 0119 — 2026-08-20 YEKT — Integration / STAR 0119 (PTY persist resume)
+
+Harness: **cli.generic**. Handshake `client=cli` crate 2.1.1, `shell.resume` 1.10. Rebuilt `rt-host` from phase0 `d9024cf`. `rt-cli stop`+`start` same `RUSTTRAYCER_HOME=/workspace/df-0102-home`, same hostId `01a01b47-e863-71d3-bd2d-e885cf484d7a`, same `GIT_AUTHOR_*`/`GIT_COMMITTER_*` (no git config). First bind after rebuild `:39001`. Mid-session restart `:36965`. No origin push.
+
+Passed:
+- `workspace.add` `/workspace/wt-0119-v3-df-session-resume` (checkout `task/0119-v3-df-session-resume` at `d9024cf`)
+- `task.create` `STAR 0119 PTY resume` + `agent.create` generic + `worktree.ensure` `rt/34bb080f`
+- create: `shell.create` `shellId` `01a01d44-23c8-7450-9c2e-04680d62b5b5` `ptyId` `01a01d44-23c8-7450-9c2e-0477ed52bab2`
+- write: `pty.write` `echo df-0119-pre` — marker `/tmp/df-0119-pre.marker`
+- restart: `rt-cli stop`+`start` same home → `:36965` `/health` 200
+- list: `shell.list` by workspace empty; by `taskId` still has the same `shellId` (old ptyId)
+- resume: `shell.resume` same `shellId` → new `ptyId` `01a01d44-87fe-7b33-9bf8-d24a0c1d6b3a`
+- write: `pty.write` `echo df-0119-post` — marker `/tmp/df-0119-post.marker`
+
+DF-004 closed (live retest). DF-003 not retested as new. 0108/0111/0115/0117/0118 tips not moved.
 
 ## Parity-watch — cycle 1
 
