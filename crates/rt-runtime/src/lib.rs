@@ -358,7 +358,7 @@ mod probe_tests {
     }
 
     #[test]
-    fn probe_harnesses_generic_unavailable_when_env_unset() {
+    fn probe_harnesses_generic_available_when_env_unset() {
         let _g = crate::TEST_ENV_LOCK.lock().unwrap();
         let prev = std::env::var("RUSTTRAYCER_GENERIC_CMD").ok();
         std::env::remove_var("RUSTTRAYCER_GENERIC_CMD");
@@ -371,9 +371,9 @@ mod probe_tests {
             .iter()
             .find(|p| p.id == "cli.generic")
             .expect("generic probe");
-        assert!(!generic.available);
+        assert!(generic.available);
         assert!(
-            generic.detail.contains("unset") || generic.detail.contains("not found"),
+            generic.detail.contains("unset"),
             "detail={}",
             generic.detail
         );

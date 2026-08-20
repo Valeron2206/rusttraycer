@@ -11,7 +11,7 @@ Status: `open` | `tasked` | `closed`. Empty coverage = no live session yet.
 |---|---|---|---|---|---|---|
 | DF-001 | bug | P1 | connect/host | 0104 | closed | host 0102 at 32957 / df-0102-home stayed up through 0104 retry; search/stash/metrics reached (RPC as GUI client) |
 | DF-002 | bug | P1 | git.commit | 0102-session1 | closed | resolved: commit works with env identity, no git config. 0105 (`93ed298`) host accepts GIT_AUTHOR_NAME/EMAIL + GIT_COMMITTER_*; retested 0105-int on :40481. First commit 87476362. |
-| DF-003 | friction | P2 | doctor / harness | 0102-session1 | open | `rt-cli doctor` reports `cli.generic` unavailable when `RUSTTRAYCER_GENERIC_CMD` is unset. `agent.create` with `provider=cli.generic` still succeeds. Directive says generic is always available. Reconfirmed 0102-cont: `host.doctor` + `rt-cli doctor` still `available=false` / `RUSTTRAYCER_GENERIC_CMD unset`. |
+| DF-003 | friction | P2 | doctor / harness | 0107 | closed | resolved STAR 0107: doctor.available=true for cli.generic without cmd; detail still mentions RUSTTRAYCER_GENERIC_CMD unset. Host :40481 down; closed in-tree. |
 
 ## Coverage — epic → last live session
 

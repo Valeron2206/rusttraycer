@@ -123,11 +123,19 @@ async fn health_handshake_doctor_files() {
         .iter()
         .find(|p| p["id"] == "cli.generic")
         .expect("cli.generic in providers");
+    // DF-003: generic is always-on; doctor.available stays true when cmd is unset.
+    assert_eq!(generic["available"], true);
     let env_set = std::env::var("RUSTTRAYCER_GENERIC_CMD")
         .ok()
         .map(|s| !s.trim().is_empty())
         .unwrap_or(false);
-    assert_eq!(generic["available"], env_set);
+    if !env_set {
+        let detail = generic["detail"].as_str().unwrap_or("");
+        assert!(
+            detail.contains("unset"),
+            "unset cmd should still mention env in detail: {detail}"
+        );
+    }
 
     let ws_dir = dir.path().join("proj");
     std::fs::create_dir(&ws_dir).unwrap();
