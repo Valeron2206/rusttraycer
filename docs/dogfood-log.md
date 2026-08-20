@@ -11,17 +11,17 @@ Status: `open` | `tasked` | `closed`. Empty coverage = no live session yet.
 |---|---|---|---|---|---|---|
 | DF-001 | bug | P1 | connect/host | 0104 | closed | host 0102 at 32957 / df-0102-home stayed up through 0104 retry; search/stash/metrics reached (RPC as GUI client) |
 | DF-002 | bug | P1 | git.commit | 0102-session1 | closed | resolved: commit works with env identity, no git config. 0105 (`93ed298`) host accepts GIT_AUTHOR_NAME/EMAIL + GIT_COMMITTER_*; retested 0105-int on :40481. First commit 87476362. |
-| DF-003 | friction | P2 | doctor / harness | 0102-session1 | open | `rt-cli doctor` reports `cli.generic` unavailable when `RUSTTRAYCER_GENERIC_CMD` is unset. `agent.create` with `provider=cli.generic` still succeeds. Directive says generic is always available. Reconfirmed 0102-cont: `host.doctor` + `rt-cli doctor` still `available=false` / `RUSTTRAYCER_GENERIC_CMD unset`. |
+| DF-003 | friction | P2 | doctor / harness | 0102-session1 | open | `rt-cli doctor` reports `cli.generic` unavailable when `RUSTTRAYCER_GENERIC_CMD` is unset. `agent.create` with `provider=cli.generic` still succeeds. Directive says generic is always available. Reconfirmed 0102-cont and 0112 `host.doctor`: still `available=false` / `RUSTTRAYCER_GENERIC_CMD unset`. |
 
 ## Coverage — epic → last live session
 
 | Epic / surface | Last session | Harness | Date (YEKT) |
 |---|---|---|---|
 | Ladder ask | — | — | — |
-| Ladder Yolo | 0102-session1 | cli.generic | 2026-08-19 |
-| Write + commit | 0102-session1 + 0105-int (commit via env identity) | cli.generic | 2026-08-19 |
+| Ladder Yolo | 0112 | cli.generic | 2026-08-20 |
+| Write + commit | 0112 (env identity) | cli.generic | 2026-08-20 |
 | Terminal + resume | — | — | — |
-| Artifacts | — | — | — |
+| Artifacts | 0112 | cli.generic | 2026-08-20 |
 | A2A-loop | — | — | — |
 | Sync push/pull | 0102-session1 | cli.generic | 2026-08-19 |
 | Search / steer / stash | 0104 | n/a (RPC-only) | 2026-08-19 |
@@ -62,6 +62,28 @@ Host also has a second workspace from STAR 0103 (`wt-0103-v3-df-session-core`, b
 ### Session 0105-int — 2026-08-19 YEKT — Integration / STAR 0105 (git.commit env identity)
 
 Host restarted on same home `df-0102-home` after phase0-merge `93ed298`. New bind `:40481`. Identity in host process env only (`GIT_AUTHOR_*` / `GIT_COMMITTER_*`). No `git config`. Handshake client=`cli`. `git.stage` + `git.commit` on session workspace `task/0102-v3-df-session1-host` returned 200 / sha `87476362`. DF-002 closed (resolved: commit works with env identity, no git config). Product wt `rt/3fd5ef18` left clean. No origin push.
+
+
+### STAR 0112 — 2026-08-20 YEKT — Integration / artifacts + yolo
+
+Harness: **cli.generic** (create succeeded; doctor `available=false` — DF-003, not new). `cli.claude` / `cli.codex` bins absent.
+
+Drove RPC as client `cli` (crate 2.1.1) against hostId `01a01b47-e863-71d3-bd2d-e885cf484d7a` (`RUSTTRAYCER_HOME=/workspace/df-0102-home`). `:40481` was gone when this session started (graceful shutdown 03:09:19Z); same hostId already listening on `:41299` (pid 130299, binary `wt-phase0` 2.1.1, GIT_AUTHOR/COMMITTER in process env). This session did not start or restart the host.
+
+Passed:
+- handshake: accepted `artifact.create` 1.4, `artifact.export` 1.9, `files.write`/`git.stage`/`git.commit` 1.2, `policy.*` 1.1, `agent.create` 1.9. rejected empty
+- `workspace.add` `/workspace/wt-0112-v3-df-session-artifacts-yolo`
+- `task.create` title `STAR 0112 artifacts + yolo`
+- `agent.create` provider `cli.generic`
+- `worktree.ensure` product branch `rt/7ef13b93` under host data dir
+- `policy.set` workspace scope, `yolo=true`, mode `allow-always`
+- `host.doctor` yolo=true; generic/claude/codex all `available=false`
+- `artifact.create` kind=spec title `0112 yolo artifacts`
+- `artifact.export` format=pdf → 200, filename `<id>.pdf`, 654 bytes starting `%PDF-1.4` (no filesystem path field)
+- `files.write` this log into the product worktree (workspaceId + agentId + worktreeId)
+- `git.stage` + `git.commit` (env identity; no git config)
+
+No new DF. DF-003 reconfirmed, not closed. No origin push. Session checkout `task/0112-v3-df-session-artifacts-yolo` stays at `ec709c5` unless noted; product commit is the session commit.
 
 ## Parity-watch — cycle 1
 
