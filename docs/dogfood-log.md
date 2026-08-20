@@ -20,7 +20,7 @@ Status: `open` | `tasked` | `closed`. Empty coverage = no live session yet.
 | Ladder ask | — | — | — |
 | Ladder Yolo | 0112 | cli.generic | 2026-08-20 |
 | Write + commit | 0112 (env identity) | cli.generic | 2026-08-20 |
-| Terminal + resume | — | — | — |
+| Terminal + resume | 0115 (live PTY create+input; resume not attempted, 0113 not merged) | cli.generic | 2026-08-20 |
 | Artifacts | 0112 | cli.generic | 2026-08-20 |
 | A2A-loop | — | — | — |
 | Sync push/pull | 0102-session1 | cli.generic | 2026-08-19 |
@@ -84,6 +84,30 @@ Passed:
 - `git.stage` + `git.commit` (env identity; no git config)
 
 No new DF. DF-003 reconfirmed, not closed. No origin push. Session checkout `task/0112-v3-df-session-artifacts-yolo` stays at `ec709c5` unless noted; product commit is the session commit.
+
+### Session 0115 — 2026-08-20 YEKT — Integration / STAR 0115 (live PTY)
+
+Harness: **cli.generic** (create succeeded; doctor `available=false` — DF-003, not new). `cli.claude` / `cli.codex` bins absent (`which claude` / `which codex` empty).
+
+Drove RPC as client `cli` (crate 2.1.1) against hostId `01a01b47-e863-71d3-bd2d-e885cf484d7a` (`RUSTTRAYCER_HOME=/workspace/df-0102-home`) on `:41299` (pid 130299, same process as 0112; `GET /health` 200). This session did not start or restart the host. 0113 not merged — resume not attempted (`shell.resume` / vendor resume not called).
+
+Passed:
+- handshake: accepted `shell.create` 1.9, `pty.write` 1.3, `files.write`/`git.stage`/`git.commit` 1.2, `policy.*` 1.1, `agent.create` 1.9. rejected empty
+- `workspace.add` `/workspace/wt-0115-v3-df-session-pty`
+- `task.create` title `STAR 0115 live PTY`
+- `agent.create` provider `cli.generic`
+- `worktree.ensure` product branch `rt/469e4b45` under host data dir
+- `policy.set` workspace scope, `yolo=true`, mode `allow-always`
+- `host.doctor` yolo=true; generic/claude/codex all `available=false` (DF-003 reconfirmed)
+- `shell.create` with `taskId` (C32–C36): live PTY `shellId` `01a01d3b-9fc8-7932-9276-22bbd5bc6cb5`, `ptyId` `01a01d3b-9fc8-7932-9276-22c18c25a86f`, cwd `/workspace/wt-0115-v3-df-session-pty`
+- `pty.write` input `echo df-0115-pty` — marker observed: WS `pty.data` on that `ptyId` contained the unique string; command output also written to `/tmp/df-0115-marker.txt` (`df-0115-pty`). `shell.list` still shows the live shell.
+- second live PTY this session (same host, no restart): `shellId` `01a01d3c-3760-7671-b2e3-9010ffc37f15`, `ptyId` `01a01d3c-3760-7671-b2e3-902119e86994`; `pty.write` base64 `echo df-0115-pty` observed in `/tmp/df-0115-pty.marker`
+- `files.write` this log into the session checkout (workspaceId + agentId; no worktreeId)
+- `git.stage` + `git.commit` (env identity; no git config)
+
+Resume not attempted (0113 not merged). No host restart. 0111 worktree/branch not touched. No origin push.
+
+**Новых находок нет.** DF-003 still open (reconfirmed). DF-004 (0108 P1 terminal/resume) is not on this base and was not re-opened here.
 
 ## Parity-watch — cycle 1
 
