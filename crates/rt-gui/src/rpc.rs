@@ -341,6 +341,33 @@ fn git_root_params(workspace_id: &str, worktree_id: Option<&str>) -> Value {
     params
 }
 
+fn policy_set_params(
+    agent_id: &str,
+    mode: &str,
+    scope: &str,
+    yolo: bool,
+    workspace_id: Option<&str>,
+) -> Value {
+    let workspace_id = workspace_id.filter(|id| !id.is_empty());
+    let scope = if scope == "workspace" && workspace_id.is_none() {
+        "agent"
+    } else {
+        scope
+    };
+    let mut params = json!({
+        "agentId": agent_id,
+        "mode": mode,
+        "scope": scope,
+        "yolo": yolo,
+    });
+    if scope == "workspace" {
+        if let Some(id) = workspace_id {
+            params["workspaceId"] = json!(id);
+        }
+    }
+    params
+}
+
 fn rpc_origin(rpc_url: &str) -> String {
     rpc_url.trim().trim_end_matches('/').to_string()
 }
@@ -882,15 +909,11 @@ impl Session {
         mode: &str,
         scope: &str,
         yolo: bool,
+        workspace_id: Option<&str>,
     ) -> Result<PolicyOk, ConnectError> {
         parse_ok(self.call(
             METHOD_POLICY_SET,
-            json!({
-                "agentId": agent_id,
-                "mode": mode,
-                "scope": scope,
-                "yolo": yolo,
-            }),
+            policy_set_params(agent_id, mode, scope, yolo, workspace_id),
         )?)
     }
 
@@ -3748,7 +3771,7 @@ mod tests {
         assert!(!got.yolo);
         assert_eq!(got.source, "default");
         let set = session
-            .policy_set("ag-1", "allow-always", "agent", true)
+            .policy_set("ag-1", "allow-always", "agent", true, None)
             .expect("set");
         assert_eq!(set.mode, "allow-always");
         assert!(set.yolo);
@@ -3769,6 +3792,26 @@ mod tests {
             .unwrap();
         assert_eq!(ap.params["approvalId"], "ap-1");
         assert_eq!(ap.params["decision"], "allow-once");
+    }
+
+    #[test]
+    fn policy_set_workspace_scope_sends_workspace_id_or_falls_back() {
+        let with_id = policy_set_params("ag-1", "ask", "workspace", false, Some("ws-1"));
+        assert_eq!(with_id["agentId"], "ag-1");
+        assert_eq!(with_id["mode"], "ask");
+        assert_eq!(with_id["scope"], "workspace");
+        assert_eq!(with_id["yolo"], false);
+        assert_eq!(with_id["workspaceId"], "ws-1");
+
+        let none_id = policy_set_params("ag-1", "ask", "workspace", false, None);
+        assert_eq!(none_id["scope"], "agent");
+        assert!(none_id.get("workspaceId").is_none());
+        assert_eq!(none_id["agentId"], "ag-1");
+
+        let empty_id = policy_set_params("ag-1", "ask", "workspace", false, Some(""));
+        assert_eq!(empty_id["scope"], "agent");
+        assert!(empty_id.get("workspaceId").is_none());
+        assert_eq!(empty_id["agentId"], "ag-1");
     }
 
     #[test]

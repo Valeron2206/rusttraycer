@@ -2323,7 +2323,13 @@ impl AppState {
             self.ladder_status = Some(crate::ladder::LADDER_UNAVAILABLE.into());
             return;
         }
-        match session.policy_set(&agent_id, mode.as_wire(), scope, yolo) {
+        match session.policy_set(
+            &agent_id,
+            mode.as_wire(),
+            scope,
+            yolo,
+            self.workspace_id.as_deref(),
+        ) {
             Ok(ok) => {
                 self.policies.insert(agent_id, AgentPolicy::from(ok));
                 self.ladder_status = None;
