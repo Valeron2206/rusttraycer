@@ -76,7 +76,13 @@ fn show_search_results(ctx: &egui::Context, state: &mut AppState) {
         .collapsible(false)
         .resizable(true)
         .default_width(360.0)
-        .anchor(egui::Align2::LEFT_TOP, [220.0, 48.0])
+        .anchor(
+            egui::Align2::LEFT_TOP,
+            [
+                theme::SPACE_16,
+                theme::CHROME_NAV_HEIGHT + theme::SPACE_48 + theme::SPACE_32,
+            ],
+        )
         .open(&mut open)
         .show(ctx, |ui| {
             if state.search_items.is_empty() {
@@ -110,8 +116,9 @@ fn show_search_results(ctx: &egui::Context, state: &mut AppState) {
     if pressed {
         if let Some(pos) = pointer {
             let on_popup = inner.response.rect.contains(pos);
-            let on_chrome = pos.y <= theme::CHROME_NAV_HEIGHT;
-            if !on_popup && !on_chrome {
+            let on_search_field =
+                pos.y <= theme::CHROME_NAV_HEIGHT + theme::SPACE_48 + theme::SPACE_32;
+            if !on_popup && !on_search_field {
                 state.dismiss_search();
             }
         }

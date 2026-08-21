@@ -169,6 +169,8 @@ pub const NAV_WIDTH: f32 = 240.0;
 pub const CTA_WIDTH: f32 = 193.0;
 pub const CTA_HEIGHT: f32 = 35.0;
 pub const AVATAR_DISC: f32 = 20.0;
+/// Live HA disc width (spec §2.3 avatar.disc 19×20).
+pub const AVATAR_DISC_W: f32 = 19.0;
 
 // ---------------------------------------------------------------------------
 // Type (Inter-class OFL stand-in for live Figtree 15)
@@ -226,6 +228,33 @@ pub const LUCIDE_MESSAGE_SVG: &str = concat!(
     r##"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">"##,
     r##"<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>"##
 );
+pub const LUCIDE_SETTINGS_SVG: &str = concat!(
+    r##"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">"##,
+    r##"<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/>"##,
+    r##"<circle cx="12" cy="12" r="3"/></svg>"##
+);
+pub const LUCIDE_BELL_SVG: &str = concat!(
+    r##"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">"##,
+    r##"<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/>"##,
+    r##"<path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>"##
+);
+pub const LUCIDE_HISTORY_SVG: &str = concat!(
+    r##"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">"##,
+    r##"<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>"##,
+    r##"<path d="M3 3v5h5"/><path d="M12 7v5l4 2"/></svg>"##
+);
+pub const LUCIDE_MENU_SVG: &str = concat!(
+    r##"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">"##,
+    r##"<path d="M4 8h16"/><path d="M4 16h16"/></svg>"##
+);
+pub const LUCIDE_CHEVRON_LEFT_SVG: &str = concat!(
+    r##"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">"##,
+    r##"<path d="m15 18-6-6 6-6"/></svg>"##
+);
+pub const LUCIDE_CHEVRON_RIGHT_SVG: &str = concat!(
+    r##"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">"##,
+    r##"<path d="m9 18 6-6-6-6"/></svg>"##
+);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Icon {
@@ -237,6 +266,12 @@ pub enum Icon {
     Check,
     Plus,
     Message,
+    Settings,
+    Bell,
+    History,
+    Overflow,
+    ChevronLeft,
+    ChevronRight,
 }
 
 pub fn show_icon(ui: &mut egui::Ui, kind: Icon, size: f32, color: Color32) {
@@ -351,6 +386,101 @@ pub fn paint_icon(painter: &egui::Painter, rect: egui::Rect, kind: Icon, color: 
                 stroke,
             );
         }
+        Icon::Settings => {
+            painter.circle_stroke(r.center(), r.width() * 0.18, stroke);
+            for i in 0..6 {
+                let a = (i as f32) * std::f32::consts::TAU / 6.0;
+                let inner = r.width() * 0.26;
+                let outer = r.width() * 0.40;
+                painter.line_segment(
+                    [
+                        r.center() + egui::vec2(a.cos() * inner, a.sin() * inner),
+                        r.center() + egui::vec2(a.cos() * outer, a.sin() * outer),
+                    ],
+                    stroke,
+                );
+            }
+        }
+        Icon::Bell => {
+            let c = r.center();
+            let top = egui::pos2(c.x, r.top() + r.height() * 0.18);
+            painter.line_segment(
+                [
+                    egui::pos2(r.left() + r.width() * 0.22, c.y + r.height() * 0.08),
+                    top,
+                ],
+                stroke,
+            );
+            painter.line_segment(
+                [
+                    top,
+                    egui::pos2(r.right() - r.width() * 0.22, c.y + r.height() * 0.08),
+                ],
+                stroke,
+            );
+            painter.line_segment(
+                [
+                    egui::pos2(r.left() + r.width() * 0.18, c.y + r.height() * 0.10),
+                    egui::pos2(r.right() - r.width() * 0.18, c.y + r.height() * 0.10),
+                ],
+                stroke,
+            );
+            painter.line_segment(
+                [
+                    egui::pos2(c.x - r.width() * 0.10, r.bottom() - r.height() * 0.18),
+                    egui::pos2(c.x + r.width() * 0.10, r.bottom() - r.height() * 0.18),
+                ],
+                stroke,
+            );
+        }
+        Icon::History => {
+            painter.circle_stroke(r.center(), r.width() * 0.36, stroke);
+            painter.line_segment(
+                [r.center(), r.center() + egui::vec2(0.0, -r.height() * 0.18)],
+                stroke,
+            );
+            painter.line_segment(
+                [
+                    r.center(),
+                    r.center() + egui::vec2(r.width() * 0.18, r.height() * 0.08),
+                ],
+                stroke,
+            );
+        }
+        Icon::Overflow => {
+            let y0 = r.center().y - r.height() * 0.12;
+            let y1 = r.center().y + r.height() * 0.12;
+            let x0 = r.left() + r.width() * 0.16;
+            let x1 = r.right() - r.width() * 0.16;
+            painter.line_segment([egui::pos2(x0, y0), egui::pos2(x1, y0)], stroke);
+            painter.line_segment([egui::pos2(x0, y1), egui::pos2(x1, y1)], stroke);
+        }
+        Icon::ChevronLeft => {
+            let c = r.center();
+            let dx = r.width() * 0.16;
+            let dy = r.height() * 0.22;
+            painter.line_segment(
+                [egui::pos2(c.x + dx, c.y - dy), egui::pos2(c.x - dx, c.y)],
+                stroke,
+            );
+            painter.line_segment(
+                [egui::pos2(c.x - dx, c.y), egui::pos2(c.x + dx, c.y + dy)],
+                stroke,
+            );
+        }
+        Icon::ChevronRight => {
+            let c = r.center();
+            let dx = r.width() * 0.16;
+            let dy = r.height() * 0.22;
+            painter.line_segment(
+                [egui::pos2(c.x - dx, c.y - dy), egui::pos2(c.x + dx, c.y)],
+                stroke,
+            );
+            painter.line_segment(
+                [egui::pos2(c.x + dx, c.y), egui::pos2(c.x - dx, c.y + dy)],
+                stroke,
+            );
+        }
     }
 }
 
@@ -419,8 +549,9 @@ pub fn chip_frame() -> egui::Frame {
 }
 
 pub fn header_frame() -> egui::Frame {
+    // Tab-strip field is page-wash; the active tab paints BG_HEADER on top.
     egui::Frame::new()
-        .fill(BG_HEADER)
+        .fill(BG_TAB_INACTIVE)
         .inner_margin(Margin::symmetric(SPACE_8 as i8, 0))
         .stroke(Stroke::new(1.0, HAIRLINE_HEADER))
 }
@@ -665,6 +796,8 @@ mod tests {
         assert_eq!(CTA_WIDTH, 193.0);
         assert_eq!(CTA_HEIGHT, 35.0);
         assert!((CHROME_TABS - 37.0).abs() < f32::EPSILON);
+        assert!((AVATAR_DISC - 20.0).abs() < f32::EPSILON);
+        assert!((AVATAR_DISC_W - 19.0).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -711,6 +844,12 @@ mod tests {
             LUCIDE_CHECK_SVG,
             LUCIDE_PLUS_SVG,
             LUCIDE_MESSAGE_SVG,
+            LUCIDE_SETTINGS_SVG,
+            LUCIDE_BELL_SVG,
+            LUCIDE_HISTORY_SVG,
+            LUCIDE_MENU_SVG,
+            LUCIDE_CHEVRON_LEFT_SVG,
+            LUCIDE_CHEVRON_RIGHT_SVG,
         ] {
             assert!(svg.contains("viewBox=\"0 0 24 24\""));
             assert!(svg.contains("stroke=\"currentColor\""));
