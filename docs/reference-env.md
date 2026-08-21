@@ -1,6 +1,6 @@
 # Traycer Desktop visual-parity reference environment
 
-STAR 0126. This file pins the official Traycer Desktop Linux AppImage that RustTraycer v2.2.0 uses as the Visual Parity reference. It records only values that were measured on this machine. Updating the reference is only via parity-watch.
+STAR 0126 + 0128. This file pins the official Traycer Desktop Linux AppImage that RustTraycer v2.2.0 uses as the Visual Parity reference. It records only values that were measured on this machine. Updating the reference is only via parity-watch.
 
 ## Pinned build
 
@@ -96,11 +96,60 @@ Committed frames (our files; taken 2026-08-21 09:37 YEKT / 04:37 UTC):
 | [docs/reference-screens/welcome-sign-in.png](reference-screens/welcome-sign-in.png) | 1280x719 | 494483 | `a553d300635a76bf5affd9ba2fbffda6518554b89dd5b22c344078088fbfc3c0` | Official window: File/Edit/View/Window/Help menu, white logo, heading "Welcome to Traycer", single **Sign in** button on a dark field. |
 | [docs/reference-screens/display5-1280x800-desktop.png](reference-screens/display5-1280x800-desktop.png) | 1280x800 | 502395 | `f66bb1afa5bf64c4eef95e2252d0b7c54bda99b1c6bff89c20efd510c918f505` | Same moment, full `:5` desktop: XFWM title bar "Traycer", the welcome/sign-in client area, Plank dock (Chrome / Traycer / terminal). |
 
-## Login wall (PO access needed)
+## Logged-in session (STAR 0128)
 
-The first painted screen is a mandatory **Sign in** wall. There is no email field on this frame — only the button. No credentials were invented. Workspace / home / empty-task chrome was not reached.
+PO signed in (GitHub/Google device flow). Live logged-in capture is **DISPLAY=:3**, Electron HOME `/workspace/ref-traycer/home-d3`. Avatar initials **ZA**.
 
-This is not an escalation. Product-owner access is required before any deeper official-app screens can be captured. Public pages fetched as a fallback (not a substitute for signed-in chrome):
+`:5` + HOME `/workspace/ref-traycer/home` is the older 0126 Welcome / Sign in session. Keep those frames. Do not use `:5` for logged-in chrome.
+
+### Official host (process, not our RustTraycer host)
+
+Do **not** touch RustTraycer host `:45927` (`hostId` `01a01b47-e863-71d3-bd2d-e885cf484d7a`).
+
+Official host was started as a **foreground/background process**, not a systemd user service:
+
+```bash
+HOME=/workspace/ref-traycer/home-d3 \
+  /workspace/ref-traycer/home-d3/.traycer/cli/bin/traycer host start --json
+```
+
+`traycer host start --help` describes this as the supervisor used by launchd/systemd. There is no "no-service" flag. `--no-bootstrap` skips start and was not used. `traycer host service install` was **not** run.
+
+Measured after start (2026-08-21 09:57 YEKT / 04:57 UTC):
+
+| Field | Value |
+|---|---|
+| Process running | yes (`traycer host status`: "Traycer host is running") |
+| PID | `339885` |
+| Version | `1.1.10` |
+| WebSocket | `ws://127.0.0.1:43873/rpc` |
+| Official hostId | `f9654c95-c528-489c-894c-a9bf379bf94b` |
+| Data dir | `/workspace/ref-traycer/home-d3/.traycer/host` |
+| systemd service | **not** installed (`E_SERVICE_INSTALL_FAILED` / `SYSTEMD_USER_UNREACHABLE`) |
+
+`traycer host doctor` reports `SERVICE_NOT_REGISTERED` and `SYSTEMD_USER_UNREACHABLE`. Expected on this box. Do not install the OS service. Do not enable systemd. Do not click **Retry** in the GUI unless this process is already running.
+
+After the process was up, the systemd modal on `:3` **dismissed itself**. The GUI painted the signed-in onboarding intro (ACT 05 — Delegation / Agent selection guide). Settings was not on screen; it is not in this commit.
+
+### Logged-in frames (our files; 2026-08-21 YEKT)
+
+| Path | Pixels | Bytes | sha256 | What it shows |
+|---|---|---|---|---|
+| [docs/reference-screens/logged-in-host-error.png](reference-screens/logged-in-host-error.png) | 1280x800 | 70892 | `f87f38728640242d2b5d302433bcd632069b69c38d36eda52824c08bf8fae8f6` | Signed-in white canvas, ZA avatar, official-host systemd modal (before process start). |
+| [docs/reference-screens/logged-in-header-avatar.png](reference-screens/logged-in-header-avatar.png) | crop | 3801 | `ac06fe1fbabc8e860d7029e7ae8a47cb3c55e725c5ae2cf859fca1181de24b6d` | File/Edit/View/Window/Help + ZA avatar on the white signed-in header. |
+| [docs/reference-screens/logged-in-onboarding-act05.png](reference-screens/logged-in-onboarding-act05.png) | 1280x800 | 625018 | `28dfb01bfb6e81a4b774ee5df9c7551e839fb987f1f2f7f3fac3d294e388f212` | After official host process: ACT 05 Delegation, "Tell Traycer how to choose", Agent selection guide modal, Skip intro. v1.1.10. |
+| [docs/reference-screens/logged-in-onboarding-header.png](reference-screens/logged-in-onboarding-header.png) | 1280x90 | 37562 | `a8b537f5d33f53c7895945614536295f6d3f9fc7ddbab116db7827eec778db57` | Intro header: traycer wordmark + Skip intro / Esc. |
+
+Settings was captured after restarting **only** the Desktop on `:3` (same HOME `home-d3`). Official host pid `339885` was left running. Retry was not clicked.
+
+| Path | Pixels | Bytes | sha256 | What it shows |
+|---|---|---|---|---|
+| [docs/reference-screens/logged-in-settings.png](reference-screens/logged-in-settings.png) | 1280x800 | 115718 | `c35841e25690f1920c9c44f99a816599111e52e1db00a816aacd93cbf3142fe9` | Signed-in Settings / General: Start Page + Settings tabs, left nav (General/Host/Diagnostics), ZA avatar. systemd modal gone. |
+
+
+## Login wall (0126, still on :5)
+
+The first painted screen on `:5` is a mandatory **Sign in** wall. There is no email field on that frame — only the button. That session stayed signed out. Public pages fetched as a fallback (not a substitute for signed-in chrome):
 
 - https://docs.traycer.ai/install — install table still points at `/releases/latest/download/...`; Linux AppImage note is `chmod +x` then run.
 - https://docs.traycer.ai/changelog — Desktop changelog (sign-in is browser/PKCE, shared with the bundled CLI). No newer Desktop tag than `desktop-v1.1.10` was advertised by GitHub `releases/latest` at pin time.
@@ -125,5 +174,6 @@ Do not bump this pin because a local download of `/releases/latest` moved. Archi
 |---|---|
 | `/workspace/ref-traycer/traycer-desktop-linux-x86_64.AppImage` | Pinned binary |
 | `/workspace/ref-traycer/squashfs-root/` | Extracted AppRun tree (runtime only) |
-| `/workspace/ref-traycer/home/` | Isolated official-app HOME |
-| `/workspace/ref-traycer/logs/` | AppRun stdout/stderr from this session |
+| `/workspace/ref-traycer/home/` | Isolated official-app HOME (`:5` welcome session) |
+| `/workspace/ref-traycer/home-d3/` | Signed-in official-app HOME (`:3`) |
+| `/workspace/ref-traycer/logs/` | AppRun / official-host stdout/stderr |
