@@ -1,6 +1,6 @@
 # Traycer Desktop visual-parity reference environment
 
-STAR 0126 + 0128. This file pins the official Traycer Desktop Linux AppImage that RustTraycer v2.2.0 uses as the Visual Parity reference. It records only values that were measured on this machine. Updating the reference is only via parity-watch.
+STAR 0126 + 0128 + 0134. This file pins the official Traycer Desktop Linux AppImage that RustTraycer v2.2.0 uses as the Visual Parity reference. It records only values that were measured on this machine. Updating the reference is only via parity-watch.
 
 ## Pinned build
 
@@ -196,3 +196,27 @@ Acts 01–03 (tasks/sidebar/agents/artifacts, layout/split/terminal, handoff/bub
 | [docs/reference-screens/logged-in-act05-agent-selection.png](reference-screens/logged-in-act05-agent-selection.png) | 1280x800 | 103073 | `fce76224ab0ecc891a915cb0103e96a94bcfbb843b2203372ce07a11afe36fdb` | Settings → Agent selection (act05 settings page). Guide markdown saved. |
 | [docs/reference-screens/logged-in-act06-appearance.png](reference-screens/logged-in-act06-appearance.png) | 1280x800 | 101328 | `9ee5e40a1bf1724019a110a6f69c2d82905bfcfbaacbfbaf92cfb6d80d234e4c` | Settings → Appearance (act06 theme). System + Traycer Green, Figtree 15px. |
 | [docs/reference-screens/logged-in-act06-keybindings.png](reference-screens/logged-in-act06-keybindings.png) | 1280x800 | 95567 | `afdc4f1361744b6958444aac085694dfe8a2ec697d424bd65bc14f7604c646a0` | Settings → Keybindings (act06 shortcuts). Ctrl+1–9 / Ctrl+N / tabs. Cmd+K not in the first screenful. |
+
+
+## STAR 0134 — official missing surfaces (Start Page, History)
+
+Same live signed-in session as 0128: **DISPLAY=:3**, HOME `/workspace/ref-traycer/home-d3`, avatar **ZA**, official Desktop 1.1.10, client `1280x719+0+24`. Official host process **339885** (`ws://127.0.0.1:43873/rpc`, hostId `f9654c95-c528-489c-894c-a9bf379bf94b`) was left running. Restart host / Retry / Skip intro / Start building were **not** clicked. `:5` Welcome session was not used.
+
+0128 left the GUI on Settings and recorded that a Start Page tab click did not leave Settings. 0134 retried a **precise click on the Start Page tab label** (not File → Settings, not the header gear) at framebuffer `(240, 70)`. That click activated the Start Page *page*. Capture method: `ffmpeg -f x11grab -video_size 1280x800 -i :3 -frames:v 1` plus `/tmp/xlenv/click_xy.py` on DISPLAY=:3.
+
+Settings / welcome / host-error frames already in this file are **not** the missing surfaces.
+
+### Captured (2026-08-21 ~11:00 YEKT / 06:00 UTC)
+
+| Path | Pixels | Bytes | sha256 | What it shows |
+|---|---|---|---|---|
+| [docs/reference-screens/logged-in-start-page.png](reference-screens/logged-in-start-page.png) | 1280x800 | 74717 | `d35051611987331e39e60693da8d3a267e07baf5cab7c97d262d47ec14113f7f` | Official Start Page *page* (Start Page tab active). Greeting "Good morning" / "What's on your mind?"; composer "Ask Traycer anything. @ mention for context"; GPT-5.6-Sol / High / Full access; Switch to Terminal; cursor + Add folder; Most recent / Filter / Select (empty list). Banner "Update installed — restart host to finish." Settings tab still present, inactive. ZA. |
+| [docs/reference-screens/logged-in-history.png](reference-screens/logged-in-history.png) | 1280x800 | 80080 | `3ddb69b8ee052503fc1de56e5bcd161d244a70211399e2f58e0f866b4aa0aa07` | History modal after clicking the header **clock** (left of bell + ZA). Title History; search "Search by title, repo, branch, or PR"; Most recent / Filter / Select / Refresh; empty state **"No tasks yet"**. Pop-out + close. |
+
+### Still needs live (honest — surfaces did not open)
+
+- **Task conversation / chat thread** (`logged-in-task.png` / `logged-in-chat.png`): not captured. History is empty ("No tasks yet"). The Start Page composer is the chat *input* on Start Page, not a separate task/chat frame. Ctrl+N (Keybindings: New task) opened another Start Page tab ("Where shall we start?"), not a task thread. `+` tab stayed on Start Page.
+- **Ladder / Epic** (`logged-in-ladder.png`): not captured. File → **Open Epic in New Window…** opened a picker titled "Open Epic in New Window" with **"No Epics yet."** Close only. No epic/task to open. That empty picker was **not** committed as a ladder frame.
+- **Onboarding Acts 01–03**: still gone. File → Settings does not replay them. View menu is Reload / Force Reload / zoom / Full Screen only (no Home / Start / History). File menu is New Window, Open Epic in New Window…, Close Tab, Settings…, Sign Out, Quit.
+
+Do not treat Settings, welcome/Sign in, or the host-error/systemd modal as substitutes for the missing task/chat/ladder frames.
