@@ -2,20 +2,23 @@ use crate::ladder::YOLO_BANNER;
 use crate::metrics::METRICS_LABEL;
 use crate::search_ux::{search_enter_submits, SEARCH_HINT, SEARCH_LABEL};
 use crate::state::{AppState, HostStatus, Screen};
+use crate::theme::{self, Icon};
 
 pub fn show(ctx: &egui::Context, state: &mut AppState) {
     egui::TopBottomPanel::top("chrome_nav")
-        .exact_height(40.0)
+        .exact_height(theme::CHROME_NAV_HEIGHT)
+        .frame(theme::header_frame())
         .show(ctx, |ui| {
             ui.horizontal_centered(|ui| {
-                ui.add_space(8.0);
+                ui.add_space(theme::SPACE_8);
+                theme::show_icon(ui, Icon::Layers, theme::SIZE_UI, theme::FG_PRIMARY);
                 ui.strong("RustTraycer");
                 if state.demo {
                     ui.weak("демо");
                 }
                 ui.separator();
 
-                nav_item(ui, state, Screen::Tasks, "Задачи", true);
+                nav_item(ui, state, Screen::Tasks, "Задачи", true, Icon::List);
 
                 let canvas_label = state
                     .selected_task_title()
@@ -24,11 +27,19 @@ pub fn show(ctx: &egui::Context, state: &mut AppState) {
                 let canvas_enabled = state.selected_task_id.is_some()
                     || !state.open_task_ids.is_empty()
                     || state.has_workspace();
-                nav_item(ui, state, Screen::Canvas, &canvas_label, canvas_enabled);
+                nav_item(
+                    ui,
+                    state,
+                    Screen::Canvas,
+                    &canvas_label,
+                    canvas_enabled,
+                    Icon::Message,
+                );
 
-                nav_item(ui, state, Screen::Host, "Host", true);
+                nav_item(ui, state, Screen::Host, "Host", true, Icon::Server);
 
                 ui.separator();
+                theme::show_icon(ui, Icon::Search, theme::SIZE_CHIP, theme::FG_SECONDARY);
                 ui.label(SEARCH_LABEL);
                 let resp = ui.add(
                     egui::TextEdit::singleline(&mut state.search_q)
@@ -47,7 +58,7 @@ pub fn show(ctx: &egui::Context, state: &mut AppState) {
                 }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.add_space(10.0);
+                    ui.add_space(theme::SPACE_8);
                     status_pill(ui, state.host_status);
                     metrics_chip(ui, state);
                 });
@@ -56,19 +67,24 @@ pub fn show(ctx: &egui::Context, state: &mut AppState) {
 
     if state.is_offline() {
         egui::TopBottomPanel::top("offline_banner").show(ctx, |ui| {
-            let fill = egui::Color32::from_rgb(92, 28, 28);
             egui::Frame::new()
-                .fill(fill)
-                .inner_margin(egui::Margin::symmetric(12, 8))
+                .fill(theme::BANNER_OFFLINE_FILL)
+                .inner_margin(egui::Margin::symmetric(
+                    theme::SPACE_12 as i8,
+                    theme::SPACE_8 as i8,
+                ))
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.colored_label(
-                            egui::Color32::from_rgb(255, 220, 220),
+                            theme::BANNER_OFFLINE_FG,
                             "Host не запущен или не отвечает. Поднимите его через CLI (`rt-cli start`) — GUI его не стартует.",
                         );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui
-                                .add(egui::Button::new("Повторить").fill(egui::Color32::from_rgb(140, 40, 40)))
+                                .add(
+                                    egui::Button::new("Повторить")
+                                        .fill(theme::BANNER_OFFLINE_BUTTON),
+                                )
                                 .clicked()
                             {
                                 state.request_retry();
@@ -82,10 +98,13 @@ pub fn show(ctx: &egui::Context, state: &mut AppState) {
     if state.yolo_on() {
         egui::TopBottomPanel::top("yolo_banner").show(ctx, |ui| {
             egui::Frame::new()
-                .fill(egui::Color32::from_rgb(120, 48, 16))
-                .inner_margin(egui::Margin::symmetric(12, 8))
+                .fill(theme::BANNER_YOLO_FILL)
+                .inner_margin(egui::Margin::symmetric(
+                    theme::SPACE_12 as i8,
+                    theme::SPACE_8 as i8,
+                ))
                 .show(ui, |ui| {
-                    ui.colored_label(egui::Color32::from_rgb(255, 220, 170), YOLO_BANNER);
+                    ui.colored_label(theme::BANNER_YOLO_FG, YOLO_BANNER);
                 });
         });
     }
@@ -94,19 +113,35 @@ pub fn show(ctx: &egui::Context, state: &mut AppState) {
         if let Some(msg) = state.ws_banner.clone() {
             egui::TopBottomPanel::top("ws_banner").show(ctx, |ui| {
                 egui::Frame::new()
-                    .fill(egui::Color32::from_rgb(72, 56, 16))
-                    .inner_margin(egui::Margin::symmetric(12, 8))
+                    .fill(theme::BANNER_WS_FILL)
+                    .inner_margin(egui::Margin::symmetric(
+                        theme::SPACE_12 as i8,
+                        theme::SPACE_8 as i8,
+                    ))
                     .show(ui, |ui| {
-                        ui.colored_label(egui::Color32::from_rgb(255, 230, 170), msg);
+                        ui.colored_label(theme::BANNER_WS_FG, msg);
                     });
             });
         }
     }
 }
 
-fn nav_item(ui: &mut egui::Ui, state: &mut AppState, screen: Screen, label: &str, enabled: bool) {
+fn nav_item(
+    ui: &mut egui::Ui,
+    state: &mut AppState,
+    screen: Screen,
+    label: &str,
+    enabled: bool,
+    icon: Icon,
+) {
     let selected = state.screen == screen;
     ui.add_enabled_ui(enabled, |ui| {
+        let color = if selected {
+            theme::FG_PRIMARY
+        } else {
+            theme::FG_SECONDARY
+        };
+        theme::show_icon(ui, icon, theme::SIZE_CHIP, color);
         let response = ui.selectable_label(selected, label);
         if response.clicked() {
             state.screen = screen;
@@ -117,30 +152,33 @@ fn nav_item(ui: &mut egui::Ui, state: &mut AppState, screen: Screen, label: &str
 fn status_pill(ui: &mut egui::Ui, status: HostStatus) {
     let (dot, bg, fg) = match status {
         HostStatus::Connecting => (
-            egui::Color32::from_rgb(230, 180, 60),
-            egui::Color32::from_rgb(50, 40, 16),
-            egui::Color32::from_rgb(240, 210, 120),
+            theme::FG_SECONDARY,
+            theme::CHIP_KEYBINDING,
+            theme::FG_PRIMARY,
         ),
-        HostStatus::Online => (
-            egui::Color32::from_rgb(80, 200, 120),
-            egui::Color32::from_rgb(16, 48, 28),
-            egui::Color32::from_rgb(160, 230, 180),
-        ),
+        HostStatus::Online => (theme::ACCENT, theme::BG_PAGE, theme::ACCENT),
         HostStatus::Offline => (
-            egui::Color32::from_rgb(220, 80, 80),
-            egui::Color32::from_rgb(48, 18, 18),
-            egui::Color32::from_rgb(240, 170, 170),
+            theme::BANNER_OFFLINE_FG,
+            theme::BANNER_OFFLINE_FILL,
+            theme::BANNER_OFFLINE_FG,
         ),
     };
 
     egui::Frame::new()
         .fill(bg)
-        .corner_radius(12.0)
-        .inner_margin(egui::Margin::symmetric(10, 4))
+        .corner_radius(theme::RADIUS_NAV)
+        .inner_margin(egui::Margin::symmetric(
+            theme::SPACE_8 as i8,
+            theme::SPACE_4 as i8,
+        ))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                let (rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
-                ui.painter().circle_filled(rect.center(), 4.0, dot);
+                let (rect, _) = ui.allocate_exact_size(
+                    egui::vec2(theme::SPACE_8, theme::SPACE_8),
+                    egui::Sense::hover(),
+                );
+                ui.painter()
+                    .circle_filled(rect.center(), theme::SPACE_4, dot);
                 ui.colored_label(fg, status.label_ru());
             });
         });
@@ -148,15 +186,10 @@ fn status_pill(ui: &mut egui::Ui, status: HostStatus) {
 
 fn metrics_chip(ui: &mut egui::Ui, state: &crate::state::AppState) {
     let value = state.metrics_chip_value();
-    let bg = egui::Color32::from_rgb(28, 32, 42);
-    let fg = egui::Color32::from_rgb(180, 196, 220);
-    egui::Frame::new()
-        .fill(bg)
-        .corner_radius(12.0)
-        .inner_margin(egui::Margin::symmetric(10, 4))
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.colored_label(fg, format!("{METRICS_LABEL} {value}"));
-            });
+    theme::chip_frame().show(ui, |ui| {
+        ui.horizontal(|ui| {
+            theme::show_icon(ui, Icon::Gauge, theme::SIZE_CHIP, theme::FG_SECONDARY);
+            ui.colored_label(theme::FG_SECONDARY, format!("{METRICS_LABEL} {value}"));
         });
+    });
 }
