@@ -2,8 +2,8 @@
 
 For: UI (`rt-gui`, eframe + egui).
 From: Architect. Date: 2026-08-21. Not code. No crate bump.
-Base: STAR 0126 pin `docs/reference-env.md` (Traycer Desktop `desktop-v1.1.10`).
-Status: first visual-parity contract. Tokens that were pipetted from a live frame are law for those surfaces. Tokens that exist only as public-docs IA are **not** law for hex.
+Base: STAR 0126 pin + STAR 0128 logged-in frames in `docs/reference-env.md` (Traycer Desktop `desktop-v1.1.10`).
+Status: visual-parity contract, second pass. Tokens pipetted from a live frame are law for those surfaces. Tokens that exist only as public-docs IA are **not** law for hex. Acts 01–03 (tasks / layout / handoff) were not on screen after login — those rows stay **needs live**.
 
 This file does not replace `docs/gui-ia-v0.md` (screens, RPC, empty states) or `docs/e1-canvas-v2.md` / `docs/e2-ladder-v2.md` (behavior). It tells `rt-gui` what the official Desktop *looks like*, what to implement in egui, and which mismatches are accepted engine limits rather than bugs.
 
@@ -13,9 +13,9 @@ This file does not replace `docs/gui-ia-v0.md` (screens, RPC, empty states) or `
 
 - Do **not** unpack or open `app.asar`. Do **not** copy CSS, fonts, icons, or other Traycer brand assets from the AppImage / squashfs tree.
 - Screenshots of the running window are *our* files and may live under `docs/reference-screens/`. The AppImage binary stays out of git (see `docs/reference-env.md`).
-- Do **not** vendor Traycer fonts. Recommendation only: an Inter-class geometric sans under the SIL Open Font License (for example [Inter](https://github.com/rsms/inter)). Recommendation only for icons: [Lucide](https://lucide.dev) (ISC). Neither is a brand clone.
+- Do **not** vendor Traycer fonts. Recommendation only: an Inter-class geometric sans under the SIL Open Font License (for example [Inter](https://github.com/rsms/inter)). The live Appearance page names **Figtree** as the default UI face — that is a *product setting we observed*, not a license to vendor Figtree from the AppImage. Recommendation only for icons: [Lucide](https://lucide.dev) (ISC). Neither is a brand clone.
 - Do not reproduce the official Traycer mark. RustTraycer keeps its own wordmark (`chrome.rs` already says "RustTraycer").
-- Public pages on https://docs.traycer.ai were fetched as a **fallback** for surfaces behind the sign-in wall. They are documentation, not live captures. This spec does **not** claim they are screenshots of Desktop 1.1.10.
+- Public pages on https://docs.traycer.ai were fetched as a **fallback** for surfaces still not captured live (Home / History, chat transcript, ladder card, Acts 01–03). They are documentation, not live captures. This spec does **not** claim they are screenshots of Desktop 1.1.10.
 
 ---
 
@@ -23,20 +23,41 @@ This file does not replace `docs/gui-ia-v0.md` (screens, RPC, empty states) or `
 
 ### 1.1 Live in-tree frames (law for hex / ruler)
 
-Pinned by STAR 0126. Observe-only X11 dumps of official Traycer Desktop 1.1.10 on `DISPLAY=:5` (1280×800×24). Taken 2026-08-21 09:37 YEKT / 04:37 UTC. Method and sha256: `docs/reference-env.md`.
+Two sessions, same pinned build `desktop-v1.1.10`. Method and sha256: `docs/reference-env.md`.
+
+**Welcome (STAR 0126).** Observe-only X11 dumps on `DISPLAY=:5` (1280×800×24). Taken 2026-08-21 09:37 YEKT / 04:37 UTC. Signed out.
 
 | ID | Path | Pixels | What it is |
 |---|---|---|---|
 | **W** | [`docs/reference-screens/welcome-sign-in.png`](reference-screens/welcome-sign-in.png) | 1280×719 RGB | Official client window: native File/Edit/View/Window/Help strip, black canvas, white mark, heading "Welcome to Traycer", single **Sign in** button, grainy teal floor glow. No email field. |
 | **D** | [`docs/reference-screens/display5-1280x800-desktop.png`](reference-screens/display5-1280x800-desktop.png) | 1280×800 RGB | Same moment, full `:5` framebuffer. XFWM title bar "Traycer" (24 px) above **W**, Plank dock below. Client pixels match **W** at `y_D = y_W + 24`. |
 
-Do not add new screenshots in this change. Do not treat XFWM / Plank / GTK menu chrome as Traycer product tokens — they are host-desktop chrome that happens to surround the official window.
+**Logged-in (STAR 0128).** `DISPLAY=:3`, Electron HOME `/workspace/ref-traycer/home-d3`, avatar initials **ZA**. Full-desktop PNGs are 1280×800 (XFWM 24 px + client + Plank). Client-window dumps are 1280×719, same origin convention as **W**. Crops keep their own origin — cite the frame, do not mix coordinate systems.
+
+| ID | Path | Pixels | What it is |
+|---|---|---|---|
+| **HE** | [`docs/reference-screens/logged-in-host-error.png`](reference-screens/logged-in-host-error.png) | 1280×800 RGB | Signed-in light canvas, ZA avatar, official-host systemd modal (before process start). |
+| **HA** | [`docs/reference-screens/logged-in-header-avatar.png`](reference-screens/logged-in-header-avatar.png) | 1280×100 RGB | Crop: File/Edit/View/Window/Help + ZA avatar on the white signed-in header. |
+| **HT** | [`docs/reference-screens/logged-in-header-tabs-avatar.png`](reference-screens/logged-in-header-tabs-avatar.png) | 1280×88 RGB | Crop: File menu, Start Page / Settings tabs, `+` tab, ZA avatar. |
+| **OA** | [`docs/reference-screens/logged-in-onboarding-act05.png`](reference-screens/logged-in-onboarding-act05.png) | 1280×800 RGB | After official host process: ACT 05 Delegation, "Tell Traycer how to choose", Agent selection guide modal, Skip intro. v1.1.10. |
+| **OH** | [`docs/reference-screens/logged-in-onboarding-header.png`](reference-screens/logged-in-onboarding-header.png) | 1280×90 RGB | Crop: XFWM + menu + dark intro header (traycer wordmark + Skip intro / Esc). |
+| **S** | [`docs/reference-screens/logged-in-settings.png`](reference-screens/logged-in-settings.png) | 1280×800 RGB | Full `:3` desktop: Settings / General, Start Page + Settings tabs, left nav, ZA avatar. systemd modal gone. |
+| **SG** | [`docs/reference-screens/logged-in-settings-general.png`](reference-screens/logged-in-settings-general.png) | 1280×719 RGB | Client window: Settings / General. Same chrome as **S** without XFWM/Plank. Bottom 80 px of this PNG is `#000000` capture padding — not a product footer. |
+| **SS** | [`docs/reference-screens/logged-in-settings-sidebar.png`](reference-screens/logged-in-settings-sidebar.png) | 280×631 RGB | Crop of the Settings nav. Origin = top of the selected **General** row. Same 80 px black pad at the bottom. |
+| **P** | [`docs/reference-screens/logged-in-act04-providers.png`](reference-screens/logged-in-act04-providers.png) | 1280×800 RGB | Settings → Providers. Codex selected, bundled v0.146.0, Enabled toggle on. |
+| **AG** | [`docs/reference-screens/logged-in-act05-agent-selection.png`](reference-screens/logged-in-act05-agent-selection.png) | 1280×800 RGB | Settings → Agent selection. Guide markdown saved. |
+| **A** | [`docs/reference-screens/logged-in-act06-appearance.png`](reference-screens/logged-in-act06-appearance.png) | 1280×800 RGB | Settings → Appearance. Theme System + preset **Traycer Green**. UI font **Figtree (Default)**, size **15 px**. |
+| **K** | [`docs/reference-screens/logged-in-act06-keybindings.png`](reference-screens/logged-in-act06-keybindings.png) | 1280×800 RGB | Settings → Keybindings. Ctrl+1–9 / Ctrl+N / tab shortcuts. Cmd+K is not in the first screenful. |
+
+Do not add new screenshots in this change. Do not treat XFWM / Plank / GTK menu chrome as Traycer product tokens — they are host-desktop chrome that happens to surround the official window. Plank icon colors (Chrome green `#229342`, dock shelf `#263742`) are **not** product.
+
+Acts 01–03 of the intro (tasks/sidebar/agents/artifacts, layout/split/terminal, handoff/bubbles) are **not** in this set. File → Settings does not replay them. Those rows stay **needs live**.
 
 ### 1.2 Fallback — docs.traycer.ai (IA only, not live)
 
 Fetched 2026-08-21. HTML of the docs site was scraped for `<img>` / `og:image` / mintcdn product shots. Result: **no product screenshots**. The only raster images are Font Awesome icons and Mintlify-generated OG cards (`backgroundDark=#0e0e10`, `primaryColor=#454545`). Those are *docs-site* tokens. They are **not** Desktop tokens and were not pipetted into §2.
 
-Fallback pages used for *structure* of login-walled surfaces:
+Fallback pages still used for *structure* of surfaces we have not captured live (Home / History, chat, ladder, panel stack):
 
 - https://docs.traycer.ai — mental model (Task, agents, panels, artifacts)
 - https://docs.traycer.ai/quickstart — first-run: folder → Task → agent → inspect
@@ -50,18 +71,18 @@ Fallback pages used for *structure* of login-walled surfaces:
 - https://docs.traycer.ai/panels/terminals — plain shell sessions
 - https://docs.traycer.ai/panels/comments — anchored threads, contextual panel
 - https://docs.traycer.ai/panels/sharing — Task access (out of scope by ADR for us; listed so the map is complete)
-- https://docs.traycer.ai/settings/appearance — Theme system/light/dark, preset, UI/code font size, artifact icon colors
+- https://docs.traycer.ai/settings/appearance — Theme system/light/dark, preset, UI/code font size, artifact icon colors (now also **live A**)
 - https://docs.traycer.ai/changelog — 1.1.x chrome notes (split, context chip, notification center, redesigned message cards)
 
-Every component that exists only in this column is tagged **fallback docs.traycer.ai** and **needs live after login**.
+Every component that exists only in this column is tagged **fallback docs.traycer.ai** and **needs live**.
 
 ### 1.3 How pixels were read
 
-Python 3 + Pillow, no eyedropper GUI. A sample is an exact `Image.getpixel((x, y))` on the PNG. Regions used `Image.crop` + a color counter. Distances are inclusive pixel spans (`max − min + 1`). Corner radius is the left/right inset of the cream fill on the first/last rows of the button (classic rounded-rect footprint), not a CSS `border-radius` read from asar.
+Python 3 + Pillow, no eyedropper GUI. A sample is an exact `Image.getpixel((x, y))` on the PNG. Regions used `Image.crop` + a color counter. Distances are inclusive pixel spans (`max − min + 1`). Corner radius is the left/right inset of the fill on the first/last rows of the control (classic rounded-rect footprint), not a CSS `border-radius` read from asar.
 
 When a color is a single-pixel sample, the coordinate is in the table. When a fill is a plateau (thousands of identical pixels), the table still cites one representative pixel plus the count.
 
-Anti-aliased type is a cloud, not one hex. The spec records the dominant plateau and the AA neighbors, and says so.
+Anti-aliased type is a cloud, not one hex. The spec records the dominant plateau and the AA neighbors, and says so. Grainy dark washes (onboarding header / ACT 05 floor) are clouds — do not flatten them to a hex we did not measure as a plateau.
 
 ---
 
@@ -71,7 +92,7 @@ Every token cites its source frame. Tokens without a live sample are **not inven
 
 ### 2.1 Palette
 
-#### Canvas (product, frame **W**)
+#### Canvas (product, frame **W** — signed-out welcome)
 
 | Token | Hex | Sample | Notes |
 |---|---|---|---|
@@ -90,19 +111,76 @@ Every token cites its source frame. Tokens without a live sample are **not inven
 
 The floor glow is a **grainy, noisy teal wash**, not a CSS linear-gradient. A 5×5 at `(630,580)` is already five different hexes (`#376B6F`, `#2E6166`, `#23575C`, `#205358`, …). egui cannot reproduce film grain cheaply — see §4.
 
-No hairline border was measured on the canvas. Left/right mid samples **W** `(20, 360)` and `(1260, 360)` are `#000000`. No card, no sidebar, no splitter on this frame.
+No hairline border was measured on the welcome canvas. Left/right mid samples **W** `(20, 360)` and `(1260, 360)` are `#000000`. No card, no sidebar, no splitter on this frame.
 
-#### Native host chrome (frames **W** / **D** — do not copy into `rt-gui`)
+#### Signed-in light chrome (frames **SG** / **S** / **HT** / **A** / **P** / **AG** / **K** / **HE**)
+
+The logged-in product is a **light** theme (Appearance → Theme = System on this machine). Surfaces are cool off-whites, not the welcome black and not mint `#0e0e10`.
+
+| Token | Hex | Sample | Notes |
+|---|---|---|---|
+| `bg.page` | `#F6F9F8` | **SG** `(20, 150)`; **S** `(20, 200)`; **HE** `(20, 200)` (737 943 px on **HE**) | Signed-in wash: settings sidebar, page margins, host-error canvas behind the modal, header/body field under the tabs. Cool gray-green, not `#FFFFFF` and not `#F6F5F4` (that is the GTK menu). Dominant plateau on every logged-in settings frame. |
+| `bg.content` | `#F9FBFB` | **SG** `(400, 250)`; **A** `(400, 320)`; **K** `(400, 350)` | Settings main column / cards. 1-step lighter than `bg.page`. 344 724 px in the **A** content box. |
+| `bg.header` | `#FFFFFF` | **SG** `(80, 40)`; **HT** `(80, 40)`; **HA** `(80, 30)` | Tab strip and the right-hand toolbar that holds the avatar. Active Settings tab is this same white and joins the body with no second fill. |
+| `bg.tab.inactive` | `#F6F9F8` | **HT** `(400, 40)`; **SG** `(400, 40)` | Start Page tab fill. Same hex as `bg.page` — the inactive tab is the page wash showing through, not a third surface. |
+| `bg.nav.selected` | `#EAEAEA` | **SG** `(80, 90)` (4 850 px on **SS**); **SS** `(80, 10)` | Selected settings-nav pill (General / Appearance / Providers / …). Also the keybinding chip fill (**K**) and the avatar disc (**HA**). One hex, three roles. |
+| `fg.primary` | `#0F0F0F` | **SG** `(360, 115)` heading "General"; **SG** `(350, 240)` row title; **A** `(360, 140)` "Appearance" | Near-black. Heading plateau and settings row titles. Not `#000000` and not `#050505` (that is welcome CTA type). |
+| `fg.secondary` | `#666666` | **SG** `(400, 180)` page subtitle / descriptions; **HE** modal body (695 px in the card); **K** chip glyphs | Muted gray. AA neighbors `#696969`, `#7E7E7E`. |
+| `accent.traycer-green` | `#257174` | **SG** `(1160, 237)` toggle ON (657 px across three toggles); **A** `(1160, 528)` "Use pointer cursors" ON (219 px); **P** `(1160, 260)` Enabled ON (234 px); **P** `(557, 548)` Bundled radio (37 px) | **Traycer Green.** Teal, not lime. RGB `(37, 113, 116)`. This is the ON-toggle track and the selected radio. AA rim `#31797C`, `#277275`, `#347B7E`. |
+| `accent.traycer-green.swatch` | `#1A2421` | **A** `(1040, 346)` (311 px) | Dark square behind the "Aa" on the Appearance preset dropdown labeled **Traycer Green**. The letters themselves punch through as `#257174` (sparse, AA). Do not use the swatch fill as the accent — use `accent.traycer-green`. |
+| `toggle.off.track` | `#EAEAEA` | **SG** `(1165, 484)` | OFF toggle track. Same hex as `bg.nav.selected`. |
+| `toggle.knob` | `#F6F9F8` | **SG** `(1174, 237)` ON knob; **SG** `(1160, 484)` OFF knob | Knob matches `bg.page`, not pure white. |
+| `hairline.header` | `#DFE9E7` | **SG** / **HT** full row `y=64` (1 067 px on **SG**) | 1 px seam under the tab strip, before `bg.page`. |
+| `hairline.control` | `#DCE7E4` | **A** theme-segment / dropdown edges; **SG** `(358, 27)` cluster | Cool green-gray stroke around segmented controls and inputs. Not a 1 px CSS we can read — a plateau on the control rim. |
+| `hairline.sidebar` | `#E6EFEC` | **SG** `(239, 150)` | Faint 1 px between nav column (`x=0…238`) and the page. Sidebar and page are the *same* `#F6F9F8`; the split is this hairline, not a fill change. |
+| `surface.input` | `#FFFFFF` | **A** `(1040, 350)` preset dropdown; **A** `(1100, 650)` Figtree dropdown; **AG** editor | Raised white on `bg.content`. |
+| `surface.segment.idle` | `#F5F6F6` | **A** `(980, 268)` (4 003 px in the theme control) | Unselected Light / Dark segments. |
+| `surface.segment.active` | `#FFFFFF` | **A** `(1140, 268)` System segment, ~87×26 | Selected segment. Soft `#DCE7E4` halo, not a drop-shadow plate. |
+| `chip.keybinding` | `#EAEAEA` | **K** `(1160, 230)` | Shortcut chip fill. Same hex as selected nav. Halo `#EDF2F1` / `#E2E9E7`. |
+| `editor.current-line` | `#F1FAFF` | **AG** `(800, 320)` (13 232 px) | Agent-selection guide: current-line wash. Cool blue, not Traycer Green. |
+| `editor.loading-line` | `#F8FDFF` | **OA** `(800, 277)` (10 346 px) | Onboarding guide while "Loading…". Same family as `editor.current-line`, one step lighter. |
+
+#### Host-error modal (frame **HE**)
+
+| Token | Hex | Sample | Notes |
+|---|---|---|---|
+| `modal.fill` | `#FFFFFF` | **HE** `(640, 450)` | Card ~420×226 at `(430, 301)–(849, 526)`. |
+| `modal.edge` | `#DCDFDE` | **HE** `(640, 300)` | 1 px gray bar on the top edge before the white fill. Side hairline `#D6D8D7` at `(429, 400)`. |
+| `modal.radius` | 8–10 px | Top row `y=301`: fill `x=439…840` vs full `x=430…849` (inset 9 L / 9 R). Then 6, 4, 3, 0. | Rounded rect, not a pill. |
+| `fg.modal-body` | `#666666` | **HE** modal interior (695 px) | systemd error copy. Centered. |
+| `fg.modal-action` | `#0F0F0F` | **HE** `(576, 479)` | "Retry" glyph plateau (25 px). |
+| `surface.retry` | `#F6F9F8` | **HE** `(580, 479)` | Retry is a ghost/secondary on the *page* wash, with `#DCE7E4` halo. Not `surface.cta` cream. |
+| `fg.report` | `#666666` | **HE** `(654, 479)` | "Report issue" next to Retry. |
+
+No Traycer Green on **HE**. No danger-red banner — the host error is a centered white card on `bg.page`, not a `#5C1C1C` strip. Current `rt-gui` offline banner `#5C1C1C` remains *our* color, not a pipetted Traycer token.
+
+#### Onboarding ACT 05 (frames **OA** / **OH**)
+
+These fills are **clouds**, not plateaus. Cite as atmosphere.
+
+| Token | Hex (dominant) | Sample | Notes |
+|---|---|---|---|
+| `onboarding.header` | `#0E1A17` / `#0E1B18` | **OH** `(640, 70)`; **OA** `(640, 70)` | Dark intro bar from **OH** `y=51`. Neighbors `#0D1A17`, `#0D1916`, `#0E1916` (thousands of px each). Not `#000000`. Grainy teal-black, same class as the welcome floor but much darker. |
+| `onboarding.fg` | `#FFFFFF` | **OH** `(640, 72)`, `(640, 76)`, `(640, 81)` | Wordmark "traycer" + "Skip intro". |
+| `onboarding.canvas` | `#0B1513` / `#262E2B` | **OA** `(20, 200)` `#0B1613`; left copy crop dominated by `#262E2B` (8 919), `#252D2A` (7 387), `#272F2C` (6 105) | Grainy dark field behind the guide modal. A 5×5 is already several hexes. Not a flat fill. |
+| `onboarding.scrim` | `#7F7F7F` / `#7B7C7C` | **OA** mid-frame (24 368 / 18 307 px) | Blurred settings-like backdrop around the white modal. AA gray cloud. |
+| `onboarding.modal` | `#FFFFFF` | **OA** `(800, 400)` | Guide card ~677 px wide at `x=464…1140`, `y≈202…554`. Title `#0F0F0F` at `(480, 217)`; subtitle `#666666`. |
+| `onboarding.continue` | `#DEDFDF` | **OA** `(1180, 680)` | Continue on the dark footer. Cool gray, **not** welcome cream `#F8F7F2`. Arrow glyph `#000000` at `(1187, 670)–(1201, 684)` (109 px). This frame is a hover (hand cursor). |
+| `onboarding.progress.on` | `#FFFFFF` | **OA** crop `(20, 90)–(300, 130)` (568 px) | Lit segments of the 7-step bar (ACT 05 ⇒ first five lit). Rest of that crop is the canvas cloud. |
+
+Footer version "v1.1.10" sits on the same dark cloud (`#0B1513` at **OA** `y=720…748`). Do not treat Plank / XFWM pixels on **OA** as product.
+
+#### Native host chrome (frames **W** / **D** / logged-in full-desktop — do not copy into `rt-gui`)
 
 These are the Linux window manager and Electron menu, not Traycer widgets.
 
 | Token | Hex | Sample | What it is |
 |---|---|---|---|
-| `host.menu-strip` | `#F6F5F4` | **W** `(640, 10)`; full rows `y=0…26` | Electron/GTK menu. 27 px tall. Canvas seam: `y=26` `#F6F5F4` → `y=27` `#000000`. |
-| `host.menu-label` | `#2E3436` | **W** menu-dark cluster, 106 px at this hex (also `#000000` / `#000001` glyph cores) | "File Edit View Window Help". System UI, ~11 px cap. |
-| `host.xfwm-title` | `#D8D5D2` | **D** `(640, 8)` | XFWM title bar fill. Top row **D** `(640, 0)` is `#D9D6D3`. Height 24 px (`y=0…23`); **W** begins at **D** `y=24`. |
+| `host.menu-strip` | `#F6F5F4` | **W** `(640, 10)`; **SG** `(640, 10)`; full rows `y=0…26` on client dumps | Electron/GTK menu. 27 px tall. On **W** the canvas seam is `y=26` `#F6F5F4` → `y=27` `#000000`. On **SG** the seam is `y=26` → `y=27` `#FFFFFF` (tab strip). |
+| `host.menu-label` | `#2E3436` | **W** / **SG** / **HT** menu-dark cluster (106 px on **HT**) | "File Edit View Window Help". System UI, ~11 px cap. |
+| `host.xfwm-title` | `#D8D5D2` | **D** `(640, 8)`; **S** / **A** / **HE** `(640, 8)` | XFWM title bar fill. Top row `(640, 0)` is `#D9D6D3`. Height 24 px (`y=0…23`); client begins at framebuffer `y=24`. |
 | `host.xfwm-title-text` | `#2E3436` | **D** title-dark bbox `(581, 6)–(630, 17)`, 83 px | The word "Traycer" on the title bar. |
-| `host.plank` | `#263742` | **D** `(640, 760)` | Plank dock shelf. Not product. |
+| `host.plank` | `#263742` | **D** `(640, 760)`; **S** / **A** `(640, 760)` | Plank dock shelf. Not product. |
 
 `rt-gui` already draws its own 40 px `TopBottomPanel` (`chrome.rs`). Do not restyle that panel to match XFWM Adwaita. Match the *client canvas*, not the window manager.
 
@@ -110,68 +188,93 @@ These are the Linux window manager and Electron menu, not Traycer widgets.
 
 | Token | Why missing | Until |
 |---|---|---|
-| Sidebar / panel surface, sidebar border, selected-row fill | Behind sign-in | **needs live after login** |
-| Chat bubble user vs assistant fills | Behind sign-in | **needs live after login** |
-| Chip / badge fills (context usage, permission, interface filter) | Behind sign-in; changelog names a "context chip" | **needs live after login** |
-| Status: agent idle / running / error | Behind sign-in | **needs live after login** |
-| Status: ticket/story Todo / In Progress / Done | **fallback docs.traycer.ai** `/panels/artifacts` names the three values only | **needs live after login** |
-| Danger / warning / success (toasts, notifications, Yolo banner) | Behind sign-in | **needs live after login**. Current `rt-gui` offline banner `#5C1C1C` is *our* color, not a pipetted Traycer token. |
-| Input / focus ring / hover wash | Sign-in is a single button; no field, no hover frame | **needs live after login** |
-| Light theme surfaces | Landing is dark. Appearance docs say Theme = system / light / dark | **fallback docs.traycer.ai** `/settings/appearance`; **needs live after login** |
-| Scrollbar thumb / track | Nothing scrollable on **W** | **needs live after login** |
-| Tooltip fill | Not shown | **needs live after login** |
-| Modal / ladder-card scrim | Not shown | **needs live after login** |
+| Chat bubble user vs assistant fills | Acts 01–03 / a Task transcript were not captured | **needs live** (Acts 01–03) |
+| Composer, mention hover, context chip, permission chip | Same | **needs live** (Acts 01–03) |
+| Task / History / Start Page *page* (the Start Page *tab* is live) | Start Page tab click did not leave Settings | **needs live** |
+| Canvas sidebar / panel stack / agent row in a Task | Behind onboarding + Settings | **needs live** (Acts 01–03) |
+| Status: ticket/story Todo / In Progress / Done | **fallback docs.traycer.ai** `/panels/artifacts` names the three values only | **needs live** |
+| Light-theme *welcome* (signed-out is dark) | Landing is dark | Dark welcome remains law for the gate |
+| Dedicated light *vs* dark Appearance preview of the whole app | **A** shows System + the picker; we did not flip to Light or Dark | **needs live** for a forced-light / forced-dark chrome pass |
+| Scrollbar thumb / track | Nothing we isolated as a thumb | **needs live** |
+| Tooltip fill | Not shown | **needs live** |
+| Ladder / approval-card scrim | Not shown | **needs live** |
+| Cmd+K / full keybinding list below the first screenful | **K** is one screenful | **needs live** (scroll) |
 
-Do not borrow Mintlify `backgroundDark=#0e0e10` or `primaryColor=#454545` as stand-ins.
+Do not borrow Mintlify `backgroundDark=#0e0e10` or `primaryColor=#454545` as stand-ins. Do not borrow Plank Chrome-icon green as Traycer Green.
 
 ### 2.2 Typography
 
-**Family (recommendation only).** The heading and button on **W** are a geometric neo-grotesque. We did not identify the official face (that would require opening asar or shipping their font files). Implement with an Inter-class OFL font. Do not vendor Traycer fonts. Do not use egui's default Proggy-like debug face for product chrome.
+**Family (recommendation only).** The heading and button on **W** are a geometric neo-grotesque. We did not identify the official face from asar (forbidden). Implement with an Inter-class OFL font. Do not vendor Traycer fonts. Do not use egui's default Proggy-like debug face for product chrome.
 
-Appearance docs (**fallback docs.traycer.ai** `/settings/appearance`) expose three user sizes: **UI font size**, **code font size**, and (changelog) a separate **terminal** size. Defaults were not visible. `rt-gui` should keep one UI face + one mono face, with a single scale factor.
+**Live setting (frame **A**).** Appearance → Typography shows **UI font = Figtree (Default)** in a white dropdown at **A** `(1021, 638)–(1183, 667)` (~163×30), and a size control under it whose digit plateau is `#0F0F0F` at **A** `(1127, 686)–(1137, 695)`. The control reads **15 px**. That is a *product default we can see*, not a CSS `font-size` from asar. Cite **Figtree 15** as the official UI size to match; ship an Inter-class OFL stand-in at 15 px. Do not vendor Figtree from the AppImage.
+
+Settings row titles on **SG** (e.g. "Voice input") have an `#0F0F0F` plateau about 9–11 px tall (`y=236…244`, `y=313…323`) — consistent with a 15 px face plus AA, not with the welcome 30 px display.
+
+Appearance docs (**fallback docs.traycer.ai** `/settings/appearance`, now also **live A**) expose three user sizes: **UI font size**, **code font size**, and (changelog) a separate **terminal** size. Code / terminal defaults were **not** on the first screenful of **A**. `rt-gui` should keep one UI face + one mono face, with a single scale factor.
 
 | Role | Measured box | Inferred size / weight | Sample | Confidence |
 |---|---|---|---|---|
 | Display heading "Welcome to Traycer" | **W** lum>200 bbox `(462, 374)–(818, 410)` = **357×37** px including AA. Dense white rows `y=382…385` and `y=397…401`. | **28–32 px, weight 600–700**, line-height ≈ 1.15. Advance ≈ 357 / 18 glyphs ≈ 20 px, which fits Inter Bold ~32 more than ~24. | **W** `(640, 384)` `#F0F0F0` (counter/AA through the center column); plateau `#FFFFFF` in the same band. | Size is inferred from a raster, not a CSS `font-size`. Say **~30 px Bold** in implementation notes; ±2 px is not a bug. |
 | Primary CTA "Sign in" | Dark-glyph rows **W** `y=461…467` on a 35 px button. | **13–14 px, weight 500–600**. Center column is `#050505` at those rows. | **W** `(632, 464)` `#050505` | Medium, not Bold. Vertical pad ≈ 10–11 px each side of a ~14 px em. |
-| Native menu labels | Cap ~10–11 px, **W** `y=7…17` | System UI. Ignore for product type. | **W** `#2E3436` | Not a product token. |
-| Body / sidebar / chips / chat | — | Unknown. | — | **needs live after login**. Working assumption until then: 13 px Regular UI, 12 px mono for code/PTY, 12 px Regular for secondary. Mark every use as assumed. |
+| Settings page title ("General", "Appearance", …) | **SG** `#0F0F0F` "General" `y=107…127`, `x=307…401` ≈ **95×21**. **A** "Appearance" `y=131…151`, `x=306…458`. | **22–26 px, weight 600–700**. | **SG** `(360, 115)` `#0F0F0F` | Raster inference. Say **~24 px Semibold**. |
+| Settings row title / nav label / keybinding command | **SG** row-title plateau ~9–11 px; **SS** selected "General" `#0F0F0F` at `(32, 2)–(93, 84)` (23 px, AA cloud). | **15 px Regular / Medium** — matches the Appearance control. | **SG** `(350, 240)` `#0F0F0F`; **A** size digits `(1130, 690)` `#0F0F0F` | **Figtree 15** is the live default. |
+| Settings description / subtitle | **SG** `#666666` under the page title and under each row. | **13–15 px Regular**. | **SG** `(400, 180)` `#666666` | Same face, muted. |
+| Keybinding chip | **K** `#666666` / `#848484` inside `#EAEAEA` chips. | **12–13 px Regular**. | **K** chip cluster | Slightly smaller than the command label. |
+| Native menu labels | Cap ~10–11 px, **W** / **SG** `y=7…17` | System UI. Ignore for product type. | `#2E3436` | Not a product token. |
+| Avatar initials "ZA" | **HA** disc `(1246, 36)–(1264, 55)`; glyph plateau `#666666` (14 px). AA `#696969`, `#747474`, `#A0A0A0`. | **10–12 px Semibold** on a 19×20 disc. | **HA** `(1255, 46)` `#666666` | Small. |
+| Body / chat / chips in a Task | — | Unknown. | — | **needs live** (Acts 01–03). Until then: 15 px Regular UI (now measured), 12 px mono for code/PTY, 12 px Regular for secondary. Mark chat uses as assumed. |
 
-Line-height was not a CSS property we could read. Measured heading em-box including AA is 37 px on a ~30 px face → line-height ≈ 1.2. Use 1.2–1.35 for body once a live transcript exists.
+Line-height was not a CSS property we could read. Measured welcome heading em-box including AA is 37 px on a ~30 px face → line-height ≈ 1.2. Settings titles sit tighter. Use 1.2–1.35 for body once a live transcript exists.
 
 ### 2.3 Spacing, radii, borders, shadows
 
-Measured on **W**, client origin `(0, 0)` = top-left of the 1280×719 window (menu included).
+Measured on **W**, client origin `(0, 0)` = top-left of the 1280×719 window (menu included). Logged-in client dumps (**SG**, **HT**, **HA**) use the same origin. Full-desktop frames add 24 px of XFWM above the client.
 
 | Token | Value | How it was measured |
 |---|---|---|
-| `space.menu` | 27 px | Menu fill `y=0…26`; canvas starts `y=27`. Native, not product. |
-| `logo.box` | 79×81 px at `(601, 264)–(679, 344)` | Bright (lum>180) span of the mark. Centered: cx = 640. |
+| `space.menu` | 27 px | Menu fill `y=0…26`; product starts `y=27`. Native, not product. |
+| `logo.box` | 79×81 px at `(601, 264)–(679, 344)` | Bright (lum>180) span of the mark on **W**. Centered: cx = 640. |
 | `space.logo → heading` | **30 px** | Logo last bright row `y=344` → heading first lum>200 row `y=374`. `374 − 344 − 1 = 29`; visual gap reads as 30. |
 | `space.heading → cta` | **44 px** | Heading last lum>200 row `y=402` (ignore the 4 px "r"/"r" AA speckles at `y=403…410`) → button top `y=447`. `447 − 402 − 1 = 44`. |
-| `cta.box` | **193×35 px** at `(544, 447)–(736, 481)` | Long run of `#F8F7F2`. Mid-row `y=464`: `x=544…736`. |
+| `cta.box` | **193×35 px** at `(544, 447)–(736, 481)` | Long run of `#F8F7F2` on **W**. Mid-row `y=464`: `x=544…736`. |
 | `cta.radius` | **4 px** | Top row `y=447`: inset 4 L / 4 R. Then 2, 1, 1, 0. Bottom row `y=481`: inset 4. Symmetric rounded rect, not a pill (`35/2 = 17.5` would be a pill). |
 | `cta.shadow` | **none** | Halo pixels immediately outside the fill are glow texture (`#0C1F1F`, `#091C1D` at the top corners), not a drop-shadow plate. No darker duplicated rect offset down-right. |
 | `cta.border` | **none** | Fill only. No 1 px stroke of a different hex. |
 | `layout.center` | Content mid `y ≈ 372.5` vs client mid (after menu) `373.5` | The logo+heading+button cluster is vertically centered in the *canvas*, not in the full window including the menu. Horizontally centered on 640. |
+| `chrome.tabs` | 37 px | **SG** / **HT** tab strip `y=27…63`. |
+| `chrome.header-seam` | 1 px `#DFE9E7` | **SG** / **HT** `y=64`. |
+| `nav.width` | **240 px** | **SG** selected pill `x=15…223` on a column that ends at the `#E6EFEC` hairline `x=239`. Content title starts `x=307` (≈ 68 px pad). |
+| `nav.row` | **33×209 px** pill | **SG** selected General `y=80…112`, `x=15…223`. **SS** same pill `y=0…24` (crop starts on the row), span 209, bottom inset 5 ⇒ radius **~6 px**. |
+| `nav.row.pitch` | ~38–40 px | Ten items (General … Diagnostics) stacked under the header; **SS** shows icons every ~36–40 px. |
+| `toggle.on` | track **21×17** `#257174` + knob `~13` px `#F6F9F8` | **SG** three ON toggles at `y=229…245`, `305…321`, `381…397` (pitch 76), `x=1156…1176` green / knob to `x≈1182`. Full control ≈ **32×17**. |
+| `toggle.off` | track `#EAEAEA` + knob `#F6F9F8` (knob on the left) | **SG** `(1165, 484)` band `y=476…492`. Same size class as ON. |
+| `avatar.disc` | **19×20 px** | **HA** `#EAEAEA` `(1246, 36)–(1264, 55)`. Circular footprint (1 px at the poles, 19 at the equator). |
+| `theme.segment.active` | **87×26 px** | **A** System `#FFFFFF` `(1095, 256)–(1181, 281)`. |
+| `theme.swatch` | **20×21 px** | **A** `#1A2421` `(1032, 336)–(1051, 356)`. |
+| `modal.host-error` | **420×226**, radius 8–10 | **HE** `(430, 301)–(849, 526)`. |
+| `onboarding.modal` | ~677 px wide | **OA** `x=464…1140`. |
 
-Inferred spacing scale for the rest of the app (not measured on a second surface — treat as a starting ladder, not law):
+Inferred spacing scale for the rest of the app (now with a second surface — still a ladder, not law for every gap):
 
 `4 / 8 / 12 / 16 / 24 / 32 / 48`
 
-- 4 = CTA radius and the smallest inset we actually saw.
+- 4 = welcome CTA radius.
+- 6–8 = nav-pill / modal radius we actually saw after login.
 - 8 / 12 = typical egui inner margin (current chrome already uses 8–12).
-- 24 / 32 / 48 = the measured inter-block gaps (30 and 44 sit between 24–32 and 32–48).
+- 16 / 24 / 32 / 48 = page title pad (`x=307`) and the measured inter-block gaps (30 and 44 sit between 24–32 and 32–48). Toggle pitch 76 is 48+32.
 
-**Do not** invent a sidebar width or a composer height from this frame. Those **need live after login**.
+**Do not** invent a Task sidebar width or a composer height. Those **need live** (Acts 01–03). Settings nav width 240 is law for *Settings*, not automatically for the Task Agents list.
 
 ### 2.4 Motion and material (from what the frame can prove)
 
-| Effect | On **W** | egui target |
+| Effect | On the frames | egui target |
 |---|---|---|
-| Floor glow | Grainy teal, no CSS we can read | Translucent flat wash `rgba(38, 89, 94, ≈0.35)` over `#000000`, or omit. **Accepted deviation** (§4). |
-| CTA | Static default. Hover/focus/active/disabled not captured | Default = `surface.cta` + `fg.on-cta`. Hover/focus **needs live after login**; until then, 8–12% lighter fill on hover and a 1 px `#F8F7F2` focus ring on a dark field. Mark as assumed. |
-| Animation | None on a still frame | No entrance animation required for welcome parity. |
+| Floor glow (**W**) | Grainy teal, no CSS we can read | Translucent flat wash `rgba(38, 89, 94, ≈0.35)` over `#000000`, or omit. **Accepted deviation** (§4). |
+| Onboarding dark wash (**OA** / **OH**) | Grainy teal-black cloud + a diagonal prism mentioned in the capture notes | Flat `#0E1A17` header + `#0B1513` canvas, or omit the prism. **Accepted deviation**. |
+| CTA welcome | Static default. Hover/focus/active/disabled not captured | Default = `surface.cta` + `fg.on-cta`. Hover/focus **needs live**; until then, 8–12% lighter fill on hover and a 1 px `#F8F7F2` focus ring on a dark field. Mark as assumed. |
+| Continue on **OA** | Hover captured (hand cursor); fill `#DEDFDF` | Default vs hover were not both captured. Do not treat `#DEDFDF` as the welcome cream. |
+| Toggle | ON / OFF both live | ON = `accent.traycer-green` + `toggle.knob`. OFF = `toggle.off.track` + `toggle.knob`. |
+| Animation | None on a still frame | No entrance animation required for welcome or settings parity. |
 
 ---
 
@@ -179,7 +282,7 @@ Inferred spacing scale for the rest of the app (not measured on a second surface
 
 Column "egui" names the existing `rt-gui` surface where one exists as of 0126, or the egui primitive to use. This is a mapping, not an implementation.
 
-Legend: **live W/D** = pipetted. **fallback docs.traycer.ai** = IA only. **needs live after login** = do not ship a "we matched Traycer" claim for hex on that row.
+Legend: **live \<ID\>** = pipetted. **fallback docs.traycer.ai** = IA only. **needs live** = do not ship a "we matched Traycer" claim for hex on that row. **needs live (Acts 01–03)** = the intro acts were not on screen; File → Settings does not replay them.
 
 ### 3.1 Welcome / sign-in
 
@@ -188,73 +291,146 @@ Legend: **live W/D** = pipetted. **fallback docs.traycer.ai** = IA only. **needs
 | Full-window dark canvas | default | `CentralPanel` + `bg.canvas` `#000000` | **live W** |
 | Brand mark | default, white, ~79×81 | Do **not** copy the Traycer mark. Own wordmark or a Lucide-class icon, `#FFFFFF` | **live W** for color/size only |
 | Display heading | default | `RichText` 28–32 px Strong, `#FFFFFF`, centered | **live W** |
-| Primary CTA "Sign in" | default only | `egui::Button` 193×35, fill `#F8F7F2`, fg `#050505`, rounding 4 | **live W**. Hover / focus / active / disabled **needs live after login** |
+| Primary CTA "Sign in" | default only | `egui::Button` 193×35, fill `#F8F7F2`, fg `#050505`, rounding 4 | **live W**. Hover / focus / active / disabled **needs live** |
 | Email / password field | absent | — | Official 1.1.10 welcome is one button (browser PKCE). Do not add fields to "match". |
 | Floor glow | default | Optional wash; see §4 | **live W** |
 | Native menu File/Edit/… | host chrome | Not an egui widget. eframe/winit decorations stay ours | **live W**, not product |
 
-Empty / error / loading of sign-in were not captured. Changelog says a failed sign-in stays visible and that sign-in completes when the browser approves — **fallback docs.traycer.ai** `/changelog`, **needs live after login**.
+Empty / error / loading of sign-in were not captured. Changelog says a failed sign-in stays visible and that sign-in completes when the browser approves — **fallback docs.traycer.ai** `/changelog`. After login the next painted surfaces are **HE** then **OA**, not a second welcome.
 
-### 3.2 App chrome (behind login)
+### 3.2 App chrome (header, tabs, avatar)
 
 | Traycer element | Source | egui (current → target) | States |
 |---|---|---|---|
-| Title / window controls | **D** is XFWM, not product | eframe native decorations. Do not fake traffic lights | n/a |
-| Task tabs (outer) | **fallback** `/concepts/tasks-and-workspace-folders`, changelog "any two tabs side by side" | Today: `chrome.rs` `TopBottomPanel` 40 px with Tasks / Canvas / Host. Target: a tab strip (`egui::ScrollArea` horizontal + selectable labels), not three nav buttons forever | hover / selected / overflow. **needs live after login** |
-| Canvas tabs / tiles (inner) | **fallback** same + changelog split | `screens/canvas.rs` panes. Divider = `egui::Resize` / split. Drag-to-edge tiling is C63 (later) | **needs live after login** |
-| History | **fallback** `/concepts/history` | `screens/tasks.rs` list. Rows: title, updated, repos/folders, yours vs shared. Search + ownership/repo/workspace filters | empty / loading / no-match. **needs live after login** |
-| Start / home (folder first) | **fallback** `/quickstart` | Tasks empty states already in `gui-ia-v0.md`. Visuals **needs live after login** | empty no-host / no-workspace / no-tasks |
-| Appearance settings | **fallback** `/settings/appearance` | Host screen. Theme system/light/dark; UI vs code size | **needs live after login** for the settings chrome itself |
+| Title / window controls | **D** / **S** is XFWM, not product | eframe native decorations. Do not fake traffic lights | n/a |
+| Native File/Edit/View/Window/Help | **HT** / **HA** / **SG** `#F6F5F4` | Not an egui widget | **live**, not product |
+| Back / forward + home/layers | **HT** left of the tabs | Small icon buttons. Inactive arrows read light gray | **live HT** for placement; hover **needs live** |
+| Start Page tab | **HT** / **SG** inactive, `#F6F9F8`, stacked-diamond icon + "Start Page" | `egui::ScrollArea` horizontal + selectable label | default **live**. The Start Page *contents* **needs live** (click did not leave Settings). |
+| Settings tab | **HT** / **SG** active, `#FFFFFF`, gear + "Settings" + close × | Same tab strip. Active tab is white and joins `bg.page` under `hairline.header` | selected **live** |
+| `+` new tab | **HT** to the right of Settings | Small `Button` | default **live** |
+| Utility cluster (gauge, overflow, gear, history, bell) | **HT** / **SG** right side | Icon row. Lucide-class stand-ins | placement **live**; tooltips **needs live** |
+| Avatar | **HA** `(1246, 36)–(1264, 55)` `#EAEAEA` disc, initials `#666666` | Circle `32` logical? No — **19×20 px** on this 1280 frame. Initials, not a photo. | default **live**. Menu **needs live** |
+| Task tabs (outer) beyond Start Page / Settings | **fallback** `/concepts/tasks-and-workspace-folders` | Today: `chrome.rs` `TopBottomPanel` 40 px with Tasks / Canvas / Host. Target: the live tab strip (white active, page-wash inactive, 37 px), not three nav buttons forever | overflow / drag **needs live** |
+| Canvas tabs / tiles (inner) | **fallback** + changelog split | `screens/canvas.rs` panes. Divider = `egui::Resize` / split. Drag-to-edge tiling is C63 (later) | **needs live (Acts 01–03)** |
+| History | **fallback** `/concepts/history` | `screens/tasks.rs` list | empty / loading / no-match. **needs live** |
+| Start / home (folder first) | **fallback** `/quickstart` | Tasks empty states already in `gui-ia-v0.md`. Visuals **needs live** | empty no-host / no-workspace / no-tasks |
 
-### 3.3 Sidebar and panels
+### 3.3 Settings shell (nav + pages)
+
+Live. File → Settings opens the Settings tab; it does **not** replay onboarding Acts 01–06.
+
+| Traycer element | Source | egui | Notes |
+|---|---|---|---|
+| Settings nav column | **SS** / **SG** / **S** | `egui::SidePanel::left`, width 240, fill `bg.page` | Items, in order, each with a Lucide-class leading icon: **General**, **Appearance**, **Providers**, **Notifications**, **Agent selection**, **Keybindings**, **Shell**, **Worktrees**, **Host**, **Diagnostics**. |
+| Selected nav row | **SG** `y=80…112` / **SS** top pill | Rounded rect `#EAEAEA`, ~209×33, radius ~6, icon + `#0F0F0F` label | **live**. Hover wash not isolated (some frames show a hand cursor on the already-selected row). |
+| Page title + subtitle | **SG** "General" / "App behavior…"; **A** "Appearance" / "Theme, typography…"; **P** "Providers"; **AG** "Agent selection"; **K** "Keybindings" | `#0F0F0F` ~24 px Semibold + `#666666` 13–15 px | **live** |
+| Settings row (title, description, control) | **SG** Chat & composer / Running agents | `ui.horizontal` + two-line label + toggle on the right | Voice input / Quote reply / Steer with Ctrl+Enter = ON; Pin context usage / Prevent sleep = OFF. **live** |
+| Toggle | **SG** / **A** / **P** | Custom or `egui::Switch` restyled | ON `accent.traycer-green` `#257174`, OFF `#EAEAEA`, knob `#F6F9F8`, ~32×17. **live** |
+| Notifications / Shell / Worktrees / Host / Diagnostics pages | Nav labels only | — | **needs live** (nav is live; the pages were not opened) |
+
+### 3.4 Appearance (act 06 theme)
+
+| Traycer element | Source | egui | Notes |
+|---|---|---|---|
+| Theme segmented Light / Dark / System | **A** | Three-segment control. Idle `#F5F6F6`, active `#FFFFFF` ~87×26, rim `#DCE7E4` | System selected. Light and Dark *pages* **needs live**. |
+| Preset dropdown | **A** | Combo labeled **Traycer Green** with 20×21 `#1A2421` swatch and "Aa" in `#257174` | **live** for the named preset. Other presets **needs live**. |
+| Zoom 100% + Reset | **A** | Dropdown + ghost button | Values visible; hex of Reset **needs a tighter crop** — do not invent. |
+| Use pointer cursors | **A** toggle ON `#257174` at `(1160, 528)` | Same toggle token | **live** |
+| UI font | **A** **Figtree (Default)** + **15 px** | Dropdown + numeric stepper. Digit plateau `#0F0F0F` at `(1127, 686)–(1137, 695)` | **live** as a *setting*. Ship Inter-class OFL at 15 px. Do not vendor Figtree. |
+| Code font / terminal size / artifact icon colors | docs + below-the-fold | — | **needs live** (not on the first screenful) |
+
+### 3.5 Providers (act 04)
+
+| Traycer element | Source | egui | Notes |
+|---|---|---|---|
+| Provider list | **P** | Narrow column of rows; selected **Codex** `#EAEAEA` at `y≈260` | Also visible: Claude Code, OpenCode, Traycer Inference, OpenRouter, Droid, Cursor, Copilot, Grok, Kiro, Kilo Code, Kimi. Icons are brand marks — **do not copy**. Lucide-class stand-ins. |
+| Provider detail | **P** | Title + one-line description + Enabled toggle | Codex / "OpenAI's Codex CLI." Toggle ON `#257174`. |
+| Profiles card | **P** | "+ Add profile", refresh, profile row, Sign in, Manage profile | A warm-red AA cluster `#D97757` at **P** `(332, 290)` sits in this column — likely an icon glyph, **not** a confirmed status-dot plateau. Do not invent a danger token from it. |
+| Path / Bundled radio | **P** | Radio `#257174` at `(554, 545)–(560, 551)` (7×7), label bundled **v0.146.0** | **live** |
+| CLI arguments | **P** | `TextEdit` with `--full-auto` | Field fill not isolated from `bg.content`. |
+| "Checked just now" + refresh + workspace filter | **P** header | Status + icon + dropdown ("cursor") | Placement **live**. |
+
+### 3.6 Agent selection + guide (act 05 settings + onboarding)
+
+| Traycer element | Source | egui | Notes |
+|---|---|---|---|
+| Settings → Agent selection page | **AG** | Page title + subtitle + card "Agent selection guide" | Subtitle: "How Traycer picks a coding agent… This does not manage the agents inside a Task." **live** |
+| Guide editor | **AG** / **OA** | Mono `TextEdit` with line numbers. Current line `#F1FAFF` (**AG**); loading line `#F8FDFF` (**OA** "Loading…") | **live** for those two states. |
+| Revert to default | **AG** / **OA** | Ghost text button `#666666` | **live** for color |
+| Saved | **AG** | Label + tiny check. Check is a **brighter mid-green AA cloud** around `#479957` at `(1145, 669)–(1150, 674)` (a handful of pixels) — **not** `accent.traycer-green` `#257174` | Honest: too small to law a second green. Prefer a Lucide-class check in `accent.traycer-green` or `#479957`; ± hue is not a bug. |
+| Onboarding ACT 05 modal | **OA** | Same guide, over a dark intro. Title "Agent selection guide" `#0F0F0F` | **live OA**. Acts 01–04 and 06 of the *intro* **needs live**. |
+| Skip intro / Esc | **OH** / **OA** | Text + keycap on `onboarding.header` | **live** for placement/color (`#FFFFFF` on the dark bar). Keycap fill is a slightly lighter cloud, not a single hex. |
+| Back / Continue | **OA** | Continue `#DEDFDF` + `#000000` arrow (hover). Back is a bordered ghost on the dark field | Continue hover **live**. Back / default Continue **needs** a second frame. |
+
+### 3.7 Keybindings (act 06 shortcuts)
+
+| Traycer element | Source | egui | Notes |
+|---|---|---|---|
+| Keybindings page | **K** | Title + rows: command `#0F0F0F` / `#313232` left, chip `#EAEAEA` right | **live** first screenful |
+| Shortcut chips | **K** | `Frame` fill `#EAEAEA`, type `#666666`, radius ~6 (same family as nav pill) | Visible: Ctrl+1–Ctrl+9, Ctrl+N, Ctrl+Shift+K, Ctrl+Shift+] / [, Ctrl+Shift+W, Ctrl+T, Ctrl+W, Ctrl+Alt+W, Ctrl+Shift+Alt+] / W, Ctrl+] / [ |
+| Cmd+K / the rest of the list | not in the first screenful | — | **needs live** (scroll) |
+
+### 3.8 Host-error
+
+| Traycer element | Source | egui | Notes |
+|---|---|---|---|
+| Signed-in empty canvas | **HE** | `CentralPanel` + `bg.page` `#F6F9F8` + header/avatar | **live HE**. This is the first signed-in paint *before* the official host process. |
+| systemd modal | **HE** | `egui::Window` / card 420×226, `#FFFFFF`, radius 8–10, body `#666666` | Copy is the official host talking about `ai.traycer.host.service` — do not clone the systemd text into RustTraycer. Match *structure* (centered card, Retry + Report). |
+| Retry | **HE** | Ghost button, fill `#F6F9F8`, fg `#0F0F0F`, `#DCE7E4` halo | **live**. Do not restyle to welcome cream. |
+| Report issue | **HE** | Text + bug icon, `#666666` | **live** |
+
+### 3.9 Sidebar and panels (Task chrome — still mostly fallback)
 
 | Traycer element | Source | egui | States |
 |---|---|---|---|
-| Sidebar column | **fallback** `/panels` | `egui::SidePanel::left` on the canvas | collapsed / expanded / stacked. Width **needs live after login** |
-| Panel header | **fallback** `/panels` ("Headers can collapse or expand… `+`") | `ui.horizontal` + `egui::CollapsingHeader` or a custom header row; `+` = small `Button` | hover / collapsed / overflow |
-| Panel stack / rearrange | **fallback** `/panels` | Persist order in GUI state. Drag = `egui::dnd` if we take it; otherwise move-up/down is an accepted stand-in until live | **needs live after login** |
-| Agents panel (tree) | **fallback** `/panels/agents` | Existing agent list in `screens/canvas.rs`. Target: tree (`ui.indent`) with Chat/Terminal filter chips, sort menu, row `+` for child | empty / filter-empty / selected / running. **needs live after login** |
-| Agent row / card | **fallback** changelog "second line of detail and a leading icon" | Custom `Frame` + two-line `label` + Lucide-class leading icon. Not the official mark | hover / selected / running / archived. **needs live after login** |
-| Artifacts panel | **fallback** `/panels/artifacts` | `artifacts.rs`. Types Spec/Ticket/Story/Review; ticket/story status Todo / In Progress / Done | empty / filtered. Colors **needs live after login** |
-| Git Diff panel | **fallback** `/panels/git-diff` | Existing git pane. Named states: no worktrees, no changes, loading, error, conflict/detached, binary | **needs live after login** for chrome |
-| File Tree panel | **fallback** `/panels/file-tree` | Existing files pane. Workspace picker; open-in-editor already copy | unavailable host. **needs live after login** |
-| Terminals panel | **fallback** `/panels/terminals` | `terminal.rs` / PTY pane. Not the same as a Terminal-interface *agent* | empty / exited. **needs live after login** |
-| Comments panel | **fallback** `/panels/comments` | Contextual; hide when no active artifact | empty. **needs live after login** |
+| Sidebar column (Task, not Settings) | **fallback** `/panels` | `egui::SidePanel::left` on the canvas | collapsed / expanded / stacked. Width **needs live (Acts 01–03)**. Do not reuse 240 from Settings without a Task frame. |
+| Panel header | **fallback** `/panels` | `ui.horizontal` + `egui::CollapsingHeader` or a custom header row; `+` = small `Button` | hover / collapsed / overflow |
+| Panel stack / rearrange | **fallback** `/panels` | Persist order in GUI state. Drag = `egui::dnd` if we take it; otherwise move-up/down is an accepted stand-in until live | **needs live (Acts 01–03)** |
+| Agents panel (tree) | **fallback** `/panels/agents` | Existing agent list in `screens/canvas.rs`. Target: tree (`ui.indent`) with Chat/Terminal filter chips, sort menu, row `+` for child | empty / filter-empty / selected / running. **needs live (Acts 01–03)** |
+| Agent row / card | **fallback** changelog "second line of detail and a leading icon" | Custom `Frame` + two-line `label` + Lucide-class leading icon. Not the official mark | hover / selected / running / archived. **needs live (Acts 01–03)** |
+| Artifacts panel | **fallback** `/panels/artifacts` | `artifacts.rs`. Types Spec/Ticket/Story/Review; ticket/story status Todo / In Progress / Done | empty / filtered. Colors **needs live** |
+| Git Diff panel | **fallback** `/panels/git-diff` | Existing git pane. Named states: no worktrees, no changes, loading, error, conflict/detached, binary | **needs live** for chrome |
+| File Tree panel | **fallback** `/panels/file-tree` | Existing files pane. Workspace picker; open-in-editor already copy | unavailable host. **needs live** |
+| Terminals panel | **fallback** `/panels/terminals` | `terminal.rs` / PTY pane. Not the same as a Terminal-interface *agent* | empty / exited. **needs live** |
+| Comments panel | **fallback** `/panels/comments` | Contextual; hide when no active artifact | empty. **needs live** |
 | Sharing panel | **fallback** `/panels/sharing` | Out of scope by existing ADR (managed cloud / teams). Do not fake a sharing chrome | — |
 
-### 3.4 Chat, composer, chips
+### 3.10 Chat, composer, chips
 
 | Traycer element | Source | egui | States |
 |---|---|---|---|
-| Transcript | **fallback** changelog "redesigned message cards" | `ScrollArea::vertical` + per-message `Frame` | user / assistant / system / pending. **needs live after login** |
-| Chat bubble | same | `egui::Frame` with 4–8 px rounding (4 is the only live radius we have). Fill unknown | **needs live after login** |
-| Composer | **fallback** `/panels/agents` | `TextEdit::multiline` pinned at the bottom of the canvas. Disabled when `agent.status == running` (IA law) | empty / focus / disabled / sending. **needs live after login** |
-| Composer controls (model, permissions, thinking, fast, attach, voice, send/stop) | **fallback** `/panels/agents` | Horizontal chip/button row above or below the field. Voice may stay later | hover / unavailable ("see why Send is unavailable" — changelog). **needs live after login** |
-| Chips (interface filter All/Chat/Terminal; context usage; permission; Deprecated badge) | **fallback** agents + changelog | Small `Button`/`Frame` with 4 px radius, 12 px type | selected / muted. **needs live after login** |
-| Mentions / hover card | **fallback** changelog | `Popup` / `Area` | **needs live after login** |
+| Transcript | **fallback** changelog "redesigned message cards" | `ScrollArea::vertical` + per-message `Frame` | user / assistant / system / pending. **needs live (Acts 01–03)** |
+| Chat bubble | same | `egui::Frame` with 4–8 px rounding (4 is the welcome radius; 6–8 showed up on settings pills). Fill unknown | **needs live (Acts 01–03)** |
+| Composer | **fallback** `/panels/agents` | `TextEdit::multiline` pinned at the bottom of the canvas. Disabled when `agent.status == running` (IA law) | empty / focus / disabled / sending. **needs live (Acts 01–03)** |
+| Composer controls (model, permissions, thinking, fast, attach, voice, send/stop) | **fallback** `/panels/agents`; Voice is a *setting* on **SG** | Horizontal chip/button row above or below the field. Voice may stay later | hover / unavailable. **needs live (Acts 01–03)** |
+| Chips (interface filter All/Chat/Terminal; context usage; permission; Deprecated badge) | **fallback** agents + changelog | Small `Button`/`Frame` with 4–6 px radius, 12–15 px type | selected / muted. **needs live (Acts 01–03)** |
+| Mentions / hover card | **fallback** changelog | `Popup` / `Area` | **needs live** |
 
-### 3.5 Buttons, inputs, scrolls, tooltips
-
-| Traycer element | Source | egui | States |
-|---|---|---|---|
-| Primary button | **live W** Sign in | `Button` fill `#F8F7F2`, fg `#050505`, rounding 4, height 35 | default **live**. hover / focus / active / disabled **needs live after login** |
-| Secondary / ghost / danger | not on **W** | Ghost = 1 px `#F8F7F2` at 20% on `#000000` is *assumed*, not law | **needs live after login** |
-| Text input | not on **W** | `TextEdit`. Focus ring assumed 1 px `#F8F7F2` | empty / focus / error. **needs live after login** |
-| Scroll area | not on **W** | `egui::ScrollArea`. Thumb color unknown | **needs live after login**. Physics: §4 |
-| Tooltip | not on **W** | `on_hover_text` / `egui::Tooltip` | **needs live after login** |
-| Context / overflow menu | **fallback** History "right-click menu" | `ui.menu_button` / `popup` | **needs live after login** |
-
-### 3.6 Ladder, dialogs, toasts
+### 3.11 Buttons, inputs, scrolls, tooltips
 
 | Traycer element | Source | egui | States |
 |---|---|---|---|
-| Approval card | **fallback** changelog "approval cards summarize the command"; behavior in `docs/e2-ladder-v2.md` | Already `egui::Window` from `screens/canvas.rs` `show_ladder_dialogs` (`ladder.rs` copy). Target: a card, not a full-screen modal. Rounding 4. Scrim **needs live after login** | ask / allow-once / allow-always / deny |
+| Primary button (welcome) | **live W** Sign in | `Button` fill `#F8F7F2`, fg `#050505`, rounding 4, height 35 | default **live**. hover / focus / active / disabled **needs live** |
+| Continue (onboarding, hover) | **live OA** | `Button` fill `#DEDFDF`, fg `#000000`, on dark canvas | hover **live**. default **needs live** |
+| Retry (host-error) | **live HE** | Ghost: fill `#F6F9F8`, fg `#0F0F0F`, halo `#DCE7E4` | default **live** |
+| Secondary / danger | not isolated | Ghost assumed 1 px `#DCE7E4` on `#F6F9F8` / `#F9FBFB` after login; welcome ghost remains assumed 1 px `#F8F7F2` at 20% on `#000000` | **needs live** for a dedicated ghost/danger frame |
+| Text input | **P** CLI args / **AG** editor | `TextEdit`. Focus ring not isolated. Editor current-line `#F1FAFF` | empty / focus / error. focus ring **needs live** |
+| Scroll area | not isolated | `egui::ScrollArea`. Thumb color unknown | **needs live**. Physics: §4 |
+| Tooltip | not on any frame | `on_hover_text` / `egui::Tooltip` | **needs live** |
+| Context / overflow menu | **fallback** History "right-click menu" | `ui.menu_button` / `popup` | **needs live** |
+
+### 3.12 Ladder, dialogs, toasts
+
+| Traycer element | Source | egui | States |
+|---|---|---|---|
+| Approval card | **fallback** changelog "approval cards summarize the command"; behavior in `docs/e2-ladder-v2.md` | Already `egui::Window` from `screens/canvas.rs` `show_ladder_dialogs` (`ladder.rs` copy). Target: a card, not a full-screen modal. Rounding 4–8 (we now have 4 and ~8). Scrim **needs live** | ask / allow-once / allow-always / deny |
+| Host-error / systemd card | **live HE** | Centered card — see §3.8. RustTraycer should not paste official systemd copy | — |
 | Yolo confirm | our spec, not Traycer "full access default" (C26 out of scope) | Existing `YOLO_CONFIRM_*` window | confirm / cancel |
 | Push / commit confirms | our git panel | Existing windows | — |
-| Notification / toast | **fallback** changelog notification center | Today: bottom-right `egui::Window` "Сообщение". Target: clickable toast; a center list is later | **needs live after login** |
-| Resource monitor | **fallback** changelog | `metrics.rs` chip in chrome | **needs live after login** |
+| Notification / toast | **fallback** changelog notification center; bell icon is **live HT** | Today: bottom-right `egui::Window` "Сообщение". Target: clickable toast; a center list is later | **needs live** |
+| Resource monitor | **fallback** changelog; gauge icon is **live HT** | `metrics.rs` chip in chrome | **needs live** for the open panel |
 
-Empty states that *are* specified as behavior (not pixels) remain in `docs/gui-ia-v0.md`: no host, no workspace, no tasks, no agent. Visual treatment of those empties **needs live after login**.
+Empty states that *are* specified as behavior (not pixels) remain in `docs/gui-ia-v0.md`: no host, no workspace, no tasks, no agent. Visual treatment of those empties: host-offline now has **HE** (light page + centered card). The others **need live**.
 
 ---
 
@@ -263,13 +439,14 @@ Empty states that *are* specified as behavior (not pixels) remain in `docs/gui-i
 These are engine and legal limits. Reviewer does not open a DF against them.
 
 1. **epaint raster vs Chromium.** Official Desktop is Electron/Chromium. `rt-gui` is egui + epaint (software or glow). Subpixel font hinting, gamma, and hairline coverage will not match a Chrome screenshot at 1:1. Compare structure, tokens, and rhythm, not a flip-book overlay.
-2. **Backdrop-blur / film grain → translucent fill.** The welcome floor is a noisy teal wash. egui has no backdrop-filter and no cheap grain shader in our stack. A flat or lightly dithered wash (or omitting the glow) is accepted. Do not unpack a Traycer texture to fake it.
+2. **Backdrop-blur / film grain → translucent fill.** The welcome floor and the onboarding dark field are noisy teal washes. The ACT 05 backdrop is a blurred gray cloud (`#7F7F7F`). egui has no backdrop-filter and no cheap grain shader in our stack. A flat or lightly dithered wash (or omitting the glow / prism) is accepted. Do not unpack a Traycer texture to fake it.
 3. **CSS animations → egui transitions.** No looping glow or page transition is required. `request_repaint_after` for status pills and streaming tokens is enough. Do not chase Chromium easing curves.
 4. **Scroll physics.** Chromium + OS smooth scroll vs egui's discrete `ScrollArea` (no rubber-band, no inertial coast unless we add it). Matching pixel-per-notch is accepted as "good enough"; kinetic scroll is not a v1 parity bug.
-5. **Native window chrome.** XFWM title bar, GTK/Electron menu, and Plank on **D** are the reference *machine*, not the product. `rt-gui` keeps eframe decorations and its own 40 px nav.
-6. **Brand mark and fonts.** We do not ship the Traycer logo or their font files. Inter-class OFL + Lucide-class ISC + the RustTraycer wordmark are the stand-in. A different geometric sans of the same class is not a bug.
-7. **Light theme.** Documented (**fallback** `/settings/appearance`) but not captured. Dark-only `rt-gui` is accepted until a live light frame exists.
-8. **Sign-in itself.** RustTraycer does not implement Traycer's PKCE wall. The welcome tokens apply to *any* full-canvas empty/gate we choose to draw (host-offline, first-run), not to a clone of their auth.
+5. **Native window chrome.** XFWM title bar, GTK/Electron menu, and Plank on **D** / **S** / **A** are the reference *machine*, not the product. `rt-gui` keeps eframe decorations and its own 40 px nav.
+6. **Brand mark and fonts.** We do not ship the Traycer logo or their font files. Inter-class OFL at **15 px** (the live Figtree default) + Lucide-class ISC + the RustTraycer wordmark are the stand-in. A different geometric sans of the same class is not a bug. Naming "Figtree" in our UI is optional and must not imply we vendored their file.
+7. **Forced Light / Dark.** Appearance documents and shows a Light / Dark / System picker (**live A**, System selected). We did not capture a forced-Light or forced-Dark chrome pass. Matching System-on-this-machine (the light tokens in §2.1) is accepted until those frames exist.
+8. **Sign-in itself.** RustTraycer does not implement Traycer's PKCE wall. The welcome tokens apply to *any* full-canvas empty/gate we choose to draw (host-offline, first-run), not to a clone of their auth. After login, host-offline looks like **HE** (light page + card), not the black welcome.
+9. **Provider / agent brand icons.** Codex / Claude / Cursor / … marks on **P** are third-party brand assets. Lucide-class stand-ins (or a letter in a circle) are accepted.
 
 ---
 
@@ -279,9 +456,10 @@ These are engine and legal limits. Reviewer does not open a DF against them.
 - No new screenshots.
 - No asar, no font/icon vendoring.
 - No claim that docs.traycer.ai pages are live Desktop captures.
-- No invented hex for sidebar, bubbles, chips, status, or light theme.
+- No invented hex for chat bubbles, Task sidebar, ladder scrim, or forced Light/Dark.
+- No claim that Acts 01–03 were captured. They were not.
 
-Next Architect pass after PO login: capture Home / History, a Task with the Agents sidebar, a Chat transcript + composer, a ladder/approval card, and Settings › Appearance (dark and light). Replace every **needs live after login** row with a pipetted token and a frame id.
+Next Architect pass: a Task with the Agents sidebar and a Chat transcript + composer (Acts 01–03), a ladder/approval card, Start Page contents, Settings → Notifications / Shell / Worktrees / Host / Diagnostics, and Appearance forced Light + Dark. Replace every remaining **needs live** row with a pipetted token and a frame id.
 
 ---
 
