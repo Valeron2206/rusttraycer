@@ -186,3 +186,13 @@ Do not bump this pin because a local download of `/releases/latest` moved. Archi
 
 Start Page tab, Agent selection *page*, and other Settings categories were **not** opened (no clicks; finish not clicked). Onboarding ACT 05 frames above are from the earlier `:3` session before the Desktop restart. Current live chrome is Settings / General.
 
+### Settings pages (File → Settings, 2026-08-21)
+
+File → Settings opens the Settings tab (already live). It does **not** replay onboarding Acts 01–06. Skip / Start building were not clicked. Start Page tab click did not leave Settings.
+
+Acts 01–03 (tasks/sidebar/agents/artifacts, layout/split/terminal, handoff/bubbles) were **not** on screen. Act 05 onboarding frame above remains the only intro-act capture.
+
+| [docs/reference-screens/logged-in-act04-providers.png](reference-screens/logged-in-act04-providers.png) | 1280x800 | 116626 | `addfaba00087ef491223b078fa5775785e698279c86ca2563717dd1d4b944b50` | Settings → Providers (act04). Codex selected, bundled v0.146.0. |
+| [docs/reference-screens/logged-in-act05-agent-selection.png](reference-screens/logged-in-act05-agent-selection.png) | 1280x800 | 103073 | `fce76224ab0ecc891a915cb0103e96a94bcfbb843b2203372ce07a11afe36fdb` | Settings → Agent selection (act05 settings page). Guide markdown saved. |
+| [docs/reference-screens/logged-in-act06-appearance.png](reference-screens/logged-in-act06-appearance.png) | 1280x800 | 101328 | `9ee5e40a1bf1724019a110a6f69c2d82905bfcfbaacbfbaf92cfb6d80d234e4c` | Settings → Appearance (act06 theme). System + Traycer Green, Figtree 15px. |
+| [docs/reference-screens/logged-in-act06-keybindings.png](reference-screens/logged-in-act06-keybindings.png) | 1280x800 | 95567 | `afdc4f1361744b6958444aac085694dfe8a2ec697d424bd65bc14f7604c646a0` | Settings → Keybindings (act06 shortcuts). Ctrl+1–9 / Ctrl+N / tabs. Cmd+K not in the first screenful. |
