@@ -178,13 +178,13 @@ Do not bump this pin because a local download of `/releases/latest` moved. Archi
 | `/workspace/ref-traycer/home-d3/` | Signed-in official-app HOME (`:3`) |
 | `/workspace/ref-traycer/logs/` | AppRun / official-host stdout/stderr |
 
-### Extra live crops (same :3 session, no clicks)
+### Extra live crops (same :3 session)
 
 | [docs/reference-screens/logged-in-settings-general.png](reference-screens/logged-in-settings-general.png) | crop/window | 89694 | `34c2d1e95d814449de6538947aab21da427e5603943a8ea670156cd4274cc736` | Current live :3 window: Settings / General (client 1280x719), ZA, tabs Start Page + Settings. |
 | [docs/reference-screens/logged-in-header-tabs-avatar.png](reference-screens/logged-in-header-tabs-avatar.png) | crop/window | 9758 | `5dd3e7da8bed973407f42f8c5068d7824e330c98acfb5e3f1f2103fada09a4ce` | Live header: File menu, Start Page / Settings tabs, + tab, ZA avatar. |
 | [docs/reference-screens/logged-in-settings-sidebar.png](reference-screens/logged-in-settings-sidebar.png) | crop/window | 16090 | `b91b224945588d576286a5a72180af97734ee248f761dd06b067dfb3a0cb8be5` | Live Settings sidebar: General (selected), Appearance, Providers, Notifications, Agent selection, Keybindings, Shell, Worktrees, Host, Diagnostics. |
 
-Start Page tab, Agent selection *page*, and other Settings categories were **not** opened (no clicks; finish not clicked). Onboarding ACT 05 frames above are from the earlier `:3` session before the Desktop restart. Current live chrome is Settings / General.
+Start Page tab stays in the header (not captured as its own page). Agent selection, Appearance, Providers, and Keybindings **were** opened — frames below. Finish / Skip / Start building were not clicked. ACT 05 onboarding frames above are from the earlier `:3` session before the Desktop restart.
 
 ### Settings pages (File → Settings, 2026-08-21)
 
