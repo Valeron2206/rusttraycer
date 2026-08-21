@@ -1,8 +1,12 @@
 use crate::ladder::YOLO_BANNER;
 use crate::metrics::METRICS_LABEL;
-use crate::search_ux::{search_enter_submits, SEARCH_HINT, SEARCH_LABEL};
 use crate::state::{AppState, HostStatus, Screen};
 use crate::theme::{self, Icon};
+
+pub const TAB_START_PAGE: &str = "Start Page";
+pub const TAB_SETTINGS: &str = "Settings";
+pub const TAB_NEW: &str = "+";
+pub const AVATAR_FALLBACK: &str = "RT";
 
 pub fn show(ctx: &egui::Context, state: &mut AppState) {
     egui::TopBottomPanel::top("chrome_nav")
@@ -10,57 +14,49 @@ pub fn show(ctx: &egui::Context, state: &mut AppState) {
         .frame(theme::header_frame())
         .show(ctx, |ui| {
             ui.horizontal_centered(|ui| {
-                ui.add_space(theme::SPACE_8);
-                theme::show_icon(ui, Icon::Layers, theme::SIZE_UI, theme::FG_PRIMARY);
-                ui.strong("RustTraycer");
-                if state.demo {
-                    ui.weak("демо");
-                }
-                ui.separator();
+                let _ = chrome_icon_button(ui, Icon::ChevronLeft, false, "Back");
+                let _ = chrome_icon_button(ui, Icon::ChevronRight, false, "Forward");
+                ui.add_space(theme::SPACE_4);
 
-                nav_item(ui, state, Screen::Tasks, "Задачи", true, Icon::List);
-
-                let canvas_label = state
-                    .selected_task_title()
-                    .map(|t| t.to_string())
-                    .unwrap_or_else(|| crate::terminal::TERMINALS_PANE.to_string());
-                let canvas_enabled = state.selected_task_id.is_some()
-                    || !state.open_task_ids.is_empty()
-                    || state.has_workspace();
-                nav_item(
-                    ui,
-                    state,
-                    Screen::Canvas,
-                    &canvas_label,
-                    canvas_enabled,
-                    Icon::Message,
-                );
-
-                nav_item(ui, state, Screen::Host, "Host", true, Icon::Server);
-
-                ui.separator();
-                theme::show_icon(ui, Icon::Search, theme::SIZE_CHIP, theme::FG_SECONDARY);
-                ui.label(SEARCH_LABEL);
-                let resp = ui.add(
-                    egui::TextEdit::singleline(&mut state.search_q)
-                        .desired_width(180.0)
-                        .hint_text(SEARCH_HINT),
-                );
-                if resp.changed() {
-                    state.mark_search_edited();
+                let start_selected = state.screen == Screen::Tasks;
+                if chrome_tab(ui, start_selected, Icon::Layers, TAB_START_PAGE, false).clicked {
+                    state.screen = Screen::Tasks;
                 }
-                let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
-                if search_enter_submits(resp.has_focus(), resp.lost_focus(), enter) {
-                    state.on_search_enter();
+
+                let settings_selected = state.screen == Screen::Host;
+                let settings =
+                    chrome_tab(ui, settings_selected, Icon::Settings, TAB_SETTINGS, true);
+                if settings.close {
+                    state.screen = Screen::Tasks;
+                } else if settings.clicked {
+                    state.screen = Screen::Host;
                 }
-                if ui.input(|i| i.key_pressed(egui::Key::Escape)) && state.search_popup_open() {
-                    state.dismiss_search();
+
+                if plus_tab(ui) {
+                    state.show_new_task_dialog = true;
+                    state.new_task_title.clear();
                 }
+
+                let metrics = state.metrics_chip_value();
+                let initials = avatar_initials(state);
+                let demo = state.demo;
+                let host_status = state.host_status;
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.add_space(theme::SPACE_8);
-                    status_pill(ui, state.host_status);
-                    metrics_chip(ui, state);
+                    avatar_disc(ui, &initials);
+                    status_pill(ui, host_status);
+                    let _ = chrome_icon_button(ui, Icon::Bell, true, "Notifications");
+                    if chrome_icon_button(ui, Icon::History, true, "History") {
+                        state.screen = Screen::Tasks;
+                    }
+                    if chrome_icon_button(ui, Icon::Settings, true, TAB_SETTINGS) {
+                        state.screen = Screen::Host;
+                    }
+                    utility_cluster(ui, &metrics);
+                    if demo {
+                        ui.weak("демо");
+                    }
                 });
             });
         });
@@ -126,44 +122,157 @@ pub fn show(ctx: &egui::Context, state: &mut AppState) {
     }
 }
 
-fn nav_item(
-    ui: &mut egui::Ui,
-    state: &mut AppState,
-    screen: Screen,
-    label: &str,
-    enabled: bool,
-    icon: Icon,
-) {
-    let selected = state.screen == screen;
-    ui.add_enabled_ui(enabled, |ui| {
-        let color = if selected {
-            theme::FG_PRIMARY
-        } else {
-            theme::FG_SECONDARY
-        };
-        theme::show_icon(ui, icon, theme::SIZE_CHIP, color);
-        let response = ui.selectable_label(selected, label);
-        if response.clicked() {
-            state.screen = screen;
-        }
-    });
+struct TabClick {
+    clicked: bool,
+    close: bool,
 }
 
-fn status_pill(ui: &mut egui::Ui, status: HostStatus) {
-    let (dot, bg, fg) = match status {
-        HostStatus::Connecting => (
+fn chrome_tab(
+    ui: &mut egui::Ui,
+    selected: bool,
+    icon: Icon,
+    label: &str,
+    closable: bool,
+) -> TabClick {
+    let fill = if selected {
+        theme::BG_HEADER
+    } else {
+        theme::BG_TAB_INACTIVE
+    };
+    let fg = if selected {
+        theme::FG_PRIMARY
+    } else {
+        theme::FG_SECONDARY
+    };
+    let rounding = egui::CornerRadius {
+        nw: theme::RADIUS_NAV as u8,
+        ne: theme::RADIUS_NAV as u8,
+        sw: 0,
+        se: 0,
+    };
+    let mut clicked = false;
+    let mut close = false;
+    let inner = egui::Frame::new()
+        .fill(fill)
+        .corner_radius(rounding)
+        .inner_margin(egui::Margin::symmetric(
+            theme::SPACE_8 as i8,
+            theme::SPACE_4 as i8,
+        ))
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.x = theme::SPACE_4;
+            ui.horizontal(|ui| {
+                theme::show_icon(ui, icon, theme::SIZE_CHIP, fg);
+                let label_resp = ui.add(
+                    egui::Label::new(egui::RichText::new(label).color(fg))
+                        .sense(egui::Sense::click()),
+                );
+                if label_resp.clicked() {
+                    clicked = true;
+                }
+                if closable {
+                    let close_resp = ui.add(
+                        egui::Label::new(egui::RichText::new("×").color(theme::FG_SECONDARY))
+                            .sense(egui::Sense::click()),
+                    );
+                    if close_resp.clicked() {
+                        close = true;
+                    }
+                }
+            });
+        });
+    if inner.response.interact(egui::Sense::click()).clicked() && !close {
+        clicked = true;
+    }
+    TabClick { clicked, close }
+}
+
+fn plus_tab(ui: &mut egui::Ui) -> bool {
+    let inner = egui::Frame::new()
+        .fill(theme::BG_TAB_INACTIVE)
+        .corner_radius(egui::CornerRadius {
+            nw: theme::RADIUS_NAV as u8,
+            ne: theme::RADIUS_NAV as u8,
+            sw: 0,
+            se: 0,
+        })
+        .inner_margin(egui::Margin::symmetric(
+            theme::SPACE_8 as i8,
+            theme::SPACE_4 as i8,
+        ))
+        .show(ui, |ui| {
+            theme::show_icon(ui, Icon::Plus, theme::SIZE_CHIP, theme::FG_SECONDARY);
+        });
+    inner
+        .response
+        .interact(egui::Sense::click())
+        .on_hover_text(TAB_NEW)
+        .clicked()
+}
+
+fn chrome_icon_button(ui: &mut egui::Ui, icon: Icon, enabled: bool, tip: &str) -> bool {
+    let size = egui::vec2(
+        theme::SIZE_UI + theme::SPACE_4,
+        theme::SIZE_UI + theme::SPACE_4,
+    );
+    let sense = if enabled {
+        egui::Sense::click()
+    } else {
+        egui::Sense::hover()
+    };
+    let (rect, resp) = ui.allocate_exact_size(size, sense);
+    let color = if !enabled {
+        theme::HAIRLINE_CONTROL
+    } else if resp.hovered() {
+        theme::FG_PRIMARY
+    } else {
+        theme::FG_SECONDARY
+    };
+    theme::paint_icon(ui.painter(), rect.shrink(2.0), icon, color);
+    let resp = resp.on_hover_text(tip);
+    enabled && resp.clicked()
+}
+
+fn utility_cluster(ui: &mut egui::Ui, metrics: &str) {
+    egui::Frame::new()
+        .fill(theme::BG_HEADER)
+        .stroke(egui::Stroke::new(1.0, theme::HAIRLINE_CONTROL))
+        .corner_radius(theme::RADIUS_NAV)
+        .inner_margin(egui::Margin::symmetric(
+            theme::SPACE_4 as i8,
+            theme::SPACE_4 as i8,
+        ))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = theme::SPACE_4;
+                let _ = chrome_icon_button(
+                    ui,
+                    Icon::Gauge,
+                    true,
+                    &format!("{METRICS_LABEL} {metrics}"),
+                );
+                let _ = chrome_icon_button(ui, Icon::Overflow, true, "More");
+            });
+        });
+}
+
+fn status_pill_colors(status: HostStatus) -> (egui::Color32, egui::Color32, egui::Color32) {
+    match status {
+        HostStatus::Connecting | HostStatus::Online => (
             theme::FG_SECONDARY,
             theme::CHIP_KEYBINDING,
             theme::FG_PRIMARY,
         ),
-        HostStatus::Online => (theme::ACCENT, theme::BG_PAGE, theme::ACCENT),
         HostStatus::Offline => (
             theme::BANNER_OFFLINE_FG,
             theme::BANNER_OFFLINE_FILL,
             theme::BANNER_OFFLINE_FG,
         ),
-    };
+    }
+}
 
+fn status_pill(ui: &mut egui::Ui, status: HostStatus) {
+    let (dot, bg, fg) = status_pill_colors(status);
     egui::Frame::new()
         .fill(bg)
         .corner_radius(theme::RADIUS_NAV)
@@ -184,12 +293,133 @@ fn status_pill(ui: &mut egui::Ui, status: HostStatus) {
         });
 }
 
-fn metrics_chip(ui: &mut egui::Ui, state: &crate::state::AppState) {
-    let value = state.metrics_chip_value();
-    theme::chip_frame().show(ui, |ui| {
-        ui.horizontal(|ui| {
-            theme::show_icon(ui, Icon::Gauge, theme::SIZE_CHIP, theme::FG_SECONDARY);
-            ui.colored_label(theme::FG_SECONDARY, format!("{METRICS_LABEL} {value}"));
+fn avatar_disc(ui: &mut egui::Ui, initials: &str) {
+    let size = egui::vec2(theme::AVATAR_DISC_W, theme::AVATAR_DISC);
+    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+    let radius = rect.height() * 0.5;
+    ui.painter()
+        .circle_filled(rect.center(), radius, theme::BG_NAV_SELECTED);
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        initials,
+        egui::FontId::new(
+            theme::SIZE_AVATAR,
+            egui::FontFamily::Name(theme::FAMILY_SEMIBOLD.into()),
+        ),
+        theme::FG_SECONDARY,
+    );
+}
+
+fn avatar_initials(state: &AppState) -> String {
+    let picked = state.picked_account_id();
+    let label = picked
+        .as_deref()
+        .and_then(|id| {
+            state
+                .accounts
+                .iter()
+                .find(|a| a.id == id)
+                .map(|a| a.display_label())
+        })
+        .or_else(|| state.accounts.first().map(|a| a.display_label()));
+    match label {
+        Some(label) => initials_from_label(label),
+        None => AVATAR_FALLBACK.to_string(),
+    }
+}
+
+fn initials_from_label(label: &str) -> String {
+    let words: Vec<&str> = label.split_whitespace().filter(|w| !w.is_empty()).collect();
+    if words.len() >= 2 {
+        if let (Some(a), Some(b)) = (first_letter(words[0]), first_letter(words[1])) {
+            return format!("{a}{b}");
+        }
+    }
+    let mut out = String::new();
+    for ch in label.chars().filter(|c| c.is_alphabetic()).take(2) {
+        if let Some(up) = ch.to_uppercase().next() {
+            out.push(up);
+        }
+    }
+    if out.is_empty() {
+        AVATAR_FALLBACK.to_string()
+    } else {
+        out
+    }
+}
+
+fn first_letter(word: &str) -> Option<char> {
+    let ch = word.chars().find(|c| c.is_alphabetic())?;
+    ch.to_uppercase().next()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::account_ux::AccountItem;
+    use crate::state::AppState;
+
+    #[test]
+    fn tab_strip_labels_match_design_parity() {
+        assert_eq!(TAB_START_PAGE, "Start Page");
+        assert_eq!(TAB_SETTINGS, "Settings");
+        assert_eq!(TAB_NEW, "+");
+        assert_eq!(AVATAR_FALLBACK, "RT");
+        let src = include_str!("chrome.rs");
+        let prod = match src.split("#[cfg(test)]").next() {
+            Some(part) => part,
+            None => src,
+        };
+        assert!(prod.contains("Start Page"));
+        assert!(prod.contains("Settings"));
+        assert!(!prod.contains("SEARCH_LABEL"));
+        assert!(!prod.contains("SEARCH_HINT"));
+        assert!(!prod.contains("search_q"));
+        assert!(!prod.contains("Поиск"));
+        assert!(!prod.contains("Задачи"));
+    }
+
+    #[test]
+    fn status_pill_online_is_not_accent() {
+        let (dot, bg, fg) = status_pill_colors(HostStatus::Online);
+        assert_ne!(dot, theme::ACCENT);
+        assert_ne!(bg, theme::ACCENT);
+        assert_ne!(fg, theme::ACCENT);
+        assert_eq!(dot, theme::FG_SECONDARY);
+        assert_eq!(bg, theme::CHIP_KEYBINDING);
+        assert_eq!(fg, theme::FG_PRIMARY);
+        let (c_dot, c_bg, c_fg) = status_pill_colors(HostStatus::Connecting);
+        assert_ne!(c_dot, theme::ACCENT);
+        assert_ne!(c_bg, theme::ACCENT);
+        assert_ne!(c_fg, theme::ACCENT);
+        let (_, off_bg, off_fg) = status_pill_colors(HostStatus::Offline);
+        assert_eq!(off_bg, theme::BANNER_OFFLINE_FILL);
+        assert_eq!(off_fg, theme::BANNER_OFFLINE_FG);
+        assert_ne!(off_bg, theme::ACCENT);
+    }
+
+    #[test]
+    fn avatar_initials_use_label_or_rt() {
+        assert_eq!(initials_from_label(""), AVATAR_FALLBACK);
+        assert_eq!(initials_from_label("   "), AVATAR_FALLBACK);
+        assert_eq!(initials_from_label("123"), AVATAR_FALLBACK);
+        assert_eq!(initials_from_label("work"), "WO");
+        assert_eq!(initials_from_label("Valeriy Khalikov"), "VK");
+        let mut state = AppState::new();
+        assert_eq!(avatar_initials(&state), AVATAR_FALLBACK);
+        state.accounts.push(AccountItem {
+            id: "acc-1".into(),
+            label: "Ada Lovelace".into(),
+            provider: None,
         });
-    });
+        assert_eq!(avatar_initials(&state), "AL");
+        state.picker_account_id = Some("acc-1".into());
+        state.accounts.push(AccountItem {
+            id: "acc-2".into(),
+            label: "work".into(),
+            provider: None,
+        });
+        assert_eq!(avatar_initials(&state), "AL");
+    }
 }

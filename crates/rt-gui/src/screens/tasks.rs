@@ -1,5 +1,6 @@
+use crate::search_ux::{search_enter_submits, SEARCH_HINT, SEARCH_LABEL};
 use crate::state::{AppState, TaskFilter, TaskStatus};
-use crate::theme;
+use crate::theme::{self, Icon};
 use crate::workspace_ux::{
     self, preset_combo_label, role_label_ru, PRESETS_UNAVAILABLE, PRESET_CREATE, PRESET_DELETE,
     PRESET_DELETE_BODY, PRESET_DELETE_OK, PRESET_DELETE_TITLE, PRESET_LABEL, PRESET_NAME_HINT,
@@ -39,6 +40,27 @@ pub fn show(ctx: &egui::Context, state: &mut AppState) {
                     ui.weak(create_disabled_hint(state));
                 }
             });
+        });
+
+        ui.add_space(theme::SPACE_8);
+        ui.horizontal(|ui| {
+            theme::show_icon(ui, Icon::Search, theme::SIZE_CHIP, theme::FG_SECONDARY);
+            ui.label(SEARCH_LABEL);
+            let resp = ui.add(
+                egui::TextEdit::singleline(&mut state.search_q)
+                    .desired_width(220.0)
+                    .hint_text(SEARCH_HINT),
+            );
+            if resp.changed() {
+                state.mark_search_edited();
+            }
+            let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if search_enter_submits(resp.has_focus(), resp.lost_focus(), enter) {
+                state.on_search_enter();
+            }
+            if ui.input(|i| i.key_pressed(egui::Key::Escape)) && state.search_popup_open() {
+                state.dismiss_search();
+            }
         });
 
         ui.add_space(theme::SPACE_8);
