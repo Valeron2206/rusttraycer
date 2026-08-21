@@ -184,7 +184,7 @@ Do not bump this pin because a local download of `/releases/latest` moved. Archi
 | [docs/reference-screens/logged-in-header-tabs-avatar.png](reference-screens/logged-in-header-tabs-avatar.png) | crop/window | 9758 | `5dd3e7da8bed973407f42f8c5068d7824e330c98acfb5e3f1f2103fada09a4ce` | Live header: File menu, Start Page / Settings tabs, + tab, ZA avatar. |
 | [docs/reference-screens/logged-in-settings-sidebar.png](reference-screens/logged-in-settings-sidebar.png) | crop/window | 16090 | `b91b224945588d576286a5a72180af97734ee248f761dd06b067dfb3a0cb8be5` | Live Settings sidebar: General (selected), Appearance, Providers, Notifications, Agent selection, Keybindings, Shell, Worktrees, Host, Diagnostics. |
 
-Start Page tab stays in the header (not captured as its own page). Agent selection, Appearance, Providers, and Keybindings **were** opened — frames below. Finish / Skip / Start building were not clicked. ACT 05 onboarding frames above are from the earlier `:3` session before the Desktop restart.
+Providers, Agent selection, Appearance, and Keybindings were captured (frames below). Start Page was not opened as its own page. Acts 01–03 were not on screen.
 
 ### Settings pages (File → Settings, 2026-08-21)
 
