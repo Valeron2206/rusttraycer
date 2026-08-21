@@ -129,7 +129,7 @@ Measured after start (2026-08-21 09:57 YEKT / 04:57 UTC):
 
 `traycer host doctor` reports `SERVICE_NOT_REGISTERED` and `SYSTEMD_USER_UNREACHABLE`. Expected on this box. Do not install the OS service. Do not enable systemd. Do not click **Retry** in the GUI unless this process is already running.
 
-After the process was up, the systemd modal on `:3` **dismissed itself**. The GUI painted the signed-in onboarding intro (ACT 05 — Delegation / Agent selection guide). Settings was not on screen; it is not in this commit.
+After the process was up, the systemd modal on `:3` **dismissed itself**. The GUI painted the signed-in onboarding intro (ACT 05), then Settings (see frames below). Settings **is** in this branch.
 
 ### Logged-in frames (our files; 2026-08-21 YEKT)
 
