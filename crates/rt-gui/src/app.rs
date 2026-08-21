@@ -2,6 +2,7 @@ use crate::chrome;
 use crate::screens;
 use crate::search_ux::{SEARCH_EMPTY, SEARCH_LABEL};
 use crate::state::{AppState, Screen};
+use crate::theme;
 
 pub struct RtGuiApp {
     pub state: AppState,
@@ -43,7 +44,10 @@ impl eframe::App for RtGuiApp {
             egui::Window::new("Сообщение")
                 .collapsible(false)
                 .resizable(false)
-                .anchor(egui::Align2::RIGHT_BOTTOM, [-16.0, -16.0])
+                .anchor(
+                    egui::Align2::RIGHT_BOTTOM,
+                    [-theme::SPACE_16, -theme::SPACE_16],
+                )
                 .show(ctx, |ui| {
                     ui.label(toast);
                     if ui.button("Закрыть").clicked() {
@@ -106,7 +110,7 @@ fn show_search_results(ctx: &egui::Context, state: &mut AppState) {
     if pressed {
         if let Some(pos) = pointer {
             let on_popup = inner.response.rect.contains(pos);
-            let on_chrome = pos.y <= 40.0;
+            let on_chrome = pos.y <= theme::CHROME_NAV_HEIGHT;
             if !on_popup && !on_chrome {
                 state.dismiss_search();
             }

@@ -1,4 +1,5 @@
 use crate::state::{AppState, TaskFilter, TaskStatus};
+use crate::theme;
 use crate::workspace_ux::{
     self, preset_combo_label, role_label_ru, PRESETS_UNAVAILABLE, PRESET_CREATE, PRESET_DELETE,
     PRESET_DELETE_BODY, PRESET_DELETE_OK, PRESET_DELETE_TITLE, PRESET_LABEL, PRESET_NAME_HINT,
@@ -9,7 +10,7 @@ use crate::workspace_ux::{
 pub fn show(ctx: &egui::Context, state: &mut AppState) {
     egui::CentralPanel::default().show(ctx, |ui| {
         ui.heading("Задачи");
-        ui.add_space(6.0);
+        ui.add_space(theme::SPACE_8);
 
         ui.horizontal(|ui| {
             ui.label("Фильтр:");
@@ -40,9 +41,9 @@ pub fn show(ctx: &egui::Context, state: &mut AppState) {
             });
         });
 
-        ui.add_space(8.0);
+        ui.add_space(theme::SPACE_8);
         ui.separator();
-        ui.add_space(8.0);
+        ui.add_space(theme::SPACE_8);
 
         let filtered_empty = state.filtered_tasks().is_empty();
         if filtered_empty {
@@ -83,19 +84,15 @@ fn empty_card(
     add_contents: impl FnOnce(&mut egui::Ui),
 ) {
     ui.vertical_centered(|ui| {
-        ui.add_space(48.0);
-        egui::Frame::new()
-            .fill(egui::Color32::from_rgb(28, 28, 34))
-            .corner_radius(8.0)
-            .inner_margin(egui::Margin::same(20))
-            .show(ui, |ui| {
-                ui.set_max_width(520.0);
-                ui.heading(title);
-                ui.add_space(8.0);
-                ui.label(body);
-                ui.add_space(12.0);
-                add_contents(ui);
-            });
+        ui.add_space(theme::SPACE_48);
+        theme::card_frame().show(ui, |ui| {
+            ui.set_max_width(520.0);
+            ui.heading(title);
+            ui.add_space(theme::SPACE_8);
+            ui.label(body);
+            ui.add_space(theme::SPACE_12);
+            add_contents(ui);
+        });
     });
 }
 
@@ -117,12 +114,12 @@ fn empty_no_workspace(ui: &mut egui::Ui, state: &mut AppState) {
         "Host онлайн, но workspace ещё не добавлен. Без папки нельзя создать задачу. GUI не читает содержимое папки с диска — только передаёт абсолютный путь на host.",
         |ui| {
             if ui
-                .add_sized([200.0, 28.0], egui::Button::new("Добавить папку"))
+                .add_sized([theme::CTA_WIDTH, theme::CTA_HEIGHT], theme::primary_button("Добавить папку"))
                 .clicked()
             {
                 state.pick_workspace_folder();
             }
-            ui.add_space(8.0);
+            ui.add_space(theme::SPACE_8);
             ui.horizontal(|ui| {
                 ui.label("или путь:");
                 let resp = ui.add(
@@ -159,7 +156,10 @@ fn empty_no_tasks(ui: &mut egui::Ui, state: &mut AppState) {
                 |ui| {
                     ui.add_enabled_ui(state.can_create_task(), |ui| {
                         if ui
-                            .add_sized([200.0, 28.0], egui::Button::new("Новая задача"))
+                            .add_sized(
+                                [theme::CTA_WIDTH, theme::CTA_HEIGHT],
+                                theme::primary_button("Новая задача"),
+                            )
                             .clicked()
                         {
                             state.show_new_task_dialog = true;
@@ -190,48 +190,44 @@ fn show_task_list(ui: &mut egui::Ui, state: &mut AppState) {
     let mut rename: Option<(String, String)> = None;
     let mut archive_id: Option<String> = None;
 
-    egui::Frame::new()
-        .fill(egui::Color32::from_rgb(26, 26, 30))
-        .inner_margin(egui::Margin::same(8))
-        .show(ui, |ui| {
-            egui::Grid::new("task_header")
-                .num_columns(5)
-                .spacing([12.0, 6.0])
-                .min_col_width(80.0)
-                .show(ui, |ui| {
-                    ui.weak("Название");
-                    ui.weak("Статус");
-                    ui.weak("updatedAt");
-                    ui.weak("");
-                    ui.weak("");
-                    ui.end_row();
-                });
-            ui.separator();
-
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                for (id, title, status, updated) in &rows {
-                    let selected = state.selected_task_id.as_deref() == Some(id.as_str());
-                    ui.horizontal(|ui| {
-                        if ui.selectable_label(selected, title).clicked() {
-                            select_id = Some(id.clone());
-                        }
-                        ui.add_space(16.0);
-                        ui.label(status.label_ru());
-                        ui.add_space(16.0);
-                        ui.weak(updated);
-                        ui.add_space(12.0);
-                        if ui.small_button("Переименовать").clicked() {
-                            rename = Some((id.clone(), title.clone()));
-                        }
-                        if *status == TaskStatus::Open && ui.small_button("В архив").clicked()
-                        {
-                            archive_id = Some(id.clone());
-                        }
-                    });
-                    ui.separator();
-                }
+    theme::content_frame().show(ui, |ui| {
+        egui::Grid::new("task_header")
+            .num_columns(5)
+            .spacing([theme::SPACE_12, theme::SPACE_8])
+            .min_col_width(80.0)
+            .show(ui, |ui| {
+                ui.weak("Название");
+                ui.weak("Статус");
+                ui.weak("updatedAt");
+                ui.weak("");
+                ui.weak("");
+                ui.end_row();
             });
+        ui.separator();
+
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            for (id, title, status, updated) in &rows {
+                let selected = state.selected_task_id.as_deref() == Some(id.as_str());
+                ui.horizontal(|ui| {
+                    if ui.selectable_label(selected, title).clicked() {
+                        select_id = Some(id.clone());
+                    }
+                    ui.add_space(theme::SPACE_16);
+                    ui.label(status.label_ru());
+                    ui.add_space(theme::SPACE_16);
+                    ui.weak(updated);
+                    ui.add_space(theme::SPACE_12);
+                    if ui.small_button("Переименовать").clicked() {
+                        rename = Some((id.clone(), title.clone()));
+                    }
+                    if *status == TaskStatus::Open && ui.small_button("В архив").clicked() {
+                        archive_id = Some(id.clone());
+                    }
+                });
+                ui.separator();
+            }
         });
+    });
 
     if let Some(id) = select_id {
         state.open_task(id);
@@ -261,7 +257,7 @@ pub fn show_new_task_dialog(ctx: &egui::Context, state: &mut AppState) {
                     .desired_width(320.0)
                     .hint_text("Например, починить логин"),
             );
-            ui.add_space(6.0);
+            ui.add_space(theme::SPACE_8);
             ui.label(PRESET_LABEL);
             let host_ok = state.workspace_host_ok();
             ui.add_enabled_ui(host_ok, |ui| {
@@ -292,9 +288,9 @@ pub fn show_new_task_dialog(ctx: &egui::Context, state: &mut AppState) {
             if state.can_rpc() && !host_ok {
                 ui.weak(WORKSPACE_UNAVAILABLE);
             }
-            ui.add_space(8.0);
+            ui.add_space(theme::SPACE_8);
             show_user_preset_editor(ui, state);
-            ui.add_space(8.0);
+            ui.add_space(theme::SPACE_8);
             ui.horizontal(|ui| {
                 let can = state.can_create_task() && !state.new_task_title.trim().is_empty();
                 ui.add_enabled_ui(can, |ui| {
@@ -332,7 +328,7 @@ pub fn show_rename_dialog(ctx: &egui::Context, state: &mut AppState) {
             ui.label("Название");
             let _resp = ui
                 .add(egui::TextEdit::singleline(&mut state.rename_task_title).desired_width(320.0));
-            ui.add_space(8.0);
+            ui.add_space(theme::SPACE_8);
             ui.horizontal(|ui| {
                 let can = state.can_rpc() && !state.rename_task_title.trim().is_empty();
                 ui.add_enabled_ui(can, |ui| {
@@ -363,7 +359,7 @@ fn show_user_preset_editor(ui: &mut egui::Ui, state: &mut AppState) {
             .desired_width(320.0)
             .hint_text(PRESET_NAME_HINT),
     );
-    ui.add_space(4.0);
+    ui.add_space(theme::SPACE_4);
     ui.label(ROLE_LABEL);
     let mut role = state.preset_role_draft.clone();
     let role_text = role_label_ru(&role).to_string();
@@ -377,14 +373,14 @@ fn show_user_preset_editor(ui: &mut egui::Ui, state: &mut AppState) {
     if role != state.preset_role_draft {
         state.preset_role_draft = role;
     }
-    ui.add_space(4.0);
+    ui.add_space(theme::SPACE_4);
     ui.label(PRESET_TITLE_HINT_LABEL);
     ui.add(
         egui::TextEdit::singleline(&mut state.preset_title_hint_draft)
             .desired_width(320.0)
             .hint_text(PRESET_TITLE_HINT_LABEL),
     );
-    ui.add_space(4.0);
+    ui.add_space(theme::SPACE_4);
     ui.label(PRESET_PROMPT_LABEL);
     ui.add(
         egui::TextEdit::multiline(&mut state.preset_prompt_draft)
@@ -392,7 +388,7 @@ fn show_user_preset_editor(ui: &mut egui::Ui, state: &mut AppState) {
             .desired_rows(3)
             .hint_text(PRESET_PROMPT_LABEL),
     );
-    ui.add_space(6.0);
+    ui.add_space(theme::SPACE_8);
     ui.horizontal(|ui| {
         if ui.button(PRESET_CREATE).clicked() {
             state.create_user_preset();
@@ -424,7 +420,7 @@ pub fn show_preset_delete_confirm(ctx: &egui::Context, state: &mut AppState) {
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .show(ctx, |ui| {
             ui.label(PRESET_DELETE_BODY);
-            ui.add_space(8.0);
+            ui.add_space(theme::SPACE_8);
             ui.horizontal(|ui| {
                 if ui.button(PRESET_DELETE_OK).clicked() {
                     state.confirm_delete_user_preset();

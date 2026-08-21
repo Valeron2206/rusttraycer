@@ -37,6 +37,7 @@ use crate::terminal::{
     NEW_TERMINAL, NO_LIVE_SHELL, OPEN_PTY, PTY_HINT, PTY_INPUT_HINT, PTY_SUBMIT, SHELL_HINT,
     TERMINALS_PANE, TERMINAL_DISABLED_CAPS, TERMINAL_TAB, TERMINAL_UNAVAILABLE,
 };
+use crate::theme;
 use crate::workspace_ux::{
     self, agents_md_chip, guide_preview, role_label_ru, workspace_guide_chip, GUIDE_PANE,
     ROLE_CHOICES, ROLE_LABEL, WORKSPACE_UNAVAILABLE,
@@ -59,7 +60,7 @@ pub fn show(ctx: &egui::Context, state: &mut AppState) {
     show_task_tabs(ctx, state);
 
     egui::TopBottomPanel::top("canvas_header")
-        .exact_height(36.0)
+        .exact_height(theme::CHROME_TABS)
         .show(ctx, |ui| {
             ui.horizontal_centered(|ui| {
                 let title = state
@@ -174,7 +175,7 @@ fn show_task_tabs(ctx: &egui::Context, state: &mut AppState) {
     let mut switch = None;
     let mut close = None;
     egui::TopBottomPanel::top("task_tabs")
-        .exact_height(32.0)
+        .exact_height(theme::SPACE_32)
         .show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.weak("Задачи:");
@@ -436,19 +437,19 @@ fn show_agents(ui: &mut egui::Ui, state: &mut AppState) {
                 ui.add_space(depth as f32 * 12.0);
                 let resp = egui::Frame::new()
                     .fill(if is_sel {
-                        egui::Color32::from_rgb(40, 48, 64)
+                        theme::BG_NAV_SELECTED
                     } else {
-                        egui::Color32::from_rgb(32, 32, 38)
+                        theme::BG_CONTENT
                     })
-                    .inner_margin(egui::Margin::same(8))
-                    .corner_radius(6.0)
+                    .inner_margin(egui::Margin::same(theme::SPACE_8 as i8))
+                    .corner_radius(theme::RADIUS_NAV)
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             ui.strong(&agent.provider);
                             let (dot, color, label) = if inbox_live {
-                                ("●", egui::Color32::from_rgb(80, 200, 120), INBOX_LIVE)
+                                ("●", theme::status_live(true), INBOX_LIVE)
                             } else {
-                                ("○", egui::Color32::from_rgb(120, 120, 128), INBOX_OFF)
+                                ("○", theme::status_live(false), INBOX_OFF)
                             };
                             ui.colored_label(color, format!("{dot} {label}"));
                         });
@@ -536,9 +537,9 @@ fn show_inbox(ui: &mut egui::Ui, state: &mut AppState) {
     ui.heading(INBOX_PANE);
     let live = state.selected_inbox_live();
     let (dot, color, label) = if live {
-        ("●", egui::Color32::from_rgb(80, 200, 120), INBOX_LIVE)
+        ("●", theme::status_live(true), INBOX_LIVE)
     } else {
-        ("○", egui::Color32::from_rgb(120, 120, 128), INBOX_OFF)
+        ("○", theme::status_live(false), INBOX_OFF)
     };
     ui.colored_label(color, format!("{dot} {label}"));
     let items: Vec<(String, String, String)> = state
@@ -629,7 +630,7 @@ fn show_loop(ui: &mut egui::Ui, state: &mut AppState) {
     });
     if let Some(loop_state) = &state.loop_state {
         if loop_state.is_running() {
-            ui.colored_label(egui::Color32::from_rgb(220, 180, 80), LOOP_RUNNING);
+            ui.colored_label(theme::FG_SECONDARY, LOOP_RUNNING);
         }
         ui.label(loop_state.counter_label());
         if let Some(reason) = &loop_state.reason {
@@ -841,17 +842,13 @@ fn show_provider_picker(ui: &mut egui::Ui, state: &mut AppState) {
     }
     ui.add_space(4.0);
     ui.weak(CAPS_LABEL);
-    egui::Frame::new()
-        .fill(egui::Color32::from_rgb(28, 28, 34))
-        .inner_margin(egui::Margin::same(8))
-        .corner_radius(4.0)
-        .show(ui, |ui| {
-            ui.set_min_height(36.0);
-            ui.set_width(ui.available_width());
-            if let Some(caps) = state.selected_provider().and_then(|p| p.caps.as_ref()) {
-                show_caps(ui, caps);
-            }
-        });
+    theme::content_frame().show(ui, |ui| {
+        ui.set_min_height(36.0);
+        ui.set_width(ui.available_width());
+        if let Some(caps) = state.selected_provider().and_then(|p| p.caps.as_ref()) {
+            show_caps(ui, caps);
+        }
+    });
 }
 
 fn show_account_picker(ui: &mut egui::Ui, state: &mut AppState) {
@@ -897,13 +894,7 @@ fn show_caps(ui: &mut egui::Ui, caps: &HarnessCapsView) {
         ("needsApiKey", caps.needs_api_key, false),
     ];
     for (name, on, grey) in flags {
-        let color = if grey {
-            egui::Color32::from_rgb(140, 140, 150)
-        } else if on {
-            egui::Color32::from_rgb(180, 210, 180)
-        } else {
-            egui::Color32::from_rgb(150, 150, 156)
-        };
+        let color = theme::cap_color(on, grey);
         let mark = if on { "●" } else { "○" };
         ui.colored_label(color, format!("{mark} {name}"));
     }
@@ -1280,7 +1271,7 @@ fn show_preview(ui: &mut egui::Ui, ctx: &egui::Context, state: &mut AppState) {
                 }
             });
             ui.add_space(8.0);
-            ui.colored_label(egui::Color32::from_rgb(230, 180, 140), text);
+            ui.colored_label(theme::FG_SECONDARY, text);
         }
         None => match &state.selected_file {
             Some(path) => {
@@ -1612,11 +1603,12 @@ fn show_deliver(ui: &mut egui::Ui, state: &mut AppState) {
 }
 
 fn bubble(ui: &mut egui::Ui, _id: &str, role: &str, content: &str) {
-    let (label, fill, align_right) = match role {
-        "user" => ("вы", egui::Color32::from_rgb(28, 48, 80), true),
-        "assistant" => ("агент", egui::Color32::from_rgb(36, 36, 42), false),
-        "tool" => ("tool", egui::Color32::from_rgb(40, 36, 24), false),
-        _ => ("system", egui::Color32::from_rgb(32, 32, 32), false),
+    let fill = theme::bubble_fill(role);
+    let (label, align_right) = match role {
+        "user" => ("вы", true),
+        "assistant" => ("агент", false),
+        "tool" => ("tool", false),
+        _ => ("system", false),
     };
 
     let layout = if align_right {
@@ -1628,8 +1620,8 @@ fn bubble(ui: &mut egui::Ui, _id: &str, role: &str, content: &str) {
     ui.with_layout(layout, |ui| {
         egui::Frame::new()
             .fill(fill)
-            .corner_radius(8.0)
-            .inner_margin(egui::Margin::same(10))
+            .corner_radius(theme::RADIUS_MODAL)
+            .inner_margin(egui::Margin::same(theme::SPACE_8 as i8))
             .show(ui, |ui| {
                 ui.set_max_width(ui.available_width() * 0.85);
                 ui.weak(label);
@@ -1928,51 +1920,47 @@ fn show_comments(ui: &mut egui::Ui, state: &mut AppState) {
         else {
             continue;
         };
-        egui::Frame::new()
-            .fill(egui::Color32::from_rgb(30, 30, 36))
-            .inner_margin(egui::Margin::same(8))
-            .corner_radius(6.0)
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.weak(format!("{start}–{end}"));
-                    if !created_at.is_empty() {
-                        ui.weak(&created_at);
-                    } else if !updated_at.is_empty() {
-                        ui.weak(&updated_at);
-                    }
-                    if resolved {
-                        ui.weak(RESOLVED_LABEL);
-                    } else if ui.small_button(RESOLVE_BUTTON).clicked() {
-                        state.resolve_comment(id.clone());
-                    }
-                });
-                for (body, at) in &comments {
-                    ui.label(body);
-                    if !at.is_empty() {
-                        ui.weak(at);
-                    }
+        theme::content_frame().show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.weak(format!("{start}–{end}"));
+                if !created_at.is_empty() {
+                    ui.weak(&created_at);
+                } else if !updated_at.is_empty() {
+                    ui.weak(&updated_at);
                 }
-                let mut draft = state
-                    .artifact_reply_drafts
-                    .get(&id)
-                    .cloned()
-                    .unwrap_or_default();
-                let mut send_reply = false;
-                ui.horizontal(|ui| {
-                    ui.add(
-                        egui::TextEdit::singleline(&mut draft)
-                            .hint_text(COMMENT_HINT)
-                            .desired_width(180.0),
-                    );
-                    if ui.small_button(REPLY_BUTTON).clicked() {
-                        send_reply = true;
-                    }
-                });
-                state.artifact_reply_drafts.insert(id.clone(), draft);
-                if send_reply {
-                    state.reply_comment(id.clone());
+                if resolved {
+                    ui.weak(RESOLVED_LABEL);
+                } else if ui.small_button(RESOLVE_BUTTON).clicked() {
+                    state.resolve_comment(id.clone());
                 }
             });
+            for (body, at) in &comments {
+                ui.label(body);
+                if !at.is_empty() {
+                    ui.weak(at);
+                }
+            }
+            let mut draft = state
+                .artifact_reply_drafts
+                .get(&id)
+                .cloned()
+                .unwrap_or_default();
+            let mut send_reply = false;
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut draft)
+                        .hint_text(COMMENT_HINT)
+                        .desired_width(180.0),
+                );
+                if ui.small_button(REPLY_BUTTON).clicked() {
+                    send_reply = true;
+                }
+            });
+            state.artifact_reply_drafts.insert(id.clone(), draft);
+            if send_reply {
+                state.reply_comment(id.clone());
+            }
+        });
         ui.add_space(4.0);
     }
 }

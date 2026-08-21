@@ -7,6 +7,7 @@ use crate::sync_ux::{
     PULL_CONFIRM_TITLE, PUSH_BUTTON, SYNC_PEER_UNAVAILABLE, SYNC_SECRET_HINT, SYNC_SECTION,
     SYNC_UNAVAILABLE,
 };
+use crate::theme;
 use crate::workspace_ux::{
     GLOBAL_GUIDE_HINT, GLOBAL_GUIDE_LABEL, GLOBAL_GUIDE_SAVE, WORKSPACE_UNAVAILABLE,
 };
@@ -20,7 +21,7 @@ pub fn show(ctx: &egui::Context, state: &mut AppState) {
 pub fn show_body(ui: &mut egui::Ui, state: &mut AppState) {
     ui.heading("Host");
     ui.weak("Диагностика. Не облако, не тема, не аккаунты. Refresh только перечитывает pid.json.");
-    ui.add_space(10.0);
+    ui.add_space(theme::SPACE_8);
 
     ui.horizontal(|ui| {
         if ui.button("Обновить").clicked() {
@@ -38,12 +39,12 @@ pub fn show_body(ui: &mut egui::Ui, state: &mut AppState) {
         }
     });
 
-    ui.add_space(6.0);
+    ui.add_space(theme::SPACE_8);
     ui.label(format!("файл: {}", discovery::pid_json_path().display()));
     if let Some(err) = &state.discover_error {
-        ui.colored_label(egui::Color32::from_rgb(230, 160, 160), err);
+        ui.colored_label(theme::BANNER_OFFLINE_FILL, err);
     }
-    ui.add_space(12.0);
+    ui.add_space(theme::SPACE_12);
 
     let unavailable = "недоступно";
     let (host_id, pid, rpc_url, ws_url, started) = match &state.pid_info {
@@ -118,7 +119,7 @@ pub fn show_body(ui: &mut egui::Ui, state: &mut AppState) {
     field(ui, "taskCount", &task_n);
     field(ui, "agentCount", &agent_n);
 
-    ui.add_space(8.0);
+    ui.add_space(theme::SPACE_8);
     ui.weak("providers (host.doctor)");
     if state.providers.is_empty() {
         field(ui, "providers", unavailable);
@@ -154,9 +155,9 @@ pub fn show_body(ui: &mut egui::Ui, state: &mut AppState) {
         }
     }
 
-    ui.add_space(16.0);
+    ui.add_space(theme::SPACE_16);
     ui.separator();
-    ui.add_space(8.0);
+    ui.add_space(theme::SPACE_8);
     ui.heading(SYNC_SECTION);
     let sync_ok = state.sync_host_ok();
     if state.can_rpc() && !sync_ok {
@@ -179,7 +180,7 @@ pub fn show_body(ui: &mut egui::Ui, state: &mut AppState) {
             }
         });
     });
-    ui.add_space(8.0);
+    ui.add_space(theme::SPACE_8);
     ui.horizontal(|ui| {
         ui.label(PEER_URL_LABEL);
         ui.add(
@@ -200,9 +201,9 @@ pub fn show_body(ui: &mut egui::Ui, state: &mut AppState) {
         ui.weak(SYNC_PEER_UNAVAILABLE);
     }
 
-    ui.add_space(16.0);
+    ui.add_space(theme::SPACE_16);
     ui.separator();
-    ui.add_space(8.0);
+    ui.add_space(theme::SPACE_8);
     ui.heading(GLOBAL_GUIDE_LABEL);
     state.ensure_settings_guide();
     let host_ok = state.workspace_host_ok();
@@ -223,9 +224,9 @@ pub fn show_body(ui: &mut egui::Ui, state: &mut AppState) {
             state.save_settings_guide();
         }
     });
-    ui.add_space(16.0);
+    ui.add_space(theme::SPACE_16);
     ui.separator();
-    ui.add_space(8.0);
+    ui.add_space(theme::SPACE_8);
     ui.heading(HOOKS_LABEL);
     state.ensure_hooks();
     if !state.hooks_path.is_empty() {
@@ -240,9 +241,9 @@ pub fn show_body(ui: &mut egui::Ui, state: &mut AppState) {
     if ui.button(HOOKS_SAVE).clicked() {
         state.save_hooks();
     }
-    ui.add_space(16.0);
+    ui.add_space(theme::SPACE_16);
     ui.separator();
-    ui.add_space(8.0);
+    ui.add_space(theme::SPACE_8);
     ui.weak("Нет: запустить host, смена темы, аккаунты, API keys, список host.");
 }
 
@@ -276,7 +277,7 @@ pub fn show_sync_import_confirm(ctx: &egui::Context, state: &mut AppState) {
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .show(ctx, |ui| {
             ui.label(IMPORT_CONFIRM_BODY);
-            ui.add_space(8.0);
+            ui.add_space(theme::SPACE_8);
             ui.horizontal(|ui| {
                 if ui.button(IMPORT_CONFIRM_OK).clicked() {
                     state.confirm_sync_import();
@@ -303,7 +304,7 @@ pub fn show_sync_pull_confirm(ctx: &egui::Context, state: &mut AppState) {
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .show(ctx, |ui| {
             ui.label(PULL_CONFIRM_BODY);
-            ui.add_space(8.0);
+            ui.add_space(theme::SPACE_8);
             ui.horizontal(|ui| {
                 if ui.button(PULL_CONFIRM_OK).clicked() {
                     state.confirm_sync_pull();
