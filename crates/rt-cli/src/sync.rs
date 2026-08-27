@@ -293,7 +293,7 @@ mod tests {
             "rpcUrl": rpc_url,
             "wsUrl": format!("{}/ws", rpc_url.replace("http://", "ws://")),
             "startedAt": "2026-08-19T00:00:00Z",
-            "protocol": { "crate": "2.1.2" },
+            "protocol": { "crate": "2.2.0" },
         });
         std::fs::write(pid_path(dir), serde_json::to_vec_pretty(&json).unwrap()).unwrap();
     }

@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub const CRATE_VERSION: &str = "2.1.2";
+pub const CRATE_VERSION: &str = "2.2.0";
 pub const HOST_METHOD_MAJOR: u32 = 1;
 pub const HOST_METHOD_MINOR: u32 = 0;
 pub const MAX_TITLE_SCALARS: usize = 200;
@@ -1523,7 +1523,7 @@ mod tests {
         assert_eq!(v, MethodVersion { major: 1, minor: 0 });
         assert_eq!(v.major, HOST_METHOD_MAJOR);
         assert_eq!(v.minor, HOST_METHOD_MINOR);
-        assert_eq!(CRATE_VERSION, "2.1.2");
+        assert_eq!(CRATE_VERSION, "2.2.0");
         assert_eq!(SESSION_HEADER, "X-Rt-Session");
         assert_eq!(MAX_CONTENT_BYTES, 1_048_576);
         assert_eq!(MAX_FILE_BYTES, 256 * 1024);

@@ -5,6 +5,19 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.0] — 2026-08-27
+
+Visual-parity release for official HT chrome against Traycer Desktop `desktop-v1.1.10`. Workspace crate version 2.2.0. Tag `v2.2.0` after CI (Chief). `v2.1.2` stays put.
+
+### Added
+
+- HT chrome match: theme tokens (0130), chrome IA (0133), white header plate (0138), header seam (0141). STAR 0143 pair-parity **yes**, scope HT only. Reference: `desktop-v1.1.10`. Report: [design-parity-report.md](docs/design-parity-report.md).
+
+### Out of scope
+
+- Start Page / History have no ours pair. Chat, permission ladder, and Acts 01–03 still need live official frames.
+- This release does not claim product-wide visual indistinguishability.
+
 ## [2.1.2] — 2026-08-20
 
 Cycle 1 dogfood patch. Protocol 1.9. Storage 0001–0011 (`0011_shells.sql`). Workspace crate version 2.1.2. Tag `v2.1.2` after CI (Chief). `v2.1.1` stays put.
@@ -102,6 +115,8 @@ First production release. Linux x86_64 only ([ADR-001](docs/adr/0001-target-plat
 - `GET /metrics`. GUI picker / N agents in the canvas (host already allows both).
 
 [1.0.0]: https://github.com/Valeron2206/rusttraycer/releases/tag/v1.0.0
+
+[2.2.0]: https://github.com/Valeron2206/rusttraycer/releases/tag/v2.2.0
 
 [2.1.2]: https://github.com/Valeron2206/rusttraycer/releases/tag/v2.1.2
 
