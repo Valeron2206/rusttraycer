@@ -488,7 +488,38 @@ Live. File → Settings opens the Settings tab; it does **not** replay onboardin
 | Notification / toast | **fallback** changelog notification center; bell icon is **live HT** | Today: bottom-right `egui::Window` "Сообщение". Target: clickable toast; a center list is later | **needs live** |
 | Resource monitor | **fallback** changelog; gauge icon is **live HT** | `metrics.rs` chip in chrome | **needs live** for the open panel |
 
-Empty states that *are* specified as behavior (not pixels) remain in `docs/gui-ia-v0.md`: no host, no workspace, no tasks, no agent. Visual treatment of those empties: host-offline now has **HE** (light page + centered card). The others **need live**.
+Empty states that *are* specified as behavior (not pixels) remain in `docs/gui-ia-v0.md`: no host, no workspace, no tasks, no agent. Visual treatment: host-offline **HE**; Start Page empty list **SP**; History empty **HY**. no-workspace and a populated History **need live**.
+
+### 3.13 Start Page
+
+Inventory for **SP**. Tokens from §2.1 (`bg.page`, `banner.update`, `surface.composer`, `accent.traycer-green`). This is the Start Page *page*, not a Task canvas.
+
+| Traycer element | Source | egui | Notes |
+|---|---|---|---|
+| Page wash | **live SP** | `CentralPanel` + `bg.page` `#F6F9F8` | 743 613 px at **SP** `(640, 200)`. Same wash as Settings / **HE**. |
+| Greeting | **live SP** | `RichText` ~30 px Semibold, `fg.primary` `#0F0F0F` | "Good morning" bbox `(519, 342)–(757, 374)`. |
+| Subtitle | **live SP** | 13–15 px Regular, `fg.secondary` `#666666` | "What's on your mind?" |
+| Update banner | **live SP** | `Frame` 673×43, fill `#DDF0F6`, edge `#9ADAF5`, type `#052F4A`, radius ~5–6 | Session state ("Update installed — restart host to finish."), not permanent chrome. |
+| Restart host | **live SP** | `Button` 91×25, fill `#257174`, fg `#FFFFFF`, radius ~3 | Same accent as Settings ON toggle. Hover **needs live**. |
+| Composer plate | **live SP** | `TextEdit::multiline` in 673×94 `#F3F5F4`, outline `#B4CDCD`, radius ~6 | Placeholder AA `#9E9F9F`. Not a Task-thread composer. |
+| Composer controls | **live SP** | Chip/button row on the plate (Full access / model / High / mic / send `#EEEFEE`) | Labels `#666666` / `#0F0F0F`. Send is a ghost disc, not Traycer Green. |
+| Recent / Filter / Select | **live SP** | Toolbar over the empty list, `#666666` | Empty list **live**. Populated recents **needs live**. |
+| Empty list | **live SP** | No rows under the toolbar | Density: greeting + composer + empty field. no-workspace **needs live**. |
+
+### 3.14 History empty
+
+Inventory for **HY**. Tokens from §2.1 (`history.header`, `history.search.ring`, `history.scrim`). Empty modal only — no rows.
+
+| Traycer element | Source | egui | Notes |
+|---|---|---|---|
+| Scrim | **live HY** | Translucent fill over Start Page, dominant `#ACAEAD` | Cloud, not a flat hex. Same accepted limit as §4.2. |
+| Modal | **live HY** | `egui::Window` / card **1024×553**, radius ~8 | `(128, 121)–(1151, 673)`. Edge `#919291`. |
+| Title bar | **live HY** | 40 px `#EAEAEA`, title `#0F0F0F` ~15 px | "History" at `(167, 134)–(213, 147)`. Pop-out + close on the right. |
+| Header seam | **live HY** | Two 1 px blends `#E4E9E7` then `#F0F4F2` | Do not collapse into `hairline.header`. |
+| Search | **live HY** | `TextEdit` ~666×35, interior `#F6F9F8`, focused ring cloud `#8EB5B6` | Placeholder "Search by title, repo, branch, or PR" `#666666`. |
+| Toolbar | **live HY** | Most recent / Filter / Select / Refresh, `#666666` | **HY** `(682, 233)–(962, 245)`. |
+| Empty copy | **live HY** | Centered "No tasks yet", `fg.primary` AA cloud | `(605, 323)–(675, 335)`. 15 px Regular. |
+| History *rows* / loading / no-match | not on **HY** | `screens/tasks.rs` list | **needs live**. |
 
 ---
 
@@ -517,7 +548,7 @@ These are engine and legal limits. Reviewer does not open a DF against them.
 - No invented hex for chat bubbles, Task sidebar, ladder scrim, or forced Light/Dark.
 - No claim that Acts 01–03 were captured. They were not.
 
-Next Architect pass: a Task with the Agents sidebar and a Chat transcript + composer (Acts 01–03), a ladder/approval card, Start Page contents, Settings → Notifications / Shell / Worktrees / Host / Diagnostics, and Appearance forced Light + Dark. Replace every remaining **needs live** row with a pipetted token and a frame id.
+Next Architect pass: a Task with the Agents sidebar and a Chat transcript + composer (Acts 01–03), a ladder/approval card, History *rows*, Settings → Notifications / Shell / Worktrees / Host / Diagnostics, and Appearance forced Light + Dark. Replace every remaining **needs live** row with a pipetted token and a frame id. Start Page contents and History empty are already live (**SP** / **HY**).
 
 ---
 
