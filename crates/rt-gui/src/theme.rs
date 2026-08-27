@@ -549,12 +549,27 @@ pub fn chip_frame() -> egui::Frame {
 }
 
 pub fn header_frame() -> egui::Frame {
-    // White header plate with a 1 px hairline under the 40 px bar (spec §2.1 / §2.3).
-    // Inactive tabs still paint BG_TAB_INACTIVE on top of this plate.
+    // White header plate. The under-strip seam is not a Frame stroke — that
+    // paints a full rect, so the top edge sits at y=0 and composites against
+    // the window join. chrome.rs paints `header_seam_rect` on the last pixel
+    // of this 40 px bar. Inactive tabs still paint BG_TAB_INACTIVE on the plate.
     egui::Frame::new()
         .fill(BG_HEADER)
         .inner_margin(Margin::symmetric(SPACE_8 as i8, 0))
-        .stroke(Stroke::new(1.0, HAIRLINE_HEADER))
+}
+
+/// 1 px `#DFE9E7` under the 40 px tab strip (spec §2.3 `chrome.header-seam`).
+/// Last pixel of `header` (`y = header.bottom() - 1`), never the y=0 top edge.
+pub fn header_seam_rect(header: egui::Rect) -> egui::Rect {
+    let top = header.bottom() - 1.0;
+    egui::Rect::from_min_max(
+        egui::pos2(header.left(), top),
+        egui::pos2(header.right(), header.bottom()),
+    )
+}
+
+pub fn paint_header_seam(painter: &egui::Painter, header: egui::Rect) {
+    painter.rect_filled(header_seam_rect(header), 0.0, HAIRLINE_HEADER);
 }
 
 /// Install Inter and apply the signed-in light Style + Visuals.
@@ -806,9 +821,19 @@ mod tests {
         let frame = header_frame();
         assert_eq!(frame.fill, BG_HEADER);
         assert_eq!(color_hex(frame.fill), "#FFFFFF");
-        assert_eq!(frame.stroke.color, HAIRLINE_HEADER);
-        assert_eq!(color_hex(frame.stroke.color), "#DFE9E7");
-        assert!((frame.stroke.width - 1.0).abs() < f32::EPSILON);
+        // No 4-sided Frame stroke: that painted the hairline at y=0.
+        assert!(frame.stroke.width < f32::EPSILON);
+
+        let header =
+            egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1280.0, CHROME_NAV_HEIGHT));
+        let seam = header_seam_rect(header);
+        assert_eq!(color_hex(HAIRLINE_HEADER), "#DFE9E7");
+        assert!((seam.height() - 1.0).abs() < f32::EPSILON);
+        assert!((seam.top() - (CHROME_NAV_HEIGHT - 1.0)).abs() < f32::EPSILON);
+        assert!((seam.bottom() - CHROME_NAV_HEIGHT).abs() < f32::EPSILON);
+        assert!(seam.top() > 0.0);
+        assert!((seam.left() - header.left()).abs() < f32::EPSILON);
+        assert!((seam.right() - header.right()).abs() < f32::EPSILON);
     }
 
     #[test]
