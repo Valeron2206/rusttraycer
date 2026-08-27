@@ -549,9 +549,10 @@ pub fn chip_frame() -> egui::Frame {
 }
 
 pub fn header_frame() -> egui::Frame {
-    // Tab-strip field is page-wash; the active tab paints BG_HEADER on top.
+    // White header plate with a 1 px hairline under the 40 px bar (spec §2.1 / §2.3).
+    // Inactive tabs still paint BG_TAB_INACTIVE on top of this plate.
     egui::Frame::new()
-        .fill(BG_TAB_INACTIVE)
+        .fill(BG_HEADER)
         .inner_margin(Margin::symmetric(SPACE_8 as i8, 0))
         .stroke(Stroke::new(1.0, HAIRLINE_HEADER))
 }
@@ -798,6 +799,16 @@ mod tests {
         assert!((CHROME_TABS - 37.0).abs() < f32::EPSILON);
         assert!((AVATAR_DISC - 20.0).abs() < f32::EPSILON);
         assert!((AVATAR_DISC_W - 19.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn header_frame_is_white_plate_with_hairline() {
+        let frame = header_frame();
+        assert_eq!(frame.fill, BG_HEADER);
+        assert_eq!(color_hex(frame.fill), "#FFFFFF");
+        assert_eq!(frame.stroke.color, HAIRLINE_HEADER);
+        assert_eq!(color_hex(frame.stroke.color), "#DFE9E7");
+        assert!((frame.stroke.width - 1.0).abs() < f32::EPSILON);
     }
 
     #[test]

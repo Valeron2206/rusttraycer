@@ -75,6 +75,7 @@ pub fn show_body(ui: &mut egui::Ui, state: &mut AppState) {
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| unavailable.to_string());
 
+    field(ui, "status", state.host_status.label_ru());
     field(ui, "hostId", &host_id);
     field(ui, "hostVersion", &host_version);
     field(ui, "pid", &pid);

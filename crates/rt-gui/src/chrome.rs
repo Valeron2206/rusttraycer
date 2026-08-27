@@ -1,6 +1,6 @@
 use crate::ladder::YOLO_BANNER;
 use crate::metrics::METRICS_LABEL;
-use crate::state::{AppState, HostStatus, Screen};
+use crate::state::{AppState, Screen};
 use crate::theme::{self, Icon};
 
 pub const TAB_START_PAGE: &str = "Start Page";
@@ -40,12 +40,10 @@ pub fn show(ctx: &egui::Context, state: &mut AppState) {
                 let metrics = state.metrics_chip_value();
                 let initials = avatar_initials(state);
                 let demo = state.demo;
-                let host_status = state.host_status;
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.add_space(theme::SPACE_8);
                     avatar_disc(ui, &initials);
-                    status_pill(ui, host_status);
                     let _ = chrome_icon_button(ui, Icon::Bell, true, "Notifications");
                     if chrome_icon_button(ui, Icon::History, true, "History") {
                         state.screen = Screen::Tasks;
@@ -256,43 +254,6 @@ fn utility_cluster(ui: &mut egui::Ui, metrics: &str) {
         });
 }
 
-fn status_pill_colors(status: HostStatus) -> (egui::Color32, egui::Color32, egui::Color32) {
-    match status {
-        HostStatus::Connecting | HostStatus::Online => (
-            theme::FG_SECONDARY,
-            theme::CHIP_KEYBINDING,
-            theme::FG_PRIMARY,
-        ),
-        HostStatus::Offline => (
-            theme::BANNER_OFFLINE_FG,
-            theme::BANNER_OFFLINE_FILL,
-            theme::BANNER_OFFLINE_FG,
-        ),
-    }
-}
-
-fn status_pill(ui: &mut egui::Ui, status: HostStatus) {
-    let (dot, bg, fg) = status_pill_colors(status);
-    egui::Frame::new()
-        .fill(bg)
-        .corner_radius(theme::RADIUS_NAV)
-        .inner_margin(egui::Margin::symmetric(
-            theme::SPACE_8 as i8,
-            theme::SPACE_4 as i8,
-        ))
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                let (rect, _) = ui.allocate_exact_size(
-                    egui::vec2(theme::SPACE_8, theme::SPACE_8),
-                    egui::Sense::hover(),
-                );
-                ui.painter()
-                    .circle_filled(rect.center(), theme::SPACE_4, dot);
-                ui.colored_label(fg, status.label_ru());
-            });
-        });
-}
-
 fn avatar_disc(ui: &mut egui::Ui, initials: &str) {
     let size = egui::vec2(theme::AVATAR_DISC_W, theme::AVATAR_DISC);
     let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
@@ -381,22 +342,33 @@ mod tests {
     }
 
     #[test]
-    fn status_pill_online_is_not_accent() {
-        let (dot, bg, fg) = status_pill_colors(HostStatus::Online);
-        assert_ne!(dot, theme::ACCENT);
-        assert_ne!(bg, theme::ACCENT);
-        assert_ne!(fg, theme::ACCENT);
-        assert_eq!(dot, theme::FG_SECONDARY);
-        assert_eq!(bg, theme::CHIP_KEYBINDING);
-        assert_eq!(fg, theme::FG_PRIMARY);
-        let (c_dot, c_bg, c_fg) = status_pill_colors(HostStatus::Connecting);
-        assert_ne!(c_dot, theme::ACCENT);
-        assert_ne!(c_bg, theme::ACCENT);
-        assert_ne!(c_fg, theme::ACCENT);
-        let (_, off_bg, off_fg) = status_pill_colors(HostStatus::Offline);
-        assert_eq!(off_bg, theme::BANNER_OFFLINE_FILL);
-        assert_eq!(off_fg, theme::BANNER_OFFLINE_FG);
-        assert_ne!(off_bg, theme::ACCENT);
+    fn chrome_has_no_online_status_pill() {
+        let src = include_str!("chrome.rs");
+        let prod = match src.split("#[cfg(test)]").next() {
+            Some(part) => part,
+            None => src,
+        };
+        assert!(!prod.contains("status_pill"));
+        assert!(!prod.contains("status_pill_colors"));
+        assert!(!prod.contains("HostStatus"));
+        assert!(!prod.contains("онлайн"));
+        assert!(!prod.contains("подключение"));
+        assert!(!prod.contains("офлайн"));
+        assert!(prod.contains("avatar_disc"));
+        let host_src = include_str!("screens/host.rs");
+        assert!(host_src.contains("host_status.label_ru()"));
+        assert_eq!(crate::state::HostStatus::Online.label_ru(), "онлайн");
+        assert_eq!(
+            crate::state::HostStatus::Connecting.label_ru(),
+            "подключение"
+        );
+        assert_eq!(crate::state::HostStatus::Offline.label_ru(), "офлайн");
+        assert_eq!(theme::header_frame().fill, theme::BG_HEADER);
+        assert_eq!(theme::color_hex(theme::header_frame().fill), "#FFFFFF");
+        assert_eq!(
+            theme::color_hex(theme::header_frame().stroke.color),
+            "#DFE9E7"
+        );
     }
 
     #[test]
