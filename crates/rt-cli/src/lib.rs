@@ -21,7 +21,7 @@ pub use sync::{
     METHOD_SYNC_PULL, METHOD_SYNC_PUSH, SYNC_SECRET_ENV, SYNC_SECRET_HEADER,
 };
 
-pub const PROTOCOL_CRATE: &str = "2.1.2";
+pub const PROTOCOL_CRATE: &str = "2.2.0";
 const SESSION_HEADER: &str = "X-Rt-Session";
 const STOP_WAIT: Duration = Duration::from_secs(2);
 
