@@ -9,7 +9,7 @@ pub const TAB_NEW: &str = "+";
 pub const AVATAR_FALLBACK: &str = "RT";
 
 pub fn show(ctx: &egui::Context, state: &mut AppState) {
-    egui::TopBottomPanel::top("chrome_nav")
+    let nav = egui::TopBottomPanel::top("chrome_nav")
         .exact_height(theme::CHROME_NAV_HEIGHT)
         .frame(theme::header_frame())
         .show(ctx, |ui| {
@@ -58,6 +58,9 @@ pub fn show(ctx: &egui::Context, state: &mut AppState) {
                 });
             });
         });
+    // 1 px HAIRLINE_HEADER on the last pixel of the 40 px plate (y ≈ 39),
+    // not a Frame stroke (that painted y=0 / the window join).
+    theme::paint_header_seam(&ctx.layer_painter(nav.response.layer_id), nav.response.rect);
 
     if state.is_offline() {
         egui::TopBottomPanel::top("offline_banner").show(ctx, |ui| {
@@ -365,10 +368,17 @@ mod tests {
         assert_eq!(crate::state::HostStatus::Offline.label_ru(), "офлайн");
         assert_eq!(theme::header_frame().fill, theme::BG_HEADER);
         assert_eq!(theme::color_hex(theme::header_frame().fill), "#FFFFFF");
-        assert_eq!(
-            theme::color_hex(theme::header_frame().stroke.color),
-            "#DFE9E7"
+        assert!(theme::header_frame().stroke.width < f32::EPSILON);
+        assert!(prod.contains("paint_header_seam"));
+        let header = egui::Rect::from_min_size(
+            egui::pos2(0.0, 0.0),
+            egui::vec2(1280.0, theme::CHROME_NAV_HEIGHT),
         );
+        let seam = theme::header_seam_rect(header);
+        assert_eq!(theme::color_hex(theme::HAIRLINE_HEADER), "#DFE9E7");
+        assert!((seam.top() - (theme::CHROME_NAV_HEIGHT - 1.0)).abs() < f32::EPSILON);
+        assert!(seam.top() > 0.0);
+        assert!((seam.height() - 1.0).abs() < f32::EPSILON);
     }
 
     #[test]
