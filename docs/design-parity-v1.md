@@ -2,8 +2,8 @@
 
 For: UI (`rt-gui`, eframe + egui).
 From: Architect. Date: 2026-08-21. Not code. No crate bump.
-Base: STAR 0126 pin + STAR 0128 logged-in frames in `docs/reference-env.md` (Traycer Desktop `desktop-v1.1.10`).
-Status: visual-parity contract, second pass. Tokens pipetted from a live frame are law for those surfaces. Tokens that exist only as public-docs IA are **not** law for hex. Acts 01–03 (tasks / layout / handoff) were not on screen after login — those rows stay **needs live**.
+Base: STAR 0126 pin + STAR 0128 logged-in frames + STAR 0134 Start Page / History empty in `docs/reference-env.md` (Traycer Desktop `desktop-v1.1.10`).
+Status: visual-parity contract, Start Page contents and History empty now live. Tokens pipetted from a live frame are law for those surfaces. Tokens that exist only as public-docs IA are **not** law for hex. Chat transcript, ladder, and Acts 01–03 (tasks / layout / handoff) were not on screen — those rows stay **needs live**.
 
 This file does not replace `docs/gui-ia-v0.md` (screens, RPC, empty states) or `docs/e1-canvas-v2.md` / `docs/e2-ladder-v2.md` (behavior). It tells `rt-gui` what the official Desktop *looks like*, what to implement in egui, and which mismatches are accepted engine limits rather than bugs.
 
@@ -15,7 +15,7 @@ This file does not replace `docs/gui-ia-v0.md` (screens, RPC, empty states) or `
 - Screenshots of the running window are *our* files and may live under `docs/reference-screens/`. The AppImage binary stays out of git (see `docs/reference-env.md`).
 - Do **not** vendor Traycer fonts. Recommendation only: an Inter-class geometric sans under the SIL Open Font License (for example [Inter](https://github.com/rsms/inter)). The live Appearance page names **Figtree** as the default UI face — that is a *product setting we observed*, not a license to vendor Figtree from the AppImage. Recommendation only for icons: [Lucide](https://lucide.dev) (ISC). Neither is a brand clone.
 - Do not reproduce the official Traycer mark. RustTraycer keeps its own wordmark (`chrome.rs` already says "RustTraycer").
-- Public pages on https://docs.traycer.ai were fetched as a **fallback** for surfaces still not captured live (Home / History, chat transcript, ladder card, Acts 01–03). They are documentation, not live captures. This spec does **not** claim they are screenshots of Desktop 1.1.10.
+- Public pages on https://docs.traycer.ai were fetched as a **fallback** for surfaces still not captured live (chat transcript, ladder card, History *rows*, Acts 01–03). Start Page *contents* and History *empty* are live (**SP** / **HY**). Fallback pages are documentation, not live captures. This spec does **not** claim they are screenshots of Desktop 1.1.10.
 
 ---
 
@@ -49,15 +49,22 @@ Two sessions, same pinned build `desktop-v1.1.10`. Method and sha256: `docs/refe
 | **A** | [`docs/reference-screens/logged-in-act06-appearance.png`](reference-screens/logged-in-act06-appearance.png) | 1280×800 RGB | Settings → Appearance. Theme System + preset **Traycer Green**. UI font **Figtree (Default)**, size **15 px**. |
 | **K** | [`docs/reference-screens/logged-in-act06-keybindings.png`](reference-screens/logged-in-act06-keybindings.png) | 1280×800 RGB | Settings → Keybindings. Ctrl+1–9 / Ctrl+N / tab shortcuts. Cmd+K is not in the first screenful. |
 
+**Logged-in Start Page + History (STAR 0134).** Same `:3` session as 0128 (HOME `/workspace/ref-traycer/home-d3`, avatar **ZA**). Method and sha256: `docs/reference-env.md` — `ffmpeg -f x11grab -video_size 1280x800 -i :3 -frames:v 1` plus a precise Start Page tab click at framebuffer `(240, 70)`, then the header clock for History. Taken 2026-08-21 ~11:00 YEKT / 06:00 UTC. Full-desktop 1280×800; XFWM 24 px above the client (same convention as **S**).
+
+| ID | Path | Pixels | What it is |
+|---|---|---|---|
+| **SP** | [`docs/reference-screens/logged-in-start-page.png`](reference-screens/logged-in-start-page.png) | 1280×800 RGB | Official Start Page *page* (Start Page tab active, Settings tab inactive). Greeting "Good morning" / "What's on your mind?"; composer "Ask Traycer anything. @ mention for context"; update banner; Most recent / Filter / Select over an empty list. ZA. |
+| **HY** | [`docs/reference-screens/logged-in-history.png`](reference-screens/logged-in-history.png) | 1280×800 RGB | History modal after the header clock. Title History; focused search "Search by title, repo, branch, or PR"; Most recent / Filter / Select / Refresh; empty state **"No tasks yet"**. Start Page dimmed behind a scrim. Pop-out + close. |
+
 Do not add new screenshots in this change. Do not treat XFWM / Plank / GTK menu chrome as Traycer product tokens — they are host-desktop chrome that happens to surround the official window. Plank icon colors (Chrome green `#229342`, dock shelf `#263742`) are **not** product.
 
-Acts 01–03 of the intro (tasks/sidebar/agents/artifacts, layout/split/terminal, handoff/bubbles) are **not** in this set. File → Settings does not replay them. Those rows stay **needs live**.
+Acts 01–03 of the intro (tasks/sidebar/agents/artifacts, layout/split/terminal, handoff/bubbles) are **not** in this set. File → Settings does not replay them. A Task chat transcript and a ladder / Epic card were not on screen (**HY** is empty; File → Open Epic showed "No Epics yet" and that picker was not committed). Those rows stay **needs live**.
 
 ### 1.2 Fallback — docs.traycer.ai (IA only, not live)
 
 Fetched 2026-08-21. HTML of the docs site was scraped for `<img>` / `og:image` / mintcdn product shots. Result: **no product screenshots**. The only raster images are Font Awesome icons and Mintlify-generated OG cards (`backgroundDark=#0e0e10`, `primaryColor=#454545`). Those are *docs-site* tokens. They are **not** Desktop tokens and were not pipetted into §2.
 
-Fallback pages still used for *structure* of surfaces we have not captured live (Home / History, chat, ladder, panel stack):
+Fallback pages still used for *structure* of surfaces we have not captured live (chat transcript, ladder, History *rows*, panel stack). Start Page *page* and History empty are live (**SP** / **HY**):
 
 - https://docs.traycer.ai — mental model (Task, agents, panels, artifacts)
 - https://docs.traycer.ai/quickstart — first-run: folder → Task → agent → inspect
@@ -113,16 +120,16 @@ The floor glow is a **grainy, noisy teal wash**, not a CSS linear-gradient. A 5�
 
 No hairline border was measured on the welcome canvas. Left/right mid samples **W** `(20, 360)` and `(1260, 360)` are `#000000`. No card, no sidebar, no splitter on this frame.
 
-#### Signed-in light chrome (frames **SG** / **S** / **HT** / **A** / **P** / **AG** / **K** / **HE**)
+#### Signed-in light chrome (frames **SG** / **S** / **HT** / **A** / **P** / **AG** / **K** / **HE** / **SP** / **HY**)
 
 The logged-in product is a **light** theme (Appearance → Theme = System on this machine). Surfaces are cool off-whites, not the welcome black and not mint `#0e0e10`.
 
 | Token | Hex | Sample | Notes |
 |---|---|---|---|
-| `bg.page` | `#F6F9F8` | **SG** `(20, 150)`; **S** `(20, 200)`; **HE** `(20, 200)` (737 943 px on **HE**) | Signed-in wash: settings sidebar, page margins, host-error canvas behind the modal, header/body field under the tabs. Cool gray-green, not `#FFFFFF` and not `#F6F5F4` (that is the GTK menu). Dominant plateau on every logged-in settings frame. |
-| `bg.content` | `#F9FBFB` | **SG** `(400, 250)`; **A** `(400, 320)`; **K** `(400, 350)` | Settings main column / cards. 1-step lighter than `bg.page`. 344 724 px in the **A** content box. |
-| `bg.header` | `#FFFFFF` | **SG** `(80, 40)`; **HT** `(80, 40)`; **HA** `(80, 30)` | Tab strip and the right-hand toolbar that holds the avatar. Active Settings tab is this same white and joins the body with no second fill. |
-| `bg.tab.inactive` | `#F6F9F8` | **HT** `(400, 40)`; **SG** `(400, 40)` | Start Page tab fill. Same hex as `bg.page` — the inactive tab is the page wash showing through, not a third surface. |
+| `bg.page` | `#F6F9F8` | **SG** `(20, 150)`; **S** `(20, 200)`; **HE** `(20, 200)` (737 943 px on **HE**); **SP** `(640, 200)` (743 613 px on **SP**); **HY** modal `(640, 400)` | Signed-in wash: settings sidebar, page margins, host-error canvas behind the modal, Start Page field, History modal body. Cool gray-green, not `#FFFFFF` and not `#F6F5F4` (that is the GTK menu). Dominant plateau on every logged-in light frame. |
+| `bg.content` | `#F9FBFB` | **SG** `(400, 250)`; **A** `(400, 320)`; **K** `(400, 350)` | Settings main column / cards. 1-step lighter than `bg.page`. 344 724 px in the **A** content box. Not the Start Page composer (that is `surface.composer` `#F3F5F4` on **SP**). |
+| `bg.header` | `#FFFFFF` | **SG** `(80, 40)`; **HT** `(80, 40)`; **HA** `(80, 30)`; **SP** `(100, 70)` | Tab strip and the right-hand toolbar that holds the avatar. Active tab (Settings on **SG**, Start Page on **SP**) is this same white. |
+| `bg.tab.inactive` | `#F6F9F8` | **HT** `(400, 40)`; **SG** `(400, 40)`; **SP** Settings tab `(220, 70)` | Inactive tab fill. Same hex as `bg.page` — the inactive tab is the page wash showing through, not a third surface. On **SP** the *Settings* tab is inactive; on **SG** / **HT** the *Start Page* tab is inactive. |
 | `bg.nav.selected` | `#EAEAEA` | **SG** `(80, 90)` (4 850 px on **SS**); **SS** `(80, 10)` | Selected settings-nav pill (General / Appearance / Providers / …). Also the keybinding chip fill (**K**) and the avatar disc (**HA**). One hex, three roles. |
 | `fg.primary` | `#0F0F0F` | **SG** `(360, 115)` heading "General"; **SG** `(350, 240)` row title; **A** `(360, 140)` "Appearance" | Near-black. Heading plateau and settings row titles. Not `#000000` and not `#050505` (that is welcome CTA type). |
 | `fg.secondary` | `#666666` | **SG** `(400, 180)` page subtitle / descriptions; **HE** modal body (695 px in the card); **K** chip glyphs | Muted gray. AA neighbors `#696969`, `#7E7E7E`. |
@@ -170,6 +177,43 @@ These fills are **clouds**, not plateaus. Cite as atmosphere.
 
 Footer version "v1.1.10" sits on the same dark cloud (`#0B1513` at **OA** `y=720…748`). Do not treat Plank / XFWM pixels on **OA** as product.
 
+#### Start Page (frame **SP**)
+
+Same light chrome as Settings. New tokens are the update banner, the composer plate, and a few type colors that sit on those plates. Greeting / subtitle reuse `fg.primary` / `fg.secondary`.
+
+| Token | Hex | Sample | Notes |
+|---|---|---|---|
+| `banner.update` | `#DDF0F6` | **SP** `(640, 120)` (24 126 px on the full frame; 15 197 / 16 320 = 93.1% of crop `(320, 104)–(830, 136)`) | Update-installed strip under the tab seam. Cool ice-blue, not Traycer Green. This machine's session showed "Update installed — restart host to finish." — a live *state*, not permanent chrome. |
+| `banner.update.edge` | `#9ADAF5` | **SP** `(640, 100)`; also `(640, 142)` | 1 px top and bottom of the banner (`y=100` and `y=142`). Mid-row fill is `banner.update`; the edge is one step brighter. |
+| `fg.banner` | `#052F4A` | **SP** `(433, 120)` (91 px at this exact hex in `(317, 118)–(563, 126)`) | Banner body type. Dark teal, **not** `fg.primary` `#0F0F0F`. AA neighbors `#08324C`, `#0B354F`, `#06304B`. |
+| `fg.on-accent` | `#FFFFFF` | **SP** `(853, 120)` (62 px in `(853, 115)–(922, 124)`) | "Restart host" glyph on the `#257174` button. Sparse; AA into the teal. |
+| `surface.composer` | `#F3F5F4` | **SP** `(640, 500)` (59 643 px; box `(303, 474)–(975, 567)`) | Composer plate. Cooler and one step darker than `bg.page`, not `bg.content` `#F9FBFB` and not `#FFFFFF`. |
+| `hairline.composer` | `#B4CDCD` | **SP** `(302, 500)`; `(976, 500)`; `(640, 473)`; `(640, 568)` (1 484 px) | 1 px outline around the composer. Teal-gray, not `hairline.control` `#DCE7E4`. |
+| `surface.send` | `#EEEFEE` | **SP** `(950, 540)` (513 px; disc `(938, 530)–(964, 557)`) | Send circle on the composer. Ghost — almost the plate, not `accent.traycer-green`. Circular footprint. |
+| `fg.placeholder` | `#9E9F9F` (dominant) | **SP** `(317, 494)` (148 px); bbox `(317, 494)–(613, 507)` | "Ask Traycer anything. @ mention for context". **AA cloud**, not a plateau. Neighbors `#A1A2A1` (40), `#B9BAB9` (40), `#B5B6B6` (38), `#A5A6A5` (36). Do not flatten to one hex. |
+
+Restart host is `accent.traycer-green` `#257174` — same hex as the Settings ON toggle: **SP** `(860, 120)`, box `(842, 109)–(932, 133)` (1 848 px). AA rim `#3E8184`, `#84AFB1`, `#699D9F`. No new accent.
+
+"Switch to Terminal" above the composer and "cursor" / "Add folder" below it are **AA clouds** on `bg.page`. A few `#666666` pixels sit in the switch (**SP** `(374, 448)`, 12 px) and the folder cluster is a gray mist (`#909191` 38 px in `(309, 587)–(548, 598)`). Composition only — do not law a new muted hex.
+
+Most recent / Filter / Select on the empty list: `#666666` 101 px at **SP** `(682, 655)` in `(682, 655)–(840, 666)` (broader dark cloud to `(961, 667)`). Same `fg.secondary`. No row cards — the list under the composer is empty `bg.page`.
+
+#### History empty (frame **HY**)
+
+The modal is **not** the host-error white card. Body is `bg.page` `#F6F9F8`. Header bar is `bg.nav.selected` `#EAEAEA`. Title and empty copy sit on `fg.primary`. Search is focused on this frame (teal ring).
+
+| Token | Hex | Sample | Notes |
+|---|---|---|---|
+| `history.header` | `#EAEAEA` | **HY** `(640, 140)` (full rows `y=129…160` at `x=128…1151`, 1 024 px each) | Modal title bar. Same hex as selected-nav / keybinding chip / avatar disc. |
+| `history.header-seam` | `#E4E9E7` then `#F0F4F2` | **HY** full row `y=161` `#E4E9E7` (1 024 px); `y=162` `#F0F4F2` (1 024 px) | Two 1 px blends under the header before `bg.page`. Not `hairline.header` `#DFE9E7`. Do not collapse them into one token. |
+| `history.search.ring` | `#8EB5B6` (dominant) | **HY** `(640, 184)` (2 790 px); bbox `(307, 183)–(972, 217)` | Focused search outline. **Cloud**, not a 1 px CSS stroke: `#A7C5C6` at `y=182`, `#4A898B` at `y=185`, `#CBDDDD` at `y=186`, `#4F8D8F` at `y=214`, `#8CB3B5` at `y=215`, `#DBE7E7` at `y=218`. Inner sides also punch 36 px of `accent.traycer-green` `#257174` at **HY** `(310, 191)` and `(969, 191)` — AA of the same ring, not a caret fill. |
+| `history.edge` | `#919291` | **HY** `(127, 400)`; `(1152, 400)` | 1 px immediately outside the `#F6F9F8` body. Neighbors fade into the scrim (`#9FA1A0`, `#A0A2A1`). |
+| `history.scrim` | `#ACAEAD` (dominant) | **HY** `(20, 400)` (33 200 / 48 000 = 69.2% of a 120×400 side strip) | Dim overlay over Start Page. **Cloud**: `#ABADAC`, `#A9ABAA`, `#AAACAB`, `#A7A9A8`. Over the white tab strip **HY** `(640, 70)` is `#B2B2B2` (SP was `#FFFFFF`); over the banner **HY** `(640, 110)` is `#98A5AA` (SP was `#DDF0F6`). Not a flat hex. Same class as `onboarding.scrim`. |
+
+Search field *interior* is `bg.page` `#F6F9F8` (**HY** `(640, 200)`). Placeholder / magnifier glyphs: `#666666` 79 px in `(320, 194)–(539, 206)` plus AA (`#696969` 34, `#9FA1A0` 24). Toolbar "Most recent / Filter / Select": `#666666` 111 px at **HY** `(682, 233)` in `(682, 233)–(962, 245)`. Empty **"No tasks yet"**: **AA cloud** at **HY** `(605, 323)–(675, 335)` — only 40 px are exact `#0F0F0F`; neighbors `#131313` (13), `#3C3C3C` (8), `#3D3E3E` (7). Cite `fg.primary` as the intended face; do not invent a third gray.
+
+Close / pop-out on the header right are an AA dark cluster at **HY** `(1087, 135)–(1127, 146)` (`#464646` 12, `#0F0F0F` 10, `#171717` 10). Placement live; no isolated icon-fill token.
+
 #### Native host chrome (frames **W** / **D** / logged-in full-desktop — do not copy into `rt-gui`)
 
 These are the Linux window manager and Electron menu, not Traycer widgets.
@@ -189,9 +233,9 @@ These are the Linux window manager and Electron menu, not Traycer widgets.
 | Token | Why missing | Until |
 |---|---|---|
 | Chat bubble user vs assistant fills | Acts 01–03 / a Task transcript were not captured | **needs live** (Acts 01–03) |
-| Composer, mention hover, context chip, permission chip | Same | **needs live** (Acts 01–03) |
-| Task / History / Start Page *page* (the Start Page *tab* is live) | Start Page tab click did not leave Settings | **needs live** |
-| Canvas sidebar / panel stack / agent row in a Task | Behind onboarding + Settings | **needs live** (Acts 01–03) |
+| Task-thread composer, mention hover, context chip, permission chip | Start Page composer (empty) is live **SP**; a Task thread was not | **needs live** (Acts 01–03) for the Task thread |
+| History *rows* / loading / no-match | **HY** is the empty modal only | **needs live** (populated list) |
+| Canvas sidebar / panel stack / agent row in a Task | Behind onboarding + Settings; not on **SP** / **HY** | **needs live** (Acts 01–03) |
 | Status: ticket/story Todo / In Progress / Done | **fallback docs.traycer.ai** `/panels/artifacts` names the three values only | **needs live** |
 | Light-theme *welcome* (signed-out is dark) | Landing is dark | Dark welcome remains law for the gate |
 | Dedicated light *vs* dark Appearance preview of the whole app | **A** shows System + the picker; we did not flip to Light or Dark | **needs live** for a forced-light / forced-dark chrome pass |
@@ -222,6 +266,11 @@ Appearance docs (**fallback docs.traycer.ai** `/settings/appearance`, now also *
 | Keybinding chip | **K** `#666666` / `#848484` inside `#EAEAEA` chips. | **12–13 px Regular**. | **K** chip cluster | Slightly smaller than the command label. |
 | Native menu labels | Cap ~10–11 px, **W** / **SG** `y=7…17` | System UI. Ignore for product type. | `#2E3436` | Not a product token. |
 | Avatar initials "ZA" | **HA** disc `(1246, 36)–(1264, 55)`; glyph plateau `#666666` (14 px). AA `#696969`, `#747474`, `#A0A0A0`. | **10–12 px Semibold** on a 19×20 disc. | **HA** `(1255, 46)` `#666666` | Small. |
+| Start Page greeting "Good morning" | **SP** `#0F0F0F` bbox `(519, 342)–(757, 374)` = **239×33** (1 318 px at the exact hex). | **28–32 px, weight 600–700**. Advance ≈ 239 / 12 glyphs ≈ 20 px — same class as the welcome display, on `fg.primary` not white. | **SP** `(640, 352)` `#0F0F0F` | Raster inference. Say **~30 px Semibold**. AA neighbors `#171717`, `#141414`, `#121212`. |
+| Start Page subtitle "What's on your mind?" | **SP** mid-gray bbox `(566, 390)–(711, 403)` = **146×14**. 201 px `#666666`. | **13–15 px Regular**. | **SP** `(640, 400)` `#666666` | Same as settings description. AA `#696969`, `#6C6C6C`, `#6D6D6D`. |
+| Banner body / Restart label | **SP** `#052F4A` `y=118…126`; Restart `#FFFFFF` `y=115…124` on `#257174`. | **13–15 px Regular / Medium**. | **SP** `(433, 120)` `#052F4A`; `(853, 120)` `#FFFFFF` | Small plateaus (91 / 62 px). |
+| History title | **HY** `#0F0F0F` `(167, 134)–(213, 147)` (72 px at the exact hex). | **15 px Medium / Semibold** — settings-row class, not the Start Page greeting. | **HY** `(167, 140)` `#0F0F0F` | On `history.header` `#EAEAEA`. |
+| History empty "No tasks yet" | **HY** AA cloud `(605, 323)–(675, 335)`. 40 px `#0F0F0F`. | **15 px Regular / Medium**. | **HY** `(605, 323)` `#0F0F0F` | Honest AA. Do not treat 40 px as a heading plateau. |
 | Body / chat / chips in a Task | — | Unknown. | — | **needs live** (Acts 01–03). Until then: 15 px Regular UI (now measured), 12 px mono for code/PTY, 12 px Regular for secondary. Mark chat uses as assumed. |
 
 Line-height was not a CSS property we could read. Measured welcome heading em-box including AA is 37 px on a ~30 px face → line-height ≈ 1.2. Settings titles sit tighter. Use 1.2–1.35 for body once a live transcript exists.
@@ -253,6 +302,12 @@ Measured on **W**, client origin `(0, 0)` = top-left of the 1280×719 window (me
 | `theme.swatch` | **20×21 px** | **A** `#1A2421` `(1032, 336)–(1051, 356)`. |
 | `modal.host-error` | **420×226**, radius 8–10 | **HE** `(430, 301)–(849, 526)`. |
 | `onboarding.modal` | ~677 px wide | **OA** `x=464…1140`. |
+| `banner.update` | **673×43**, radius ~5–6 | **SP** fill `#DDF0F6` `x=303…975`, `y=101…141`; edge `#9ADAF5` at `y=100` / `y=142`. Top row `y=100`: `x=308…970` (inset 5). Same width as the composer. |
+| `banner.restart` | **91×25**, radius ~3 | **SP** `#257174` `(842, 109)–(932, 133)`. Top row `y=109`: `x=845…929` (inset 3 L / 3 R). Then 1, 0. |
+| `composer.box` | **673×94**, radius ~6 | **SP** `#F3F5F4` `(303, 474)–(975, 567)`. Top row `y=474`: `x=309…969` (inset 6). Bottom `y=567`: inset 6. |
+| `composer.send` | **~27×28** disc | **SP** `#EEEFEE` `(938, 530)–(964, 557)`. Circular (1–2 px at the poles, 26 at the equator). |
+| `history.modal` | **1024×553**, radius ~8 | **HY** `(128, 121)–(1151, 673)`. Header `#EAEAEA` `y=121…160` (40 px). Body `#F6F9F8` `y=163…664`. Top row `y=121`: fill `x=134…1145` (inset 6). Bottom `y=673`: `x=135…1144` (inset 7). Same 8–10 class as `modal.host-error`. |
+| `history.search` | **~666×35**, radius ~4–6 | **HY** ring bbox `(307, 183)–(972, 217)`. Interior `#F6F9F8`. |
 
 Inferred spacing scale for the rest of the app (now with a second surface — still a ladder, not law for every gap):
 
@@ -263,7 +318,7 @@ Inferred spacing scale for the rest of the app (now with a second surface — st
 - 8 / 12 = typical egui inner margin (current chrome already uses 8–12).
 - 16 / 24 / 32 / 48 = page title pad (`x=307`) and the measured inter-block gaps (30 and 44 sit between 24–32 and 32–48). Toggle pitch 76 is 48+32.
 
-**Do not** invent a Task sidebar width or a composer height. Those **need live** (Acts 01–03). Settings nav width 240 is law for *Settings*, not automatically for the Task Agents list.
+**Do not** invent a Task sidebar width or a Task-thread composer height. Those **need live** (Acts 01–03). Settings nav width 240 is law for *Settings*, not automatically for the Task Agents list. The Start Page composer height 94 and History modal 1024×553 are law for *those* surfaces only.
 
 ### 2.4 Motion and material (from what the frame can prove)
 
@@ -274,7 +329,8 @@ Inferred spacing scale for the rest of the app (now with a second surface — st
 | CTA welcome | Static default. Hover/focus/active/disabled not captured | Default = `surface.cta` + `fg.on-cta`. Hover/focus **needs live**; until then, 8–12% lighter fill on hover and a 1 px `#F8F7F2` focus ring on a dark field. Mark as assumed. |
 | Continue on **OA** | Hover captured (hand cursor); fill `#DEDFDF` | Default vs hover were not both captured. Do not treat `#DEDFDF` as the welcome cream. |
 | Toggle | ON / OFF both live | ON = `accent.traycer-green` + `toggle.knob`. OFF = `toggle.off.track` + `toggle.knob`. |
-| Animation | None on a still frame | No entrance animation required for welcome or settings parity. |
+| Animation | None on a still frame | No entrance animation required for welcome, settings, Start Page, or History parity. |
+| History scrim (**HY**) | Dim cloud `#ACAEAD` over Start Page | Flat translucent gray, or omit. Same accepted limit as item 2 in §4 — not a new deviation. |
 
 ---
 
@@ -305,15 +361,15 @@ Empty / error / loading of sign-in were not captured. Changelog says a failed si
 | Title / window controls | **D** / **S** is XFWM, not product | eframe native decorations. Do not fake traffic lights | n/a |
 | Native File/Edit/View/Window/Help | **HT** / **HA** / **SG** `#F6F5F4` | Not an egui widget | **live**, not product |
 | Back / forward + home/layers | **HT** left of the tabs | Small icon buttons. Inactive arrows read light gray | **live HT** for placement; hover **needs live** |
-| Start Page tab | **HT** / **SG** inactive, `#F6F9F8`, stacked-diamond icon + "Start Page" | `egui::ScrollArea` horizontal + selectable label | default **live**. The Start Page *contents* **needs live** (click did not leave Settings). |
-| Settings tab | **HT** / **SG** active, `#FFFFFF`, gear + "Settings" + close × | Same tab strip. Active tab is white and joins `bg.page` under `hairline.header` | selected **live** |
-| `+` new tab | **HT** to the right of Settings | Small `Button` | default **live** |
-| Utility cluster (gauge, overflow, gear, history, bell) | **HT** / **SG** right side | Icon row. Lucide-class stand-ins | placement **live**; tooltips **needs live** |
-| Avatar | **HA** `(1246, 36)–(1264, 55)` `#EAEAEA` disc, initials `#666666` | Circle `32` logical? No — **19×20 px** on this 1280 frame. Initials, not a photo. | default **live**. Menu **needs live** |
+| Start Page tab | **SP** active `#FFFFFF` `(100, 70)`; **HT** / **SG** inactive `#F6F9F8` | `egui::ScrollArea` horizontal + selectable label | active **live SP**; inactive **live HT/SG**. Contents: §3.13 **live SP**. |
+| Settings tab | **HT** / **SG** active `#FFFFFF`; **SP** inactive `#F6F9F8` `(220, 70)`, gear + "Settings" + close × | Same tab strip. Active tab is white and joins `bg.page` under `hairline.header` | selected **live SG**; inactive **live SP** |
+| `+` new tab | **HT** / **SP** to the right of the tabs | Small `Button` | default **live** |
+| Utility cluster (gauge, overflow, gear, history, bell) | **HT** / **SG** / **SP** right side. Clock opens **HY**. | Icon row. Lucide-class stand-ins | placement **live**; tooltips **needs live** |
+| Avatar | **HA** `(1246, 36)–(1264, 55)` `#EAEAEA` disc, initials `#666666`; **SP** `(1255, 70)` `#EAEAEA` / `(1260, 70)` `#666666` | Circle `32` logical? No — **19×20 px** on this 1280 frame. Initials, not a photo. | default **live**. Menu **needs live** |
 | Task tabs (outer) beyond Start Page / Settings | **fallback** `/concepts/tasks-and-workspace-folders` | Today: `chrome.rs` `TopBottomPanel` 40 px with Tasks / Canvas / Host. Target: the live tab strip (white active, page-wash inactive, 37 px), not three nav buttons forever | overflow / drag **needs live** |
 | Canvas tabs / tiles (inner) | **fallback** + changelog split | `screens/canvas.rs` panes. Divider = `egui::Resize` / split. Drag-to-edge tiling is C63 (later) | **needs live (Acts 01–03)** |
-| History | **fallback** `/concepts/history` | `screens/tasks.rs` list | empty / loading / no-match. **needs live** |
-| Start / home (folder first) | **fallback** `/quickstart` | Tasks empty states already in `gui-ia-v0.md`. Visuals **needs live** | empty no-host / no-workspace / no-tasks |
+| History | **live HY** empty modal; **fallback** `/concepts/history` for *rows* | `screens/tasks.rs` list + `egui::Window` / card | empty **live HY**. loading / no-match / populated rows **needs live**. See §3.14. |
+| Start / home (folder first) | **live SP** | Tasks empty states already in `gui-ia-v0.md`. Start Page *page* is §3.13 | empty list **live SP**. no-host **live HE**. no-workspace **needs live** |
 
 ### 3.3 Settings shell (nav + pages)
 
@@ -401,8 +457,9 @@ Live. File → Settings opens the Settings tab; it does **not** replay onboardin
 |---|---|---|---|
 | Transcript | **fallback** changelog "redesigned message cards" | `ScrollArea::vertical` + per-message `Frame` | user / assistant / system / pending. **needs live (Acts 01–03)** |
 | Chat bubble | same | `egui::Frame` with 4–8 px rounding (4 is the welcome radius; 6–8 showed up on settings pills). Fill unknown | **needs live (Acts 01–03)** |
-| Composer | **fallback** `/panels/agents` | `TextEdit::multiline` pinned at the bottom of the canvas. Disabled when `agent.status == running` (IA law) | empty / focus / disabled / sending. **needs live (Acts 01–03)** |
-| Composer controls (model, permissions, thinking, fast, attach, voice, send/stop) | **fallback** `/panels/agents`; Voice is a *setting* on **SG** | Horizontal chip/button row above or below the field. Voice may stay later | hover / unavailable. **needs live (Acts 01–03)** |
+| Composer (Start Page, empty) | **live SP** | `TextEdit::multiline` in a 673×94 `#F3F5F4` plate, radius ~6, `#B4CDCD` 1 px outline. Placeholder AA `#9E9F9F` | empty **live SP**. This is the Start Page *input*, not a Task thread. |
+| Composer (Task thread) | **fallback** `/panels/agents` | Same primitive, pinned at the bottom of a Task canvas. Disabled when `agent.status == running` (IA law) | focus / disabled / sending / transcript. **needs live (Acts 01–03)** |
+| Composer controls (model, permissions, thinking, fast, attach, voice, send/stop) | **live SP** for placement on Start Page (Full access / GPT-5.6-Sol / High / mic / send `#EEEFEE`); Voice is also a *setting* on **SG** | Horizontal chip/button row on the composer plate. Labels `#666666` / `#0F0F0F` AA. Send is a ghost disc, not Traycer Green. | Start Page default **live SP**. Hover / unavailable / Task-thread **needs live (Acts 01–03)** |
 | Chips (interface filter All/Chat/Terminal; context usage; permission; Deprecated badge) | **fallback** agents + changelog | Small `Button`/`Frame` with 4–6 px radius, 12–15 px type | selected / muted. **needs live (Acts 01–03)** |
 | Mentions / hover card | **fallback** changelog | `Popup` / `Area` | **needs live** |
 
@@ -414,10 +471,11 @@ Live. File → Settings opens the Settings tab; it does **not** replay onboardin
 | Continue (onboarding, hover) | **live OA** | `Button` fill `#DEDFDF`, fg `#000000`, on dark canvas | hover **live**. default **needs live** |
 | Retry (host-error) | **live HE** | Ghost: fill `#F6F9F8`, fg `#0F0F0F`, halo `#DCE7E4` | default **live** |
 | Secondary / danger | not isolated | Ghost assumed 1 px `#DCE7E4` on `#F6F9F8` / `#F9FBFB` after login; welcome ghost remains assumed 1 px `#F8F7F2` at 20% on `#000000` | **needs live** for a dedicated ghost/danger frame |
-| Text input | **P** CLI args / **AG** editor | `TextEdit`. Focus ring not isolated. Editor current-line `#F1FAFF` | empty / focus / error. focus ring **needs live** |
+| Text input | **P** CLI args / **AG** editor; **HY** History search (focused) | `TextEdit`. Editor current-line `#F1FAFF`. History search focus ring is the `#8EB5B6` cloud in §2.1 | empty **live** as History placeholder. Focus ring **live HY** (cloud). Error **needs live** |
 | Scroll area | not isolated | `egui::ScrollArea`. Thumb color unknown | **needs live**. Physics: §4 |
 | Tooltip | not on any frame | `on_hover_text` / `egui::Tooltip` | **needs live** |
-| Context / overflow menu | **fallback** History "right-click menu" | `ui.menu_button` / `popup` | **needs live** |
+| Context / overflow menu | **fallback** History "right-click menu" | `ui.menu_button` / `popup` | **needs live** (no rows on **HY**) |
+| Restart host (banner) | **live SP** | `Button` fill `#257174`, fg `#FFFFFF`, 91×25, radius ~3 | default **live**. Hover **needs live** |
 
 ### 3.12 Ladder, dialogs, toasts
 
